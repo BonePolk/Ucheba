@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Alert, Badge, Button, Checkbox, Container, Group, Loader, Paper, Select, SimpleGrid, Stack, Table, Text, Title } from '@mantine/core';
+import { Alert, Badge, Button, Checkbox, Container, Group, Loader, Paper, SegmentedControl, Select, SimpleGrid, Stack, Table, Text, Title } from '@mantine/core';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { deleteTask, getTasks, saveTask } from './api';
 import dayjs from 'dayjs';
@@ -9,7 +9,7 @@ import TaskForm, { priorities, statuses } from './TaskForm';
 dayjs.extend(utc);
 
 function isOverdue(task, now) {
-  return task.status !== 'done' && task.deadline && dayjs.utc(task.deadline).valueOf() < now;
+  return !task.archived && task.status !== 'done' && task.deadline && dayjs.utc(task.deadline).valueOf() < now;
 }
 
 const sorting = [
@@ -28,22 +28,35 @@ export default function App() {
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
+  const [view, setView] = useState('active');
+  const [completing, setCompleting] = useState(null);
+  const archived = view === 'archive';
   const [filters, setFilters] = useState({ status: null, priority: null, category: null });
   const [sort, setSort] = useState('deadline:asc');
   const [editor, setEditor] = useState(null);
   const [sortBy, order] = sort.split(':');
   const tasks = useQuery({
-    queryKey: ['tasks', filters, sort],
-    queryFn: () => getTasks({ ...filters, sort_by: sortBy, order }),
+    queryKey: ['tasks', filters, sort, archived],
+    queryFn: () => getTasks({ ...filters, sort_by: sortBy, order, archived: String(archived) }),
     refetchInterval: 15000,
   });
-  const allTasks = useQuery({ queryKey: ['tasks', 'all'], queryFn: () => getTasks() });
+  const allTasks = useQuery({ queryKey: ['tasks', 'all', archived], queryFn: () => getTasks({ archived: String(archived) }) });
   const refresh = () => queryClient.invalidateQueries({ queryKey: ['tasks'] });
   const save = useMutation({
     mutationFn: saveTask,
     onSuccess: () => { setEditor(null); return refresh(); },
   });
-  const update = useMutation({ mutationFn: saveTask, onSuccess: refresh });
+  const update = useMutation({
+    mutationFn: saveTask,
+    onSuccess: async (task, { data }) => {
+      if (data.status === 'done') {
+        setCompleting(task.id);
+        await new Promise((resolve) => setTimeout(resolve, 700));
+      }
+      await refresh();
+      setCompleting(null);
+    },
+  });
   const remove = useMutation({ mutationFn: deleteTask, onSuccess: refresh });
   const categories = [...new Set((allTasks.data ?? []).map((task) => task.category).filter(Boolean))].sort();
   const rows = [...(tasks.data ?? [])].sort((a, b) => Number(Boolean(isOverdue(b, now))) - Number(Boolean(isOverdue(a, now))));
@@ -54,9 +67,17 @@ export default function App() {
     <Container size="xl" py="xl">
       <Stack gap="lg">
         <Group justify="space-between">
-          <Title order={1}>Задачи</Title>
+          <Group gap="sm">
+            <img src="/icon.png" alt="" width="44" height="44" style={{ borderRadius: 10 }} />
+            <Title order={1}>Задачи</Title>
+          </Group>
           <Button onClick={() => { save.reset(); setEditor({ task: null }); }}>Добавить задачу</Button>
         </Group>
+        <SegmentedControl
+          value={view}
+          onChange={(value) => { setView(value); setFilters({ status: null, priority: null, category: null }); }}
+          data={[{ value: 'active', label: 'Задачи' }, { value: 'archive', label: 'Архив' }]}
+        />
         <Paper withBorder p="md" radius="md">
           <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }}>
             <Select label="Статус" placeholder="Все статусы" data={statuses} clearable value={filters.status} onChange={(value) => changeFilter('status', value)} />
@@ -77,22 +98,31 @@ export default function App() {
                 </Table.Thead>
                 <Table.Tbody>
                   {rows.map((task) => (
-                    <Table.Tr key={task.id}>
+                    <Table.Tr key={task.id} className={completing === task.id ? 'task-completing' : undefined}>
                       <Table.Td>
-                        <Checkbox aria-label={`Выполнено: ${task.title}`} checked={task.status === 'done'} disabled={update.isPending} onChange={(event) => update.mutate({ id: task.id, data: { status: event.currentTarget.checked ? 'done' : 'todo' } })} />
+                        <Checkbox aria-label={`Выполнено: ${task.title}`} checked={task.status === 'done' || completing === task.id} disabled={update.isPending || archived} onChange={(event) => update.mutate({ id: task.id, data: { status: event.currentTarget.checked ? 'done' : 'todo' } })} />
                       </Table.Td>
                       <Table.Td miw={180} maw={320}>
-                        <Text fw={500} td={task.status === 'done' ? 'line-through' : undefined} style={{ overflowWrap: 'anywhere' }}>{task.title}</Text>
+                        <Text fw={500} td={task.status === 'done' || completing === task.id ? 'line-through' : undefined} style={{ overflowWrap: 'anywhere' }}>{task.title}</Text>
                         {task.description && <Text size="sm" c="dimmed" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{task.description}</Text>}
                       </Table.Td>
                       <Table.Td style={{ whiteSpace: 'nowrap' }}><Text size="sm" c={isOverdue(task, now) ? 'red' : undefined}>{task.deadline ? dayjs.utc(task.deadline).local().format('DD.MM.YYYY HH:mm') : '—'}</Text>{isOverdue(task, now) && <Text size="xs" c="red">Просрочено</Text>}</Table.Td>
                       <Table.Td><Badge color={isOverdue(task, now) ? 'red' : { low: 'gray', medium: 'yellow', high: 'red' }[task.priority]} variant="light">{isOverdue(task, now) ? 'Наивысший' : priorities.find((item) => item.value === task.priority)?.label}</Badge></Table.Td>
-                      <Table.Td><Select aria-label={`Статус: ${task.title}`} w={160} data={statuses} value={task.status} allowDeselect={false} disabled={update.isPending} onChange={(value) => update.mutate({ id: task.id, data: { status: value } })} /></Table.Td>
+                      <Table.Td><Select aria-label={`Статус: ${task.title}`} w={160} data={statuses} value={completing === task.id ? 'done' : task.status} allowDeselect={false} disabled={update.isPending || archived} onChange={(value) => update.mutate({ id: task.id, data: { status: value } })} /></Table.Td>
                       <Table.Td>{task.category || '—'}</Table.Td>
                       <Table.Td>
                         <Group gap="xs" wrap="nowrap">
+                          {archived ? <>
+                            <Button size="xs" variant="default" disabled={update.isPending} onClick={() => update.mutate({ id: task.id, data: { archived: false } })}>Восстановить</Button>
+                            <Button size="xs" variant="subtle" color="red" disabled={remove.isPending} onClick={() => {
+                              if (window.confirm(`Удалить задачу «${task.title}» навсегда? Восстановить её будет невозможно.`)) {
+                                remove.mutate({ id: task.id, permanent: true });
+                              }
+                            }}>Удалить навсегда</Button>
+                          </> : <>
                           <Button size="xs" variant="default" onClick={() => { save.reset(); setEditor({ task }); }}>Изменить</Button>
-                          <Button size="xs" variant="subtle" color="red" disabled={remove.isPending} onClick={() => { if (window.confirm(`Удалить задачу «${task.title}»?`)) remove.mutate(task.id); }}>Удалить</Button>
+                          <Button size="xs" variant="subtle" color="red" disabled={remove.isPending} onClick={() => remove.mutate({ id: task.id })}>В архив</Button>
+                          </>}
                         </Group>
                       </Table.Td>
                     </Table.Tr>
@@ -100,7 +130,7 @@ export default function App() {
                 </Table.Tbody>
               </Table>
             </Table.ScrollContainer>
-            {tasks.data?.length === 0 && <Text ta="center" c="dimmed" py="xl">Задач нет</Text>}
+            {tasks.data?.length === 0 && <Text ta="center" c="dimmed" py="xl">{archived ? 'Архив пуст' : 'Задач нет'}</Text>}
           </Paper>
         )}
       </Stack>

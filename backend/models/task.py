@@ -4,6 +4,8 @@ from typing import Literal
 from pydantic import ConfigDict, field_validator
 from sqlmodel import Field, SQLModel
 
+from utils.dates import normalize_utc
+
 Priority = Literal["low", "medium", "high"]
 TaskStatus = Literal["todo", "in_progress", "done"]
 
@@ -21,14 +23,11 @@ class TaskCreate(SQLModel):
     @field_validator("deadline")
     @classmethod
     def normalize_deadline(cls, value):
-        if value is None:
-            return None
-        if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
-        return value.astimezone(timezone.utc)
+        return normalize_utc(value)
 
 
 class Task(SQLModel, table=True):
+    archived: bool = False
     id: int | None = Field(default=None, primary_key=True)
     title: str
     description: str | None = None
@@ -41,4 +40,5 @@ class Task(SQLModel, table=True):
 
 
 class TaskUpdate(TaskCreate):
+    archived: bool = False
     title: str = Field(default=None, min_length=1)

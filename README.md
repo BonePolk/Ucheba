@@ -26,23 +26,34 @@ SQLite хранится в volume `task-data` и сохраняется посл
 docker compose up --build --watch
 ```
 
-Изменения `backend/main.py` и `backend/models.py` синхронизируются в контейнер, после чего backend перезапускается. Изменения зависимостей или Dockerfile пересобирают backend. Изменения frontend запускают сборку Vite и пересоздают контейнер Nginx; после завершения обновите страницу браузера. `node_modules` и `dist` исключены через `.dockerignore`.
+Изменения Python-файлов в `backend/` синхронизируются в контейнер, после чего backend перезапускается. Изменения зависимостей или Dockerfile пересобирают backend. Изменения frontend запускают сборку Vite и пересоздают контейнер Nginx; после завершения обновите страницу браузера. `node_modules` и `dist` исключены через `.dockerignore`.
 
 Если контейнеры уже запущены, наблюдение можно включить отдельной командой `docker compose watch`.
 
 ## Структура
 
-- `backend/main.py` — REST API, фильтры, сортировка и создание таблиц при запуске.
-- `backend/models.py` — таблица задач и схемы валидации.
+- `backend/main.py` — создание FastAPI-приложения и подключение маршрутов.
+- `backend/core/database.py` — подключение SQLite и создание таблиц при запуске.
+- `backend/models/task.py` — таблица задач и схемы валидации.
+- `backend/routers/tasks.py` — REST API, фильтры и сортировка задач.
+- `backend/utils/dates.py` — нормализация времени в UTC.
 - `frontend/src/App.jsx` — список задач и фильтры.
 - `frontend/src/TaskForm.jsx` — общая форма создания и редактирования.
 - `frontend/src/api.js` — запросы к API.
 - `frontend/nginx.conf` — раздача сборки и проксирование.
 - `docker-compose.yml` — два контейнера и volume SQLite.
 
+## Архив и оформление
+
+Кнопка «В архив» убирает задачу из основного списка. Во вкладке «Архив» можно восстановить задачу или полностью удалить её с подтверждением. База обновляется при запуске автоматически, существующие задачи сохраняются.
+
+Интерфейс использует чёрную тему с акцентом `#7f49b4` и пользовательской иконкой. При выполнении через чекбокс или список статусов строка подсвечивается зелёным, а чекбокс плавно увеличивается.
+
 ## API
 
 `GET /api/tasks`, `GET /api/tasks/{id}`, `POST /api/tasks`, `PATCH /api/tasks/{id}`, `DELETE /api/tasks/{id}`.
+
+Удаление через `DELETE` переносит задачу в архив. `DELETE /api/tasks/{id}?permanent=true` полностью удаляет задачу, только если она уже в архиве. `GET /api/tasks?archived=true` возвращает архив, а `PATCH /api/tasks/{id}` с `{"archived": false}` восстанавливает задачу.
 
 Фильтры списка: `status=todo|in_progress|done`, `priority=low|medium|high|overdue`, `category=Название`.
 Сортировка: `sort_by=deadline|priority|created_at`, `order=asc|desc`.

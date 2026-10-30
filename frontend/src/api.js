@@ -25,6 +25,6 @@ export function saveTask({ id, data }) {
   });
 }
 
-export function deleteTask(id) {
-  return request(`/tasks/${id}`, { method: 'DELETE' });
+export function deleteTask({ id, permanent = false }) {
+  return request(`/tasks/${id}?permanent=${permanent}`, { method: 'DELETE' });
 }
