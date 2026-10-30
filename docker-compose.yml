@@ -5,6 +5,18 @@ services:
       DATABASE_URL: sqlite:////data/tasks.db
     volumes:
       - task-data:/data
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./backend/main.py
+          target: /app/main.py
+        - action: sync+restart
+          path: ./backend/models.py
+          target: /app/models.py
+        - action: rebuild
+          path: ./backend/requirements.txt
+        - action: rebuild
+          path: ./backend/Dockerfile
 
   frontend:
     build: ./frontend
@@ -12,6 +24,10 @@ services:
       - "8080:80"
     depends_on:
       - backend
+    develop:
+      watch:
+        - action: rebuild
+          path: ./frontend
 
 volumes:
   task-data:

@@ -1,6 +1,10 @@
 import { Alert, Button, Group, Modal, Select, Stack, Textarea, TextInput } from '@mantine/core';
-import { DateInput } from '@mantine/dates';
+import dayjs from 'dayjs';
+import utc from 'dayjs/plugin/utc';
+import { DateTimePicker } from '@mantine/dates';
 import { useForm } from '@mantine/form';
+
+dayjs.extend(utc);
 
 export const priorities = [
   { value: 'low', label: 'Низкий' },
@@ -18,7 +22,7 @@ export default function TaskForm({ task, onClose, onSubmit, pending, error }) {
     initialValues: {
       title: task?.title ?? '',
       description: task?.description ?? '',
-      deadline: task?.deadline ?? null,
+      deadline: task?.deadline ? dayjs.utc(task.deadline).local().format('YYYY-MM-DD HH:mm:ss') : null,
       priority: task?.priority ?? 'medium',
       status: task?.status ?? 'todo',
       category: task?.category ?? '',
@@ -31,13 +35,14 @@ export default function TaskForm({ task, onClose, onSubmit, pending, error }) {
       <form onSubmit={form.onSubmit((values) => onSubmit({
         ...values,
         title: values.title.trim(),
+        deadline: values.deadline ? dayjs(values.deadline).toISOString() : null,
         description: values.description.trim() || null,
         category: values.category.trim() || null,
       }))}>
         <Stack>
           <TextInput label="Название" required {...form.getInputProps('title')} />
           <Textarea label="Описание" autosize minRows={3} {...form.getInputProps('description')} />
-          <DateInput label="Дедлайн" placeholder="ГГГГ-ММ-ДД" valueFormat="YYYY-MM-DD" clearable {...form.getInputProps('deadline')} />
+          <DateTimePicker label="Дедлайн" placeholder="Выберите дату и время" valueFormat="DD.MM.YYYY HH:mm" clearable {...form.getInputProps('deadline')} />
           <Select label="Приоритет" data={priorities} allowDeselect={false} {...form.getInputProps('priority')} />
           <Select label="Статус" data={statuses} allowDeselect={false} {...form.getInputProps('status')} />
           <TextInput label="Категория" {...form.getInputProps('category')} />

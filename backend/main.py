@@ -4,10 +4,10 @@ from datetime import datetime, timezone
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Response
-from sqlalchemy import case
+from sqlalchemy import case, text
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from models import Priority, Task, TaskCreate, TaskStatus, TaskUpdate
+from models import Task, TaskCreate, TaskStatus, TaskUpdate
 
 engine = create_engine(
     os.getenv("DATABASE_URL", "sqlite:///./tasks.db"),
@@ -18,6 +18,11 @@ engine = create_engine(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     SQLModel.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.execute(text(
+            "UPDATE task SET deadline = deadline || ' 23:59:00.000000' "
+            "WHERE length(deadline) = 10"
+        ))
     yield
 
 
@@ -27,16 +32,22 @@ app = FastAPI(title="Task Manager", lifespan=lifespan)
 @app.get("/api/tasks", response_model=list[Task])
 def list_tasks(
     status: TaskStatus | None = None,
-    priority: Priority | None = None,
+    priority: Literal["low", "medium", "high", "overdue"] | None = None,
     category: str | None = None,
     sort_by: Literal["deadline", "priority", "created_at"] = "deadline",
     order: Literal["asc", "desc"] = "asc",
 ):
-    statement = select(Task)
+    overdue = (
+        (Task.deadline < datetime.now(timezone.utc))
+        & (Task.status != "done")
+    )
+    statement = select(Task).order_by(case((overdue, 0), else_=1))
     if status is not None:
         statement = statement.where(Task.status == status)
-    if priority is not None:
-        statement = statement.where(Task.priority == priority)
+    if priority == "overdue":
+        statement = statement.where(overdue)
+    elif priority is not None:
+        statement = statement.where(Task.priority == priority, ~case((overdue, True), else_=False))
     if category is not None:
         statement = statement.where(Task.category == category)
 
