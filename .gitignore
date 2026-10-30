@@ -1,5 +1,10 @@
 node_modules/
 dist/
+data/
 __pycache__/
 .venv/
 *.db
+
+.env
+.env.*
+!.env.example

@@ -4,10 +4,10 @@ from typing import Literal
 from pydantic import ConfigDict, field_validator
 from sqlmodel import Field, SQLModel
 
-from utils.dates import normalize_utc
+from common.dates import normalize_utc
 
 Priority = Literal["low", "medium", "high"]
-TaskStatus = Literal["todo", "in_progress", "done"]
+TaskStatus = Literal["todo", "in_progress", "review", "done"]
 
 
 class TaskCreate(SQLModel):
@@ -35,6 +35,11 @@ class Task(SQLModel, table=True):
     priority: str = "medium"
     status: str = "todo"
     category: str | None = None
+    source_url: str | None = None
+    source_chat_id: int | None = None
+    ai_score: float | None = None
+    ai_details: str | None = None
+    ai_scored_at: datetime | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

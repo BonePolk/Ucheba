@@ -19,6 +19,7 @@ const sorting = [
   { value: 'priority:desc', label: 'Приоритет: сначала низкий' },
   { value: 'created_at:desc', label: 'Создание: сначала новые' },
   { value: 'created_at:asc', label: 'Создание: сначала старые' },
+  { value: 'ai_score:desc', label: 'Оценка Jev: сначала важные' },
 ];
 
 export default function App() {
@@ -34,17 +35,23 @@ export default function App() {
   const [filters, setFilters] = useState({ status: null, priority: null, category: null });
   const [sort, setSort] = useState('deadline:asc');
   const [editor, setEditor] = useState(null);
+  const taskView = view === 'active' || view === 'archive';
   const [sortBy, order] = sort.split(':');
   const tasks = useQuery({
     queryKey: ['tasks', filters, sort, archived],
     queryFn: () => getTasks({ ...filters, sort_by: sortBy, order, archived: String(archived) }),
     refetchInterval: 15000,
+    enabled: taskView,
   });
-  const allTasks = useQuery({ queryKey: ['tasks', 'all', archived], queryFn: () => getTasks({ archived: String(archived) }) });
+  const allTasks = useQuery({ queryKey: ['tasks', 'all', archived], queryFn: () => getTasks({ archived: String(archived) }), enabled: taskView });
   const refresh = () => queryClient.invalidateQueries({ queryKey: ['tasks'] });
   const save = useMutation({
     mutationFn: saveTask,
-    onSuccess: () => { setEditor(null); return refresh(); },
+    onSuccess: (task, variables) => {
+      setEditor(null);
+      if (variables.openAutomation) window.location.assign(`/admin/?task=${task.id}`);
+      return refresh();
+    },
   });
   const update = useMutation({
     mutationFn: saveTask,
@@ -77,7 +84,9 @@ export default function App() {
           value={view}
           onChange={(value) => { setView(value); setFilters({ status: null, priority: null, category: null }); }}
           data={[{ value: 'active', label: 'Задачи' }, { value: 'archive', label: 'Архив' }]}
+          styles={{ root: { flexWrap: 'wrap' } }}
         />
+        {taskView && <>
         <Paper withBorder p="md" radius="md">
           <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }}>
             <Select label="Статус" placeholder="Все статусы" data={statuses} clearable value={filters.status} onChange={(value) => changeFilter('status', value)} />
@@ -104,14 +113,15 @@ export default function App() {
                       </Table.Td>
                       <Table.Td miw={180} maw={320}>
                         <Text fw={500} td={task.status === 'done' || completing === task.id ? 'line-through' : undefined} style={{ overflowWrap: 'anywhere' }}>{task.title}</Text>
+                        {task.source_url && <Text component="a" href={task.source_url} target="_blank" rel="noreferrer" size="xs" c="purple">Источник Telegram</Text>}
                         {task.description && <Text size="sm" c="dimmed" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{task.description}</Text>}
                       </Table.Td>
                       <Table.Td style={{ whiteSpace: 'nowrap' }}><Text size="sm" c={isOverdue(task, now) ? 'red' : undefined}>{task.deadline ? dayjs.utc(task.deadline).local().format('DD.MM.YYYY HH:mm') : '—'}</Text>{isOverdue(task, now) && <Text size="xs" c="red">Просрочено</Text>}</Table.Td>
-                      <Table.Td><Badge color={isOverdue(task, now) ? 'red' : { low: 'gray', medium: 'yellow', high: 'red' }[task.priority]} variant="light">{isOverdue(task, now) ? 'Наивысший' : priorities.find((item) => item.value === task.priority)?.label}</Badge></Table.Td>
+                      <Table.Td><Badge color={isOverdue(task, now) ? 'red' : { low: 'gray', medium: 'yellow', high: 'red' }[task.priority]} variant="light">{isOverdue(task, now) ? 'Наивысший' : priorities.find((item) => item.value === task.priority)?.label}</Badge>{task.ai_score != null && <Text size="xs" c="dimmed">Jev: {task.ai_score}/100</Text>}</Table.Td>
                       <Table.Td><Select aria-label={`Статус: ${task.title}`} w={160} data={statuses} value={completing === task.id ? 'done' : task.status} allowDeselect={false} disabled={update.isPending || archived} onChange={(value) => update.mutate({ id: task.id, data: { status: value } })} /></Table.Td>
                       <Table.Td>{task.category || '—'}</Table.Td>
                       <Table.Td>
-                        <Group gap="xs" wrap="nowrap">
+                        <Group gap="xs">
                           {archived ? <>
                             <Button size="xs" variant="default" disabled={update.isPending} onClick={() => update.mutate({ id: task.id, data: { archived: false } })}>Восстановить</Button>
                             <Button size="xs" variant="subtle" color="red" disabled={remove.isPending} onClick={() => {
@@ -120,6 +130,7 @@ export default function App() {
                               }
                             }}>Удалить навсегда</Button>
                           </> : <>
+                          <Button size="xs" variant="light" component="a" href={`/admin/?task=${task.id}`}>Поручить Codex / Jev</Button>
                           <Button size="xs" variant="default" onClick={() => { save.reset(); setEditor({ task }); }}>Изменить</Button>
                           <Button size="xs" variant="subtle" color="red" disabled={remove.isPending} onClick={() => remove.mutate({ id: task.id })}>В архив</Button>
                           </>}
@@ -133,8 +144,9 @@ export default function App() {
             {tasks.data?.length === 0 && <Text ta="center" c="dimmed" py="xl">{archived ? 'Архив пуст' : 'Задач нет'}</Text>}
           </Paper>
         )}
+        </>}
       </Stack>
-      {editor && <TaskForm task={editor.task} onClose={() => setEditor(null)} onSubmit={(data) => save.mutate({ id: editor.task?.id, data })} pending={save.isPending} error={save.error} />}
+      {editor && <TaskForm task={editor.task} onClose={() => setEditor(null)} allowAutomation onSubmit={(data, options) => save.mutate({ id: editor.task?.id, data, ...options })} pending={save.isPending} error={save.error} />}
     </Container>
   );
 }

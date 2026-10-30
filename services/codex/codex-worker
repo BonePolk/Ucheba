@@ -1,0 +1,4 @@
+#!/bin/sh
+exec /usr/bin/setpriv --reuid=10001 --regid=10001 --clear-groups \
+  /usr/bin/env -i HOME=/home/codex CODEX_HOME=/home/codex/.codex \
+  PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 /usr/local/bin/codex-native "$@"

@@ -1,0 +1,357 @@
+import asyncio
+import json
+import os
+from pathlib import Path
+from urllib.parse import quote
+from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+import httpx
+from pydantic import BaseModel, Field, ValidationError
+from sqlmodel import Session, select
+
+from common.database import engine
+from common.rpc import call, internal_token
+from common.security import login, require_owner, signer
+from integrations import codex, gemini, jev, telegram
+from common import extraction as pipeline
+from common.settings import SECRET_FIELDS, public_settings, read_settings, report, save_settings
+from common.models.integration import CodexRun, Suggestion
+from common.models.task import TaskCreate
+
+settings_lock = asyncio.Lock()
+
+admin = APIRouter(prefix='/api/auth', tags=['owner'])
+router = APIRouter(prefix='/api/integrations', tags=['integrations'], dependencies=[Depends(require_owner)])
+inbox = APIRouter(prefix='/api/inbox', tags=['inbox'], dependencies=[Depends(require_owner)])
+
+
+class Login(BaseModel):
+    password: str
+
+
+@admin.get('/status')
+def owner_status(request: Request):
+    try:
+        signer()
+    except HTTPException as exc:
+        return {'configured': False, 'authenticated': False, 'detail': exc.detail}
+    try:
+        require_owner(request)
+        authenticated = True
+    except HTTPException:
+        authenticated = False
+    return {'configured': True, 'authenticated': authenticated}
+
+
+@admin.post('/login')
+def owner_login(body: Login, request: Request, response: Response):
+    token = login(body.password, request)
+    response.set_cookie('owner_session', token, httponly=True, samesite='strict', max_age=43200,
+                        secure=os.getenv('COOKIE_SECURE', 'false').lower() == 'true', path='/')
+    response.delete_cookie('owner_session', path='/api')
+    return {'ok': True}
+
+
+@admin.post('/logout')
+def owner_logout(response: Response):
+    response.delete_cookie('owner_session', path='/')
+    response.delete_cookie('owner_session', path='/api')
+    return {'ok': True}
+
+
+async def provider_call(name, operation):
+    try:
+        return await operation
+    except HTTPException as exc:
+        report(name, error=str(exc.detail))
+        raise
+    except (httpx.HTTPError, OSError, TimeoutError):
+        message = f'{name}: сервис недоступен или превышено время ожидания'
+    except (ValidationError, ValueError, KeyError, TypeError):
+        message = f'{name}: неожиданный формат ответа или некорректные настройки'
+    report(name, error=message)
+    raise HTTPException(502, message)
+
+
+class TelegramConfig(BaseModel):
+    enabled: bool = False
+
+
+class GeminiConfig(BaseModel):
+    enabled: bool = False
+    model: str = Field(default='gemini-3.8-flash', min_length=1, max_length=100)
+    interval_seconds: int = Field(default=300, ge=30, le=86400)
+    confidence_threshold: float = Field(default=0.9, ge=0.5, le=1)
+    timezone: str = 'UTC'
+    owner_context: str = Field(default='', max_length=2000)
+
+
+class CodexConfig(BaseModel):
+    enabled: bool = False
+    auto_prepare: bool = False
+
+
+class JevConfig(BaseModel):
+    enabled: bool = False
+    account_id: str = Field(default='', pattern=r'^(|[a-fA-F0-9]{32})$')
+
+
+class NotificationsConfig(BaseModel):
+    enabled: bool = False
+    owner_id: int | None = Field(default=None, gt=0)
+    lead_minutes: int = Field(default=30, ge=1, le=1440)
+
+
+class CollectorConfig(BaseModel):
+    enabled: bool = False
+
+
+CONFIG_MODELS = {'notifications': NotificationsConfig, 'collector': CollectorConfig, 'telegram': TelegramConfig, 'gemini': GeminiConfig, 'codex': CodexConfig, 'jev': JevConfig}
+
+
+@router.get('')
+async def settings():
+    try:
+        state = await telegram.status()
+    except (HTTPException, httpx.HTTPError):
+        state = {'connected': False, 'analyzing': False}
+    return {**public_settings(), 'telegram_connected': state['connected'], 'analyzing': state['analyzing']}
+
+
+@router.patch('/{name}')
+async def configure(name: Literal['telegram', 'gemini', 'codex', 'jev', 'collector', 'notifications'], body: dict):
+    allowed = set(CONFIG_MODELS[name].model_fields) | (SECRET_FIELDS[name] - {'session'})
+    if set(body) - allowed:
+        raise HTTPException(422, 'Неизвестное поле настроек')
+    current, _ = read_settings(name)
+    try:
+        fields = {key: value for key, value in body.items() if key in CONFIG_MODELS[name].model_fields}
+        config = CONFIG_MODELS[name].model_validate({**current, **fields}).model_dump()
+        if name == 'notifications' and config['enabled'] and not config['owner_id']:
+            raise ValueError('owner_id')
+        if name == 'gemini':
+            ZoneInfo(config['timezone'])
+        if name == 'telegram' and body.get('api_id') and (not str(body['api_id']).isdecimal() or not 0 < int(body['api_id']) < 2**31):
+            raise ValueError('api_id')
+    except (ValidationError, ZoneInfoNotFoundError, ValueError):
+        raise HTTPException(422, 'Проверьте настройки, часовой пояс и числовые значения') from None
+    if name in ('collector', 'notifications') and body.get('bot_token'):
+        other = 'collector' if name == 'notifications' else 'notifications'
+        if read_settings(other)[1].get('bot_token') == body['bot_token']:
+            raise HTTPException(422, 'Используйте два разных токена BotFather для двух ботов')
+    secrets = {key: str(value) if value is not None else '' for key, value in body.items()
+               if key in SECRET_FIELDS[name] and key != 'session' and value != ''}
+    async with settings_lock:
+        if name == 'telegram' and secrets:
+            _, private = read_settings('telegram')
+            if private.get('session'):
+                raise HTTPException(409, 'Отключите Telegram перед сменой реквизитов аккаунта')
+            await provider_call('telegram', telegram.close())
+        save_settings(name, config=config, secrets=secrets if secrets else None)
+    return {'ok': True}
+
+
+@router.post('/telegram/code')
+async def telegram_code():
+    return await provider_call('telegram', telegram.send_code())
+
+
+class TelegramLogin(BaseModel):
+    code: str | None = None
+    password: str | None = None
+
+
+@router.post('/telegram/login')
+async def telegram_login(body: TelegramLogin):
+    return await provider_call('telegram', telegram.sign_in(body.code, body.password))
+
+
+@router.post('/telegram/disconnect')
+async def telegram_disconnect():
+    async with settings_lock:
+        await provider_call('telegram', telegram.disconnect())
+    return {'ok': True}
+
+
+@router.get('/telegram/chats')
+async def telegram_chats():
+    return await provider_call('telegram', telegram.dialogs())
+
+
+class ChatSelection(BaseModel):
+    chat_ids: list[int] = Field(max_length=30)
+
+
+@router.post('/telegram/chats')
+async def telegram_select(body: ChatSelection):
+    await provider_call('telegram', call('telegram', '/chats', {'chat_ids': list(dict.fromkeys(body.chat_ids))}))
+    return {'ok': True}
+
+
+@router.post('/telegram/analyze')
+async def telegram_analyze():
+    return await provider_call('gemini', call('telegram', '/analyze', timeout=300))
+
+
+@router.get('/gemini/models')
+async def gemini_models():
+    return await provider_call('gemini', gemini.models())
+
+
+@router.post('/gemini/check')
+async def gemini_check():
+    await provider_call('gemini', gemini.analyze([{'id': 1, 'text': 'Проверка связи, задач нет'}], [], [], 'Проверка', {}))
+    report('gemini', success=True)
+    return {'ok': True}
+
+
+@router.get('/codex/status')
+async def codex_status():
+    return await provider_call('codex', codex.status())
+
+
+@router.post('/codex/connect')
+async def codex_connect():
+    return await provider_call('codex', codex.start_login())
+
+
+@router.post('/codex/disconnect')
+async def codex_disconnect():
+    await provider_call('codex', codex.disconnect())
+    return {'ok': True}
+
+
+@router.post('/codex/check')
+async def codex_check():
+    return await provider_call('codex', codex.check())
+
+
+@router.post('/jev/check')
+async def jev_check():
+    return await provider_call('jev', jev.evaluate())
+
+
+@router.post('/tasks/{task_id}/jev')
+async def jev_score(task_id: int):
+    config, _ = read_settings('jev')
+    if not config['enabled']:
+        raise HTTPException(400, 'Включите Jev в настройках')
+    return await provider_call('jev', jev.evaluate(task_id))
+
+
+@router.post('/tasks/{task_id}/codex', status_code=202)
+async def codex_task(task_id: int):
+    return codex.start_task(task_id)
+
+
+@router.get('/tasks/{task_id}/runs')
+def runs(task_id: int):
+    with Session(engine) as session:
+        return session.exec(select(CodexRun).where(CodexRun.task_id == task_id).order_by(CodexRun.created_at.desc())).all()
+
+
+def require_run(run_id):
+    with Session(engine) as session:
+        if not session.get(CodexRun, run_id):
+            raise HTTPException(404, 'Запуск не найден')
+
+
+@router.get('/codex/runs/{run_id}/files')
+async def files(run_id: str):
+    require_run(run_id)
+    return await provider_call('codex', call('codex', f'/runs/{run_id}/files', method='GET'))
+
+
+@router.get('/codex/runs/{run_id}/files/{filename:path}')
+async def download(run_id: str, filename: str):
+    require_run(run_id)
+    async with httpx.AsyncClient(timeout=30) as client:
+        result = await client.get(f'http://codex:8000/runs/{run_id}/files/{quote(filename, safe="/")}',
+            headers={'X-Service-Token': internal_token('codex')})
+        if not result.is_success:
+            raise HTTPException(result.status_code, 'Файл недоступен')
+        return Response(content=result.content, media_type='application/octet-stream',
+            headers={'Content-Disposition': f"attachment; filename*=UTF-8''{quote(Path(filename).name)}"})
+
+
+@inbox.get('')
+def pending_suggestions():
+    with Session(engine) as session:
+        return session.exec(select(Suggestion).where(Suggestion.status == 'pending').order_by(Suggestion.id.desc())).all()
+
+
+class Acceptance(BaseModel):
+    values: TaskCreate | None = None
+    target_task_id: int | None = None
+
+
+@inbox.post('/{suggestion_id}/accept')
+def accept(suggestion_id: int, body: Acceptance):
+    with Session(engine) as session:
+        suggestion = session.get(Suggestion, suggestion_id)
+        if not suggestion:
+            raise HTTPException(404, 'Предложение не найдено')
+        if body.target_task_id is not None:
+            suggestion.target_task_id = body.target_task_id
+        values = body.values.model_dump() if body.values else None
+        if values and suggestion.action != 'create':
+            values = {key: values[key] for key in ('title', 'description', 'deadline')}
+        task = pipeline.apply_suggestion(session, suggestion, values)
+        session.commit()
+        session.refresh(task)
+        return task
+
+
+@inbox.post('/{suggestion_id}/reject')
+def reject(suggestion_id: int):
+    with Session(engine) as session:
+        suggestion = session.get(Suggestion, suggestion_id)
+        if not suggestion:
+            raise HTTPException(404, 'Предложение не найдено')
+        if suggestion.status != 'pending':
+            raise HTTPException(409, 'Предложение уже обработано')
+        suggestion.status = 'rejected'
+        session.add(suggestion)
+        session.commit()
+    return {'ok': True}
+
+
+@router.post('/bots/{name}/check')
+async def check_bot(name: Literal['collector', 'notifications']):
+    return await provider_call(name, call(name, '/check'))
+
+
+@router.get('/bots/collector/chats')
+async def collector_chats():
+    return await provider_call('collector', call('collector', '/chats', method='GET'))
+
+
+@router.post('/bots/collector/chats')
+async def collector_select(body: ChatSelection):
+    return await provider_call('collector', call('collector', '/chats', body.model_dump()))
+
+
+@router.post('/bots/collector/analyze')
+async def collector_analyze():
+    return await provider_call('collector', call('collector', '/analyze', timeout=300))
+
+
+@router.api_route('/services/{name}/{path:path}', methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'])
+async def service_access(
+    name: Literal['telegram', 'gemini', 'codex', 'jev', 'collector', 'notifications'],
+    path: str,
+    request: Request,
+):
+    headers = {'X-Service-Token': internal_token(name)}
+    if request.headers.get('content-type'):
+        headers['Content-Type'] = request.headers['content-type']
+    try:
+        async with httpx.AsyncClient(timeout=330) as client:
+            result = await client.request(request.method, f'http://{name}:8000/{quote(path, safe="/")}',
+                params=request.query_params.multi_items(), headers=headers, content=await request.body())
+    except httpx.HTTPError:
+        raise HTTPException(502, 'Сервис недоступен или превышено время ожидания') from None
+    response_headers = {key: result.headers[key] for key in ('content-type', 'content-disposition') if key in result.headers}
+    return Response(content=result.content, status_code=result.status_code, headers=response_headers)

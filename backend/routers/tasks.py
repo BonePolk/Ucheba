@@ -1,3 +1,5 @@
+import json
+
 from datetime import datetime, timezone
 from typing import Literal
 
@@ -5,8 +7,10 @@ from fastapi import APIRouter, HTTPException, Response
 from sqlalchemy import case
 from sqlmodel import Session, select
 
-from core.database import engine
-from models.task import Task, TaskCreate, TaskStatus, TaskUpdate
+from common.database import engine
+from common.settings import read_config
+from common.models.integration import TaskAction
+from common.models.task import Task, TaskCreate, TaskStatus, TaskUpdate
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -17,9 +21,13 @@ def list_tasks(
     status: TaskStatus | None = None,
     priority: Literal["low", "medium", "high", "overdue"] | None = None,
     category: str | None = None,
-    sort_by: Literal["deadline", "priority", "created_at"] = "deadline",
+    sort_by: Literal["deadline", "priority", "created_at", "ai_score"] = "deadline",
     order: Literal["asc", "desc"] = "asc",
 ):
+    if sort_by == 'ai_score':
+        jev = read_config('jev')
+        if not jev['enabled'] or jev['last_error']:
+            sort_by, order = 'priority', 'asc'
     overdue = (
         (Task.deadline < datetime.now(timezone.utc))
         & (Task.status != "done")
@@ -37,6 +45,7 @@ def list_tasks(
 
     column = {
         "deadline": Task.deadline,
+        "ai_score": Task.ai_score,
         "created_at": Task.created_at,
         "priority": case(
             (Task.priority == "high", 0),
@@ -44,8 +53,8 @@ def list_tasks(
             else_=2,
         ),
     }[sort_by]
-    if sort_by == "deadline":
-        statement = statement.order_by(Task.deadline.is_(None))
+    if sort_by in ("deadline", "ai_score"):
+        statement = statement.order_by(column.is_(None))
     statement = statement.order_by(column.asc() if order == "asc" else column.desc(), Task.id.desc())
     with Session(engine) as session:
         return session.exec(statement).all()
@@ -67,6 +76,8 @@ def create_task(data: TaskCreate):
         session.add(task)
         session.commit()
         session.refresh(task)
+        session.add(TaskAction(task_id=task.id, action='create'))
+        session.commit()
         return task
 
 
@@ -76,7 +87,12 @@ def update_task(task_id: int, data: TaskUpdate):
         task = session.get(Task, task_id)
         if task is None:
             raise HTTPException(404, "Задача не найдена")
-        task.sqlmodel_update(data.model_dump(exclude_unset=True))
+        changes = data.model_dump(exclude_unset=True)
+        task.sqlmodel_update(changes)
+        if set(changes) & {'title', 'description', 'deadline'}:
+            task.ai_score = task.ai_details = task.ai_scored_at = None
+        session.add(TaskAction(task_id=task_id, action='update', details=json.dumps(
+            {key: value for key, value in changes.items() if key in {'status', 'priority', 'archived'}})))
         task.updated_at = datetime.now(timezone.utc)
         session.add(task)
         session.commit()
@@ -90,6 +106,7 @@ def delete_task(task_id: int, permanent: bool = False):
         task = session.get(Task, task_id)
         if task is None:
             raise HTTPException(404, "Задача не найдена")
+        session.add(TaskAction(task_id=task_id, action='delete' if permanent else 'archive'))
         if permanent:
             if not task.archived:
                 raise HTTPException(409, "Полностью удалить можно только задачу из архива")

@@ -1,4 +1,5 @@
-import { Alert, Button, Group, Modal, Select, Stack, Textarea, TextInput } from '@mantine/core';
+import { Alert, Button, Checkbox, Group, Modal, Select, Stack, Textarea, TextInput } from '@mantine/core';
+import { useState } from 'react';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
 import { DateTimePicker } from '@mantine/dates';
@@ -14,10 +15,12 @@ export const priorities = [
 export const statuses = [
   { value: 'todo', label: 'К выполнению' },
   { value: 'in_progress', label: 'В процессе' },
+  { value: 'review', label: 'На проверку' },
   { value: 'done', label: 'Выполнено' },
 ];
 
-export default function TaskForm({ task, onClose, onSubmit, pending, error }) {
+export default function TaskForm({ task, onClose, onSubmit, pending, error, allowAutomation = false }) {
+  const [openAutomation, setOpenAutomation] = useState(false);
   const form = useForm({
     initialValues: {
       title: task?.title ?? '',
@@ -38,7 +41,7 @@ export default function TaskForm({ task, onClose, onSubmit, pending, error }) {
         deadline: values.deadline ? dayjs(values.deadline).toISOString() : null,
         description: values.description.trim() || null,
         category: values.category.trim() || null,
-      }))}>
+      }, { openAutomation }))}>
         <Stack>
           <TextInput label="Название" required {...form.getInputProps('title')} />
           <Textarea label="Описание" autosize minRows={3} {...form.getInputProps('description')} />
@@ -46,6 +49,7 @@ export default function TaskForm({ task, onClose, onSubmit, pending, error }) {
           <Select label="Приоритет" data={priorities} allowDeselect={false} {...form.getInputProps('priority')} />
           <Select label="Статус" data={statuses} allowDeselect={false} {...form.getInputProps('status')} />
           <TextInput label="Категория" {...form.getInputProps('category')} />
+          {allowAutomation && <Checkbox label="Открыть действия Codex / Jev после сохранения" checked={openAutomation} onChange={(event) => setOpenAutomation(event.currentTarget.checked)} />}
           {error && <Alert color="red">{error.message}</Alert>}
           <Group justify="flex-end">
             <Button variant="default" onClick={onClose}>Отмена</Button>

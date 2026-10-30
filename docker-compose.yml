@@ -1,34 +1,283 @@
+x-environment: &environment
+  DATABASE_URL: sqlite:////data/tasks.db
+  INTEGRATION_ENCRYPTION_KEY: ${INTEGRATION_ENCRYPTION_KEY:-}
+  INTERNAL_SECRET: ${INTEGRATION_ENCRYPTION_KEY:-}
+
+x-health: &health
+  test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+  interval: 15s
+  timeout: 5s
+  start_period: 10s
+  retries: 5
+
 services:
   backend:
-    build: ./backend
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    healthcheck: *health
     environment:
       DATABASE_URL: sqlite:////data/tasks.db
+      DATA_DIR: /data
     volumes:
-      - task-data:/data
+      - ./data:/data
     develop:
       watch:
         - action: sync+restart
           path: ./backend
           target: /app
-          ignore:
-            - requirements.txt
-            - Dockerfile
-            - .dockerignore
+          ignore: [Dockerfile, requirements.txt, __pycache__]
+        - action: sync+restart
+          path: ./common
+          target: /app/common
+          ignore: [requirements.txt, __pycache__]
         - action: rebuild
           path: ./backend/requirements.txt
         - action: rebuild
+          path: ./common/requirements.txt
+        - action: rebuild
           path: ./backend/Dockerfile
+
+  admin-backend:
+    build:
+      context: .
+      dockerfile: admin/backend/Dockerfile
+    healthcheck: *health
+    environment:
+      <<: *environment
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+    volumes:
+      - ./data:/data
+    depends_on:
+      backend:
+        condition: service_healthy
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./admin/backend
+          target: /app
+          ignore: [Dockerfile, requirements.txt, __pycache__]
+        - action: sync+restart
+          path: ./common
+          target: /app/common
+          ignore: [requirements.txt, __pycache__]
+        - action: rebuild
+          path: ./admin/backend/requirements.txt
+        - action: rebuild
+          path: ./common/requirements.txt
+        - action: rebuild
+          path: ./admin/backend/Dockerfile
+
+  telegram:
+    build:
+      context: .
+      dockerfile: services/telegram/Dockerfile
+    healthcheck: *health
+    environment:
+      <<: *environment
+    volumes:
+      - ./data:/data
+    depends_on:
+      backend:
+        condition: service_healthy
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./services/telegram
+          target: /app
+          ignore: [Dockerfile, requirements.txt, __pycache__]
+        - action: sync+restart
+          path: ./common
+          target: /app/common
+          ignore: [requirements.txt, __pycache__]
+        - action: rebuild
+          path: ./services/telegram/requirements.txt
+        - action: rebuild
+          path: ./common/requirements.txt
+        - action: rebuild
+          path: ./services/telegram/Dockerfile
+
+  gemini:
+    build:
+      context: .
+      dockerfile: services/gemini/Dockerfile
+    healthcheck: *health
+    environment:
+      INTERNAL_SECRET: ${INTEGRATION_ENCRYPTION_KEY:-}
+    depends_on:
+      backend:
+        condition: service_healthy
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./services/gemini
+          target: /app
+          ignore: [Dockerfile, requirements.txt, __pycache__]
+        - action: sync+restart
+          path: ./common
+          target: /app/common
+          ignore: [requirements.txt, __pycache__]
+        - action: rebuild
+          path: ./services/gemini/requirements.txt
+        - action: rebuild
+          path: ./common/requirements.txt
+        - action: rebuild
+          path: ./services/gemini/Dockerfile
+
+  codex:
+    build:
+      context: .
+      dockerfile: services/codex/Dockerfile
+    healthcheck: *health
+    environment:
+      INTERNAL_SECRET: ${INTEGRATION_ENCRYPTION_KEY:-}
+    volumes:
+      - codex-home:/home/codex/.codex
+      - codex-work:/work
+    depends_on:
+      backend:
+        condition: service_healthy
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./services/codex
+          target: /app
+          ignore: [Dockerfile, requirements.txt, __pycache__]
+        - action: sync+restart
+          path: ./common
+          target: /app/common
+          ignore: [requirements.txt, __pycache__]
+        - action: rebuild
+          path: ./services/codex/requirements.txt
+        - action: rebuild
+          path: ./common/requirements.txt
+        - action: rebuild
+          path: ./services/codex/Dockerfile
+
+  jev:
+    build:
+      context: .
+      dockerfile: services/jev/Dockerfile
+    healthcheck: *health
+    environment:
+      INTERNAL_SECRET: ${INTEGRATION_ENCRYPTION_KEY:-}
+    depends_on:
+      backend:
+        condition: service_healthy
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./services/jev
+          target: /app
+          ignore: [Dockerfile, requirements.txt, __pycache__]
+        - action: sync+restart
+          path: ./common
+          target: /app/common
+          ignore: [requirements.txt, __pycache__]
+        - action: rebuild
+          path: ./services/jev/requirements.txt
+        - action: rebuild
+          path: ./common/requirements.txt
+        - action: rebuild
+          path: ./services/jev/Dockerfile
+
+  collector:
+    build:
+      context: .
+      dockerfile: services/collector/Dockerfile
+    healthcheck: *health
+    environment:
+      <<: *environment
+    volumes:
+      - ./data:/data
+    depends_on:
+      backend:
+        condition: service_healthy
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./services/collector
+          target: /app
+          ignore: [Dockerfile, requirements.txt, __pycache__]
+        - action: sync+restart
+          path: ./common
+          target: /app/common
+          ignore: [requirements.txt, __pycache__]
+        - action: rebuild
+          path: ./services/collector/requirements.txt
+        - action: rebuild
+          path: ./common/requirements.txt
+        - action: rebuild
+          path: ./services/collector/Dockerfile
+
+  notifications:
+    build:
+      context: .
+      dockerfile: services/notifications/Dockerfile
+    healthcheck: *health
+    environment:
+      <<: *environment
+    volumes:
+      - ./data:/data
+    depends_on:
+      backend:
+        condition: service_healthy
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./services/notifications
+          target: /app
+          ignore: [Dockerfile, requirements.txt, __pycache__]
+        - action: sync+restart
+          path: ./common
+          target: /app/common
+          ignore: [requirements.txt, __pycache__]
+        - action: rebuild
+          path: ./services/notifications/requirements.txt
+        - action: rebuild
+          path: ./common/requirements.txt
+        - action: rebuild
+          path: ./services/notifications/Dockerfile
+
+  admin-frontend:
+    build: ./admin/frontend
+    depends_on:
+      admin-backend:
+        condition: service_healthy
+    develop:
+      watch:
+        - action: rebuild
+          path: ./admin/frontend
 
   frontend:
     build: ./frontend
-    ports:
-      - "8080:80"
-    depends_on:
-      - backend
     develop:
       watch:
         - action: rebuild
           path: ./frontend
 
+  nginx:
+    build: ./nginx
+    ports:
+      - "8080:80"
+    depends_on:
+      frontend:
+        condition: service_started
+      admin-frontend:
+        condition: service_started
+      backend:
+        condition: service_healthy
+      admin-backend:
+        condition: service_healthy
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./nginx/nginx.conf
+          target: /etc/nginx/conf.d/default.conf
+        - action: rebuild
+          path: ./nginx/Dockerfile
+
 volumes:
-  task-data:
+  codex-home:
+  codex-work:
