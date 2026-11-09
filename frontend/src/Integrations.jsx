@@ -109,8 +109,8 @@ function IntegrationForms({ data, features }) {
       {features.jev !== false && <Paper withBorder p="lg"><Stack>
         <Title order={3}>Приоритеты · Laya Multilingual</Title>
         <Text size="sm">Локальная альтернатива Jev: 322M параметров, CPU, поддержка русского. Ключи и оплата Cloudflare не нужны. При первой проверке скачивается модель; первый запрос может занять несколько минут. Ориентир памяти сервиса — 2–3 ГБ, фактический расход зависит от текста.</Text>
-        <Switch label="Автоматически оценивать приоритеты" checked={jev.enabled} onChange={toggle(setJev, 'enabled')} />
-        <Text size="xs" c="dimmed">Сначала GPT-6 Luna проверяет задачу с памятью прошлых задач. При нехватке контекста задаёт вопросы; после ответа выполняется локальная оценка Jev. ИИ-оценка хранится отдельно от ручного приоритета. При ошибках обычный список задач продолжает работать.</Text>
+        <Switch label="Автоматически обновлять порядок задач" checked={jev.enabled} onChange={toggle(setJev, 'enabled')} />
+        <Text size="xs" c="dimmed">Сначала Luna проверяет контекст. Затем Jev сравнивает задачи попарно и расставляет по важности, без баллов из 100. При неуверенном сравнении сохраняются ручной приоритет и дедлайн. Просроченные задачи остаются выше остальных. Задачи без готового контекста ожидают уточнений.</Text>
         <Group><Button loading={mutation.isPending} onClick={() => save('jev', jev, setJev)}>Сохранить</Button><Button variant="default" disabled={mutation.isPending} onClick={() => run('jev/check')}>Проверить модель</Button></Group>
         <ConnectionInfo value={data.jev} />
       </Stack></Paper>}

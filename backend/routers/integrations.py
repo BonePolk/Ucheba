@@ -209,6 +209,17 @@ async def jev_check():
     return await provider_call('jev', jev.evaluate())
 
 
+@router.get('/jev/ranking')
+def jev_ranking():
+    check_feature('jev')
+    return jev.ranking_status()
+
+
+@router.post('/jev/rank')
+async def jev_rank():
+    return await provider_call('jev', jev.rank_all(force=True))
+
+
 @router.post('/tasks/{task_id}/jev')
 async def jev_score(task_id: int):
     config, _ = read_settings('jev')
@@ -363,6 +374,24 @@ class ContextFile(BaseModel):
     content: str = Field(max_length=14 * 1024 * 1024)
 
 
+class SavedContextFile(BaseModel):
+    source_task_id: int = Field(gt=0)
+    file_id: str = Field(pattern=r'^[a-f0-9]{32}$')
+
+
+@router.get('/context/files')
+async def saved_context_files():
+    return await call('context', '/files', method='GET')
+
+
+@router.post('/tasks/{task_id}/context/files/reuse')
+async def reuse_context_file(task_id: int, body: SavedContextFile):
+    context.get_context(task_id)
+    result = await call('context', f'/tasks/{task_id}/files/reuse', body.model_dump())
+    context.invalidate(task_id)
+    return result
+
+
 @router.get('/tasks/{task_id}/context/files')
 async def context_files(task_id: int):
     context.get_context(task_id)  # Проверяем задачу в базе текущего пользователя.
@@ -405,10 +434,14 @@ async def delete_context_file(task_id: int, file_id: str):
     return result
 
 
+@router.get('/context/files/{task_id}/{file_id}')
 @router.get('/tasks/{task_id}/context/files/{file_id}')
 async def download_context_file(task_id: int, file_id: str):
     check_feature('context')
-    context.get_context(task_id)
+    # Файл может остаться в библиотеке после удаления задачи. Владение задаётся
+    # пользовательским префиксом Silo и подписанным межсервисным запросом.
+    if task_id <= 0:
+        raise HTTPException(404, 'Файл не найден')
     if len(file_id) != 32 or any(c not in '0123456789abcdef' for c in file_id):
         raise HTTPException(404, 'Файл не найден')
     try:

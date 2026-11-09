@@ -54,6 +54,12 @@ class TaskAction(SQLModel, table=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class TaskRanking(SQLModel, table=True):
+    id: int = Field(default=1, primary_key=True)
+    snapshot: str = ''
+    result: str = '{}'
+
+
 class CodexRun(SQLModel, table=True):
     id: str = Field(primary_key=True)
     task_id: int

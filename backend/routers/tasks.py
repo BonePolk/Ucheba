@@ -10,6 +10,8 @@ from sqlmodel import Session, select
 
 from common.database import get_engine
 from common.settings import read_config
+from common.accounts import features
+from integrations import jev as jev_order
 from common.models.integration import TaskAction
 from common.models.task import Task, TaskCreate, TaskStatus, TaskUpdate
 
@@ -22,12 +24,14 @@ def list_tasks(
     status: TaskStatus | None = None,
     priority: Literal["low", "medium", "high", "overdue"] | None = None,
     category: str | None = None,
-    sort_by: Literal["deadline", "priority", "created_at", "ai_score"] = "deadline",
+    sort_by: Literal["deadline", "priority", "created_at", "ai_score", "jev"] = "deadline",
     order: Literal["asc", "desc"] = "asc",
 ):
     if sort_by == 'ai_score':
+        sort_by, order = 'jev', 'asc'
+    if sort_by == 'jev':
         jev = read_config('jev')
-        if not jev['enabled'] or jev['last_error']:
+        if not jev['enabled'] or not features()['jev'] or archived:
             sort_by, order = 'priority', 'asc'
     overdue = (
         (Task.deadline < datetime.now(timezone.utc))
@@ -47,6 +51,7 @@ def list_tasks(
     column = {
         "deadline": Task.deadline,
         "ai_score": Task.ai_score,
+        "jev": case((Task.priority == 'high', 0), (Task.priority == 'medium', 1), else_=2),
         "created_at": Task.created_at,
         "priority": case(
             (Task.priority == "high", 0),
@@ -59,6 +64,16 @@ def list_tasks(
     statement = statement.order_by(column.asc() if order == "asc" else column.desc(), Task.id.desc())
     with Session(get_engine()) as session:
         tasks = session.exec(statement).all()
+        if sort_by == 'jev':
+            positions = {task_id: index for index, task_id in enumerate(jev_order.ranking_status()['task_ids'])}
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            tasks.sort(key=lambda task: (
+                0 if task.deadline and task.deadline.replace(tzinfo=None) < now and task.status != 'done' else 1,
+                positions.get(task.id, len(positions)),
+                {'high': 0, 'medium': 1, 'low': 2}.get(task.priority, 1),
+                task.deadline.replace(tzinfo=None) if task.deadline else datetime.max,
+                task.id,
+            ))
         return tasks
 
 

@@ -1,5 +1,6 @@
 openai>=2,<3
 minio>=7.2,<8
 pypdf>=6,<8
+pypdfium2>=5,<6
 python-docx>=1.2,<2
 Pillow>=12,<13

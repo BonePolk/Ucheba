@@ -1,9 +1,9 @@
 from common.http import private_app
-from jev import evaluate_local
+from jev import rank_local
 
 app = private_app('jev')
 
 
-@app.post('/evaluate')
-def evaluate(body: dict):
-    return evaluate_local(body['state'])
+@app.post('/rank')
+def rank(body: dict):
+    return rank_local(body['tasks'], body['now'])

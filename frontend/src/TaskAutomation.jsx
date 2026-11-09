@@ -17,7 +17,11 @@ function ContextForm({ taskId, jevEnabled }) {
   const context = useQuery({ queryKey: ['context', taskId], queryFn: () => request(`/integrations/tasks/${taskId}/context`), refetchInterval: 5000 });
   const analyze = useMutation({
     mutationFn: () => request(`/integrations/tasks/${taskId}/context/analyze`, { method: 'POST' }),
-    onSuccess: () => client.invalidateQueries({ queryKey: ['context', taskId] }),
+    onSuccess: async () => {
+      await client.invalidateQueries({ queryKey: ['context', taskId] });
+      await client.invalidateQueries({ queryKey: ['tasks'] });
+    },
+    onSettled: () => client.invalidateQueries({ queryKey: ['context-files', taskId] }),
   });
   const save = useMutation({
     mutationFn: () => request(`/integrations/tasks/${taskId}/context`, { method: 'POST', body: JSON.stringify({ subject: subject ?? context.data?.subject ?? '', answer: answer ?? context.data?.owner_notes ?? '' }) }),
@@ -25,6 +29,7 @@ function ContextForm({ taskId, jevEnabled }) {
       await client.invalidateQueries({ queryKey: ['context', taskId] });
       await client.invalidateQueries({ queryKey: ['tasks'] });
     },
+    onSettled: () => client.invalidateQueries({ queryKey: ['context-files', taskId] }),
   });
   return <Paper withBorder p="md"><Stack gap="sm">
     <Title order={5}>Контекст · GPT-6 Luna</Title>
@@ -36,11 +41,12 @@ function ContextForm({ taskId, jevEnabled }) {
     {context.data?.usage && <Text size="xs" c="dimmed">Последняя проверка: вход {context.data.usage.input_tokens ?? 0}, выход {context.data.usage.output_tokens ?? 0} токенов</Text>}
     {context.data?.questions?.length > 0 && <Alert color="yellow"><Stack gap="xs">{context.data.questions.map((question, i) => <Text key={i} size="sm">{question}</Text>)}</Stack></Alert>}
     {context.data?.summary && <Text size="sm" style={{ whiteSpace: 'pre-wrap' }}>{context.data.summary}</Text>}
+    {context.data?.usage?.sources?.length > 0 && <Stack gap="xs"><Text size="sm" fw={500}>Использованные страницы</Text>{context.data.usage.sources.map((source) => <Anchor key={source.url} href={source.url} target="_blank" rel="noreferrer" size="sm">{source.title}</Anchor>)}</Stack>}
     <TextInput label="Предмет / область контекста" placeholder="Например: операционные системы" value={subject ?? context.data?.subject ?? ''} onChange={(event) => setSubject(event.currentTarget.value)} />
     <Textarea label="Ответы и известные факты" description="Сохрани полезные прошлые ответы; допиши новые уточнения. Данные отправляются в настроенный шлюз Luna." autosize minRows={3} value={answer ?? context.data?.owner_notes ?? ''} onChange={(event) => setAnswer(event.currentTarget.value)} />
-    <Button loading={save.isPending} disabled={analyze.isPending || !(answer ?? context.data?.owner_notes ?? '').trim()} onClick={() => save.mutate()}>{jevEnabled ? 'Сохранить контекст и оценить' : 'Сохранить контекст'}</Button>
+    <Button loading={save.isPending} disabled={analyze.isPending || !(answer ?? context.data?.owner_notes ?? '').trim()} onClick={() => save.mutate()}>{jevEnabled ? 'Сохранить контекст и обновить порядок' : 'Сохранить контекст'}</Button>
     {save.data?.metrics?.status === 'needs_context' && <Text c="yellow">Нужны дополнительные уточнения — см. вопросы выше.</Text>}
-    {save.data?.score != null && <Text>Оценка Jev: {save.data.score}/100</Text>}
+    {save.data?.rank != null && <Text>Порядок Jev: {save.data.rank} из {save.data.ranked_count}</Text>}
     {(save.error || analyze.error || context.error) && <Alert color="red">{(save.error || analyze.error || context.error).message}</Alert>}
   </Stack></Paper>;
 }
@@ -51,17 +57,19 @@ export default function TaskAutomation({ task, features = {} }) {
   const runs = useQuery({ queryKey: ['integrations', 'runs', task.id], queryFn: () => request(`/integrations/tasks/${task.id}/runs`), refetchInterval: 5000, retry: false, enabled: features.codex !== false });
   const action = useMutation({
     mutationFn: (provider) => request(`/integrations/tasks/${task.id}/${provider}`, { method: 'POST' }),
-    onSuccess: async (data) => {
-      setNotice(data.metrics?.status === 'needs_context' ? `Jev: недостаточно контекста. ${data.metrics.reason}` : data.score !== undefined ? `Оценка Jev: ${data.score}/100` : 'Задача передана Codex');
+    onSuccess: async (data, provider) => {
+      setNotice(provider === 'codex' ? 'Задача передана Codex' : data.metrics?.status === 'needs_context' ? `Jev: недостаточно контекста. ${data.metrics.reason}` : data.rank != null ? `Порядок Jev: ${data.rank} из ${data.ranked_count}` : 'Порядок Jev обновлён');
+      await client.invalidateQueries({ queryKey: ['jev-ranking'] });
       await client.invalidateQueries({ queryKey: ['tasks'] });
       await client.invalidateQueries({ queryKey: ['context', task.id] });
+      await client.invalidateQueries({ queryKey: ['context-files', task.id] });
       await client.invalidateQueries({ queryKey: ['integrations', 'runs', task.id] });
     },
   });
   return <Stack>
     <Text fw={500}>{task.title}</Text>
     <Text size="sm" c="dimmed">Сначала подключите провайдеров в разделе «Интеграции». Задача уже сохранена и не зависит от доступности ИИ.</Text>
-    <Group>{features.codex !== false && <Button disabled={action.isPending} onClick={() => action.mutate('codex')}>Поручить Codex</Button>}{features.jev !== false && features.context !== false && <Button variant="light" disabled={action.isPending} onClick={() => action.mutate('jev')}>Оценить через Jev</Button>}</Group>
+    <Group>{features.codex !== false && <Button disabled={action.isPending} onClick={() => action.mutate('codex')}>Поручить Codex</Button>}{features.jev !== false && features.context !== false && <Button variant="light" disabled={action.isPending} onClick={() => action.mutate('jev')}>Обновить порядок Jev</Button>}</Group>
     {features.context !== false && <ContextForm key={task.id} taskId={task.id} jevEnabled={features.jev !== false} />}
     {notice && <Alert color="purple">{notice}</Alert>}
     {(action.error || runs.error) && <Alert color="red">{(action.error || runs.error).message}</Alert>}

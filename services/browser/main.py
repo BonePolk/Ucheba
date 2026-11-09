@@ -4,15 +4,18 @@ import base64
 from contextlib import asynccontextmanager
 import ipaddress
 import json
+import logging
 import os
+from email.message import Message
 from pathlib import Path
 import re
 import socket
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qs, unquote, urlencode, urljoin, urlsplit, urlunsplit
 from uuid import uuid4
 
 from cryptography.fernet import Fernet
 from fastapi import HTTPException
+import httpx
 from playwright.async_api import async_playwright, Error as BrowserError
 from pydantic import BaseModel, Field, SecretStr
 
@@ -43,6 +46,8 @@ app = private_app('context', lifespan)
 @app.exception_handler(BrowserError)
 async def browser_error(request, exc):
     from fastapi.responses import JSONResponse
+    category = 'download_navigation' if 'Download is starting' in str(exc) else type(exc).__name__
+    logging.getLogger('uvicorn.error').error('browser: %s', category)
     return JSONResponse(status_code=502, content={'detail': 'Браузер не выполнил действие. Обновите снимок страницы; при необходимости завершите вход вручную.'})
 
 
@@ -75,14 +80,21 @@ def get_site(site_id):
 
 
 def origin(url):
-    parts = urlsplit(url)
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        raise HTTPException(400, 'Некорректный адрес или порт сайта') from None
     if parts.scheme not in ('http', 'https') or not parts.hostname or parts.username or parts.password:
         raise HTTPException(400, 'Используйте адрес сайта без логина и пароля в URL')
-    if parts.port not in (None, 80, 443):
-        raise HTTPException(400, 'Поддерживаются обычные HTTP/HTTPS сайты')
+    if port == 0:
+        raise HTTPException(400, 'Некорректный порт сайта')
     host = parts.hostname.lower()
     if ':' in host:
         host = f'[{host}]'
+    default_port = 443 if parts.scheme == 'https' else 80
+    if port is not None and port != default_port:
+        host += f':{port}'
     return f'{parts.scheme}://{host}'
 
 
@@ -155,8 +167,6 @@ class Site(BaseModel):
 @app.post('/sites')
 async def add_site(body: Site):
     await public_url(body.url)
-    if urlsplit(body.url).scheme != 'https':
-        raise HTTPException(400, 'Для сохранения пароля используйте HTTPS')
     if not body.username.get_secret_value() or not body.password.get_secret_value():
         raise HTTPException(422, 'Укажите логин и пароль личного кабинета')
     async with lock():
@@ -225,6 +235,7 @@ async def read_page(tab, site):
     links = await tab.locator('a[href]').evaluate_all('(items) => items.map(a => ({text: a.innerText.slice(0, 150), href: a.href}))')
     links = [item for item in links if item['text'].strip() and item['href'].startswith(origin(site['url']) + '/')][:100]
     return {'status': 'page', 'url': safe_url(tab.url), 'text': text,
+            'title': await tab.title(),
             'links': [{'index': index, 'text': item['text']} for index, item in enumerate(links)]}
 
 
@@ -236,6 +247,50 @@ class Action(BaseModel):
     y: int = Field(default=0, ge=0, lt=750)
     delta: int = Field(default=500, ge=-1500, le=1500)
     index: int = Field(default=0, ge=0, lt=100)
+
+
+async def download_link(tab, site, url):
+    if origin(url) != origin(site['url']):
+        raise HTTPException(400, 'Выберите ссылку из личного кабинета')
+    max_size = 10 * 1024 * 1024
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
+            for _ in range(6):
+                await public_url(url)
+                # Cookie используются только здесь и только для подходящего домена.
+                cookies = await tab.context.cookies(url)
+                headers = {'Cookie': '; '.join(f"{item['name']}={item['value']}" for item in cookies)}
+                if origin(url) == origin(site['url']):
+                    headers['Referer'] = safe_url(tab.url)
+                async with client.stream('GET', url, headers=headers) as response:
+                    if response.status_code in (301, 302, 303, 307, 308):
+                        location = response.headers.get('location')
+                        if not location:
+                            raise HTTPException(502, 'Сайт не указал адрес перенаправления файла')
+                        url = urljoin(url, location)
+                        continue
+                    if not response.is_success:
+                        raise HTTPException(502, f'ЛК не отдал файл (HTTP {response.status_code})')
+                    mime = response.headers.get('content-type', '').split(';')[0].lower()
+                    if mime in ('text/html', 'application/xhtml+xml'):
+                        return {'status': 'needs_user', 'reason': 'Вместо файла сайт вернул HTML-страницу. Возможно, требуется повторный вход или подтверждение скачивания.'}
+                    content = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        content.extend(chunk)
+                        if len(content) > max_size:
+                            raise HTTPException(413, 'Файл из ЛК больше 10 МБ')
+                    header = Message()
+                    header['Content-Disposition'] = response.headers.get('content-disposition', '')
+                    name = header.get_filename() or unquote(urlsplit(url).path.rsplit('/', 1)[-1]) or 'document'
+                    if not Path(name).suffix:
+                        name += {'application/pdf': '.pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
+                                 'text/plain': '.txt', 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp'}.get(mime, '')
+                    logging.getLogger('uvicorn.error').info('browser: file downloaded (%d bytes)', len(content))
+                    return {'status': 'file', 'name': name, 'content': base64.b64encode(content).decode(), 'url': safe_url(url)}
+    except httpx.HTTPError as exc:
+        logging.getLogger('uvicorn.error').error('browser download: %s', type(exc).__name__)
+        raise HTTPException(502, 'Не удалось скачать файл из ЛК: ошибка соединения или таймаут') from None
+    raise HTTPException(502, 'Слишком много перенаправлений при скачивании файла')
 
 
 @app.post('/manual')
@@ -274,15 +329,84 @@ async def agent(body: Action):
         tab = await page()
         if body.action == 'login':
             return await login(tab, site)
-        if body.action == 'follow':
+        if body.action in ('follow', 'download'):
             if tab.url == 'about:blank' or origin(tab.url) != origin(site['url']):
                 return {'status': 'needs_login', 'reason': 'Сначала войдите в выбранный личный кабинет.'}
             links = await tab.locator('a[href]').evaluate_all('(items) => items.map(a => ({text: a.innerText.slice(0, 150), href: a.href}))')
             links = [item for item in links if item['text'].strip() and item['href'].startswith(origin(site['url']) + '/')][:100]
             if body.index >= len(links):
                 raise HTTPException(400, 'Ссылка больше не доступна. Перечитайте страницу.')
-            await public_url(links[body.index]['href'])
-            await tab.goto(links[body.index]['href'], wait_until='domcontentloaded')
+            url = links[body.index]['href']
+            await public_url(url)
+            if body.action == 'download' or Path(urlsplit(url).path).suffix.lower() in ('.pdf', '.docx', '.txt', '.md', '.csv', '.png', '.jpg', '.jpeg', '.webp'):
+                return await download_link(tab, site, url)
+            try:
+                await tab.goto(url, wait_until='domcontentloaded')
+            except BrowserError as exc:
+                if 'Download is starting' not in str(exc):
+                    raise
+                return await download_link(tab, site, url)
         elif body.action != 'read':
-            raise HTTPException(400, 'Агенту доступны вход, чтение и переход по ссылке')
+            raise HTTPException(400, 'Агенту доступны вход, чтение, переход и скачивание по ссылке')
         return await read_page(tab, site)
+
+
+class WebAction(BaseModel):
+    action: str = Field(max_length=10)
+    query: str = Field(default='', max_length=500)
+    url: str = Field(default='', max_length=2000)
+
+
+async def text_route(route):
+    if route.request.resource_type in ('image', 'media', 'font'):
+        await route.abort()
+    else:
+        await guard(route)
+
+
+@app.post('/web')
+async def web(body: WebAction):
+    if body.action == 'search':
+        if not body.query.strip():
+            raise HTTPException(400, 'Укажите поисковый запрос')
+        url = 'https://www.google.com/search?' + urlencode({'q': body.query, 'hl': 'ru', 'num': 5})
+    elif body.action == 'read':
+        url = body.url
+    else:
+        raise HTTPException(400, 'Неизвестное действие поиска')
+    await public_url(url)
+    # Новый браузер без профиля, cookie и паролей личных кабинетов.
+    browser = await playwright.chromium.launch()
+    try:
+        context = await browser.new_context(service_workers='block', accept_downloads=False)
+        await context.route('**/*', text_route)
+        await context.route_web_socket('**/*', lambda ws: ws.close())
+        tab = await context.new_page()
+        tab.set_default_timeout(8000)
+        response = await tab.goto(url, wait_until='domcontentloaded', timeout=25000)
+        if response and response.status >= 400:
+            return {'status': 'unavailable', 'reason': f'Сайт вернул HTTP {response.status}'}
+        if body.action == 'search':
+            consent = tab.get_by_role('button', name=re.compile(r'^(Accept all|Принять все|Alle akzeptieren)$', re.I)).first
+            if await consent.count():
+                await consent.click()
+                await tab.wait_for_load_state('domcontentloaded')
+        text = (await tab.locator('body').inner_text())[:40000]
+        if body.action == 'read':
+            return {'status': 'page', 'title': await tab.title(), 'url': tab.url, 'text': text}
+        links = await tab.locator('a:has(h3)').evaluate_all('(items) => items.map(a => ({title: a.innerText.slice(0, 250), url: a.href}))')
+        results = []
+        for link in links:
+            parts = urlsplit(link['url'])
+            if parts.path == '/url' and parts.hostname and parts.hostname.endswith('google.com'):
+                params = parse_qs(parts.query)
+                link['url'] = (params.get('url') or params.get('q') or [''])[0]
+            if urlsplit(link['url']).scheme in ('http', 'https'):
+                results.append(link)
+            if len(results) == 5:
+                break
+        if not results:
+            return {'status': 'unavailable', 'reason': 'Google не вернул доступную выдачу. Возможно, требуется CAPTCHA или изменился формат страницы.'}
+        return {'status': 'search', 'results': results, 'text': text}
+    finally:
+        await browser.close()

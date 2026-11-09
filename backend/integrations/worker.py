@@ -23,9 +23,10 @@ async def run():
                 next_score = now + 60
                 with Session(get_engine()) as session:
                     ids = [t.id for t in session.exec(select(Task).where(
-                        Task.archived == False, Task.status != 'done', (Task.ai_scored_at.is_(None) | Task.ai_details.not_like('%"version": 4%'))).limit(3)).all()]
+                        Task.archived == False, Task.status != 'done', (Task.ai_scored_at.is_(None) | Task.ai_details.not_like('%"version": 5%'))).limit(3)).all()]
                 for task_id in ids:
                     await provider_call('jev', jev.evaluate(task_id))
+                await provider_call('jev', jev.rank_all())
             agent, _ = read_settings('codex')
             if agent['enabled'] and agent['auto_prepare'] and now >= next_prepare and not (codex.job_task and not codex.job_task.done()):
                 next_prepare = now + 60

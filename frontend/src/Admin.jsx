@@ -2,7 +2,7 @@ import { Alert, Loader, Paper, Stack, Switch, Text, Title } from '@mantine/core'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { request } from './api';
 
-const labels = { telegram: 'Telegram-аккаунты', gemini: 'Анализ Gemini', codex: 'Выполнение Codex', jev: 'Оценка Jev', context: 'Контекст GPT-6 Luna', collector: 'Боты сбора задач', notifications: 'Боты уведомлений', registration: 'Регистрация новых пользователей' };
+const labels = { telegram: 'Telegram-аккаунты', gemini: 'Анализ Gemini', codex: 'Выполнение Codex', jev: 'Порядок задач Jev', context: 'Контекст GPT-6 Luna', collector: 'Боты сбора задач', notifications: 'Боты уведомлений', registration: 'Регистрация новых пользователей' };
 
 export default function Admin() {
   const client = useQueryClient();
