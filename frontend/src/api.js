@@ -12,6 +12,17 @@ export async function request(path, options = {}) {
   return response.status === 204 ? null : response.json();
 }
 
+
+export async function agentRequest(path, options = {}) {
+  const started = await request(`${path}${path.includes('?') ? '&' : '?'}background=true`, options);
+  if (!started?.job_id) return started;
+  while (true) {
+    const job = await request(`/integrations/jobs/${started.job_id}`);
+    if (job.status === 'completed') return job.result;
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+}
+
 export function getTasks(filters = {}) {
   const params = new URLSearchParams();
   Object.entries(filters).forEach(([key, value]) => {

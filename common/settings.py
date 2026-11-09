@@ -14,7 +14,7 @@ DEFAULTS = {
     'telegram': {'enabled': False, 'chat_ids': []},
     'gemini': {'enabled': False, 'model': 'gemini-3.8-flash', 'interval_seconds': 300,
                'confidence_threshold': 0.9, 'timezone': 'UTC', 'owner_context': ''},
-    'context': {'enabled': True, 'base_url': 'https://lenec.tech/v1', 'model': 'gpt-6-luna'},
+    'context': {'enabled': True, 'base_url': 'https://lenec.tech/v1', 'model': 'gpt-6-luna', 'rewrite_title': False},
     'codex': {'enabled': False, 'auto_prepare': False},
     'jev': {'enabled': False, 'account_id': '', 'model': 'typesafe/jev'},
 }

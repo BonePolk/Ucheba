@@ -5,6 +5,7 @@ import { request } from './api';
 
 const TaskBoard = lazy(() => import('./TaskBoard'));
 const Account = lazy(() => import('./Account'));
+const Files = lazy(() => import('./Files'));
 const Admin = lazy(() => import('./Admin'));
 const Inbox = lazy(() => import('./Inbox'));
 const TaskAutomation = lazy(() => import('./TaskAutomation'));
@@ -46,7 +47,7 @@ export default function App() {
     const link = event.target.closest('a');
     if (!link || event.defaultPrevented || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || link.target || link.hasAttribute('download')) return;
     const url = new URL(link.href);
-    if (url.origin !== window.location.origin || !['/', '/profile', '/admin', '/inbox'].includes(url.pathname)) return;
+    if (url.origin !== window.location.origin || !['/', '/profile', '/admin', '/inbox', '/files'].includes(url.pathname)) return;
     event.preventDefault();
     window.history.pushState(null, '', url.pathname + url.search + url.hash);
     setLocation(url.pathname + url.search);
@@ -63,9 +64,9 @@ export default function App() {
   const inboxEnabled = user.features.gemini !== false;
   return <Stack gap="md" key={user.id} onClick={followLink}>
     <Container size="xl" w="100%" pt="md"><Group justify="space-between">
-      <Group gap="md"><Anchor href="/">Задачи и архив</Anchor><Anchor href="/profile">Профиль</Anchor>{inboxEnabled && <Anchor href="/inbox">На подтверждение</Anchor>}{user.is_admin && <Anchor href="/admin">Админка</Anchor>}</Group>
+      <Group gap="md"><Anchor href="/">Задачи и архив</Anchor><Anchor href="/profile">Профиль</Anchor>{user.features.context !== false && <Anchor href="/files">Файлы</Anchor>}{inboxEnabled && <Anchor href="/inbox">На подтверждение</Anchor>}{user.is_admin && <Anchor href="/admin">Админка</Anchor>}</Group>
       <Group><Text size="sm">{user.username}</Text><Button size="xs" variant="default" loading={logout.isPending} onClick={() => logout.mutate()}>Выйти</Button></Group>
     </Group>{logout.error && <Alert color="red">{logout.error.message}</Alert>}</Container>
-    <Suspense fallback={<Container py="xl"><Loader /></Container>}>{board ? <TaskBoard features={user.features} /> : <Container size="xl" w="100%" py="lg">{task ? <TaskPanel id={task} features={user.features} /> : path.startsWith('/profile') ? <Account user={user} /> : path.startsWith('/admin') ? user.is_admin ? <Admin /> : <Alert color="red">Требуется доступ администратора</Alert> : path.startsWith('/inbox') ? inboxEnabled ? <Inbox /> : <Alert>Функция отключена</Alert> : <Alert>Страница не найдена</Alert>}</Container>}</Suspense>
+    <Suspense fallback={<Container py="xl"><Loader /></Container>}>{board ? <TaskBoard features={user.features} /> : <Container size="xl" w="100%" py="lg">{task ? <TaskPanel id={task} features={user.features} /> : path === '/files' ? user.features.context !== false ? <Files /> : <Alert>Функция отключена</Alert> : path.startsWith('/profile') ? <Account user={user} /> : path.startsWith('/admin') ? user.is_admin ? <Admin /> : <Alert color="red">Требуется доступ администратора</Alert> : path.startsWith('/inbox') ? inboxEnabled ? <Inbox /> : <Alert>Функция отключена</Alert> : <Alert>Страница не найдена</Alert>}</Container>}</Suspense>
   </Stack>;
 }

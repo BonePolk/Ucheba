@@ -4,6 +4,15 @@
   100% { background-color: transparent; }
 }
 
+.task-markdown {
+  overflow-wrap: anywhere;
+}
+
+.task-markdown pre {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
 @keyframes check-pop {
   0%, 100% { transform: scale(1); }
   45% { transform: scale(1.25); }

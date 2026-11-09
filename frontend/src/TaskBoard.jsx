@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Alert, Badge, Button, Checkbox, Container, Group, Loader, Paper, SegmentedControl, Select, SimpleGrid, Stack, Table, Text, Title } from '@mantine/core';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { deleteTask, getTasks, request, saveTask } from './api';
+import { agentRequest, deleteTask, getTasks, request, saveTask } from './api';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
 import TaskForm, { priorities, statuses } from './TaskForm';
@@ -53,7 +53,7 @@ export default function TaskBoard({ features = {} }) {
   ]);
   const ranking = useQuery({ queryKey: ['jev-ranking'], queryFn: () => request('/integrations/jev/ranking'),
     enabled: features.jev !== false && !archived, refetchInterval: 15000 });
-  const rank = useMutation({ mutationFn: () => request('/integrations/jev/rank', { method: 'POST' }),
+  const rank = useMutation({ mutationFn: () => agentRequest('/integrations/jev/rank', { method: 'POST' }),
     onSuccess: async () => { setSort('jev:asc'); await queryClient.invalidateQueries({ queryKey: ['jev-ranking'] }); await refresh(); } });
   const positions = new Map((ranking.data?.task_ids ?? []).map((id, index) => [id, index + 1]));
   const save = useMutation({
@@ -126,9 +126,9 @@ export default function TaskBoard({ features = {} }) {
                         <Checkbox aria-label={`Выполнено: ${task.title}`} checked={task.status === 'done' || completing === task.id} disabled={update.isPending || archived} onChange={(event) => update.mutate({ id: task.id, data: { status: event.currentTarget.checked ? 'done' : 'todo' } })} />
                       </Table.Td>
                       <Table.Td miw={180} maw={320}>
-                        <Text fw={500} td={task.status === 'done' || completing === task.id ? 'line-through' : undefined} style={{ overflowWrap: 'anywhere' }}>{task.title}</Text>
+                        <Text component="a" href={`/?task=${task.id}`} fw={500} c="inherit" td={task.status === 'done' || completing === task.id ? 'line-through' : undefined} style={{ overflowWrap: 'anywhere' }}>{task.title}</Text>
                         {task.source_url && <Text component="a" href={task.source_url} target="_blank" rel="noreferrer" size="xs" c="purple">Источник Telegram</Text>}
-                        {task.description && <Text size="sm" c="dimmed" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{task.description}</Text>}
+                        {task.description && <Text size="sm" c="dimmed" lineClamp={2} style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{task.description}</Text>}
                       </Table.Td>
                       <Table.Td style={{ whiteSpace: 'nowrap' }}><Text size="sm" c={isOverdue(task, now) ? 'red' : undefined}>{task.deadline ? dayjs.utc(task.deadline).local().format('DD.MM.YYYY HH:mm') : '—'}</Text>{isOverdue(task, now) && <Text size="xs" c="red">Просрочено</Text>}</Table.Td>
                       <Table.Td><Badge color={isOverdue(task, now) ? 'red' : { low: 'gray', medium: 'yellow', high: 'red' }[task.priority]} variant="light">{isOverdue(task, now) ? 'Наивысший' : priorities.find((item) => item.value === task.priority)?.label}</Badge>{features.context !== false && task.ai_details && JSON.parse(task.ai_details).status === 'needs_context' && <Text size="xs" c="yellow">Недостаточно контекста. {JSON.parse(task.ai_details).reason} <a href={`/?task=${task.id}`}>Ответить</a></Text>}{features.jev !== false && positions.has(task.id) && <Text size="xs" c="dimmed">Порядок Jev: {positions.get(task.id)} из {ranking.data.ranked_count}</Text>}</Table.Td>

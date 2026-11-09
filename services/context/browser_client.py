@@ -7,7 +7,7 @@ from common.rpc import internal_token
 
 async def browser_request(path, body=None, method='POST'):
     try:
-        async with httpx.AsyncClient(timeout=50) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=8)) as client:
             response = await client.request(method, f'http://browser:8000{path}', json=body,
                 headers={'X-Service-Token': internal_token('context'), 'X-User-ID': str(user_id())})
     except httpx.HTTPError:

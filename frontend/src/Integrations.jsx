@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Alert, Anchor, Badge, Button, Group, Loader, MultiSelect, NumberInput, Paper, PasswordInput, Select, SimpleGrid, Stack, Switch, Text, Textarea, TextInput, Title } from '@mantine/core';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { request } from './api';
+import { agentRequest, request } from './api';
 import BotSettings from './BotSettings';
 import JevProgress from './JevProgress';
 
@@ -27,7 +27,7 @@ function IntegrationForms({ data, features }) {
   const [telegram, setTelegram] = useState({ enabled: data.telegram.enabled, api_id: '', api_hash: '', phone: '' });
   const [gemini, setGemini] = useState({ enabled: data.gemini.enabled, model: data.gemini.model, interval_seconds: data.gemini.interval_seconds, confidence_threshold: data.gemini.confidence_threshold, timezone: data.gemini.timezone, owner_context: data.gemini.owner_context, api_key: '' });
   const [codex, setCodex] = useState({ enabled: data.codex.enabled, auto_prepare: data.codex.auto_prepare });
-  const [context, setContext] = useState({ enabled: data.context.enabled, api_key: '' });
+  const [context, setContext] = useState({ enabled: data.context.enabled, rewrite_title: data.context.rewrite_title ?? false, api_key: '' });
   const [jev, setJev] = useState({ enabled: data.jev.enabled });
   const [code, setCode] = useState('');
   const [password, setPassword] = useState('');
@@ -39,7 +39,7 @@ function IntegrationForms({ data, features }) {
   const [codexOpened, setCodexOpened] = useState(data.codex.enabled);
   const codexState = useQuery({ queryKey: ['integrations', 'codex'], enabled: features.codex !== false && codexOpened, queryFn: () => request('/integrations/codex/status'), refetchInterval: 10000, retry: false });
   const mutation = useMutation({
-    mutationFn: ({ path, body, method = 'POST' }) => request(`/integrations/${path}`, { method, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) }),
+    mutationFn: ({ path, body, method = 'POST' }) => (path === 'jev/check' ? agentRequest : request)(`/integrations/${path}`, { method, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) }),
     onSuccess: async (result, variables) => {
       if (variables.method === 'PATCH') {
         const setter = { telegram: setTelegram, gemini: setGemini, codex: setCodex, context: setContext, jev: setJev }[variables.path];
@@ -77,6 +77,7 @@ function IntegrationForms({ data, features }) {
         <Text size="sm">Личный ключ шлюза lenec.tech. Память контекста и ответы доступны только в твоём аккаунте.</Text>
         <PasswordInput label="API-ключ" placeholder={data.context.configured.api_key ? 'Сохранён' : ''} value={context.api_key} onChange={field(setContext, 'api_key')} />
         <Switch label="Проверять контекст перед Jev" checked={context.enabled} onChange={toggle(setContext, 'enabled')} />
+        <Switch label="Разрешить Luna переписывать название задачи" checked={context.rewrite_title} onChange={toggle(setContext, 'rewrite_title')} />
         <Group><Button loading={saving('context')} disabled={mutation.isPending} onClick={() => save('context', context)}>Сохранить</Button><Button variant="subtle" color="red" disabled={mutation.isPending} onClick={() => run('context', { api_key: null, enabled: false }, 'PATCH')}>Удалить ключ</Button></Group>
         <ConnectionInfo value={data.context} />
       </Stack></Paper>}

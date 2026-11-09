@@ -1,6 +1,6 @@
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
 from sqlmodel import Session, select
@@ -22,12 +22,16 @@ def task_state(session):
     ready, waiting, state = [], [], []
     for task in tasks:
         context = session.get(TaskContext, task.id)
-        valid = bool(context and context.status == 'ready' and context.task_snapshot == snapshot(task))
+        valid = bool(context and context.status == 'ready' and context.task_snapshot == snapshot(task) and json.loads(context.usage).get('full_markdown'))
         state.append({'task': snapshot(task), 'id': task.id,
                       'context_version': str(context.updated_at) if context else None,
                       'ready': valid})
         if valid:
-            ready.append({'id': task.id, 'title': task.title, 'description': (task.description or '')[:2000],
+            ready.append({'id': task.id, 'title': task.title, 'description': task.description or '',
+                          'category': task.category, 'subject': context.subject,
+                          'owner_notes': context.owner_notes, 'questions': json.loads(context.questions),
+                          'full_context': json.loads(context.usage).get('full_markdown', context.summary),
+                          'sources': json.loads(context.usage).get('sources', []),
                           'deadline': normalize_utc(task.deadline), 'context': context.summary,
                           'priority': task.priority})
         else:
@@ -35,7 +39,7 @@ def task_state(session):
     # При равном сравнении сохраняем ручной приоритет, затем ближайший дедлайн.
     ready.sort(key=lambda task: ({'high': 0, 'medium': 1, 'low': 2}.get(task['priority'], 1),
                                  task['deadline'].isoformat() if task['deadline'] else '9999', task['id']))
-    signature = json.dumps({'hour': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H'), 'tasks': state}, sort_keys=True)
+    signature = json.dumps({'version': 6, 'hour': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H'), 'tasks': state}, sort_keys=True)
     return signature, ready, waiting
 
 
@@ -61,7 +65,7 @@ async def rank_all(force=False, task_id=0):
             if not force and saved and saved.snapshot == signature:
                 return json.loads(saved.result)
         if len(ready) > 1:
-            result = await call('jev', '/rank', {'tasks': ready, 'now': datetime.now(timezone.utc).isoformat(), 'task_id': task_id}, timeout=300)
+            result = await call('jev', '/rank', {'tasks': ready, 'now': datetime.now(timezone.utc).isoformat(), 'task_id': task_id}, timeout=None)
         else:
             result = {'task_ids': [task['id'] for task in ready], 'comparisons': 0, 'uncertain_comparisons': 0}
         ids = result.get('task_ids', [])
@@ -77,7 +81,7 @@ async def rank_all(force=False, task_id=0):
             session.add(saved)
             for task_id in ids:
                 task = session.get(Task, task_id)
-                task.ai_details = json.dumps({'version': 5, 'status': 'ranked'})
+                task.ai_details = json.dumps({'version': 6, 'status': 'ranked'})
                 task.ai_scored_at = datetime.now(timezone.utc)
                 session.add(task)
             session.commit()
@@ -88,12 +92,19 @@ async def rank_all(force=False, task_id=0):
 async def evaluate(task_id=None):
     if task_id is None:
         # Проверка подключения по кнопке в профиле, без обращений к Luna.
+        now = datetime.now(timezone.utc)
         result = await call('jev', '/rank', {'tasks': [
-            {'id': 1, 'title': 'Выбрать обои для рабочего стола', 'context': 'Необязательное украшение.'},
-            {'id': 2, 'title': 'Уйти из горящего дома', 'context': 'Непосредственная угроза жизни.'},
-        ], 'now': datetime.now(timezone.utc).isoformat()}, timeout=300)
+            {'id': 1, 'title': 'Обновить оформление внутренней презентации',
+             'deadline': (now + timedelta(days=14)).isoformat(),
+             'full_context': 'Необязательная косметическая правка внутреннего черновика. '
+                             'Текущее оформление подходит, работа команды не заблокирована.'},
+            {'id': 2, 'title': 'Отправить клиенту согласованный договор',
+             'deadline': (now + timedelta(hours=1)).isoformat(),
+             'full_context': 'Договор уже согласован и готов к отправке. Клиент ждёт его в течение часа '
+                             'для подписания и оплаты. Задержка сорвёт сегодняшнюю сделку и отложит оплату.'},
+        ], 'now': now.isoformat()}, timeout=None)
         if result.get('task_ids') != [2, 1]:
-            raise HTTPException(502, 'Jev не различил срочную угрозу жизни и необязательную задачу. На порядок модели пока нельзя полагаться.')
+            raise HTTPException(502, 'Jev не поставил срочную отправку договора клиенту выше косметической правки презентации. На порядок модели пока нельзя полагаться.')
         return {'ok': True, 'comparisons': result['comparisons']}
     with Session(get_engine()) as session:
         task = session.get(Task, task_id)
@@ -101,8 +112,10 @@ async def evaluate(task_id=None):
             raise HTTPException(404, 'Задача не найдена')
         original = snapshot(task)
     context = await prepare(task_id)
+    # Luna могла уточнить поля задачи. Дальше сравниваем уже с её результатом.
+    original = context['task_snapshot']
     if context['status'] != 'ready':
-        metrics = {'version': 5, 'status': 'needs_context', 'reason': ' '.join(context['questions'])}
+        metrics = {'version': 6, 'status': 'needs_context', 'reason': ' '.join(context['questions'])}
         with Session(get_engine()) as session:
             task = session.get(Task, task_id)
             if not task:
@@ -117,4 +130,4 @@ async def evaluate(task_id=None):
     result = await rank_all(task_id=task_id)
     ids = result['task_ids']
     return result | {'rank': ids.index(task_id) + 1 if task_id in ids else None,
-                     'metrics': {'status': 'ranked', 'version': 5}}
+                     'metrics': {'status': 'ranked', 'version': 6}}

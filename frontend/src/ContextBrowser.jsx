@@ -35,7 +35,7 @@ export default function ContextBrowser({ taskId, disabled }) {
   });
   const forget = useMutation({
     mutationFn: () => request(`${sitesPath}/${selected.data.site_id}`, { method: 'DELETE' }),
-    onSuccess: () => select.mutate(null),
+    onSuccess: () => { client.setQueryData(['luna-browser-screen'], null); select.mutate(null); },
   });
   const action = useMutation({
     mutationFn: (values) => request(`${path}/action`, { method: 'POST', body: JSON.stringify({ site_id: selected.data.site_id, ...values }) }),

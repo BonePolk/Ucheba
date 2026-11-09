@@ -8,6 +8,7 @@ from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
 import httpx
 from pydantic import BaseModel, Field, ValidationError
 from sqlmodel import Session, select
@@ -17,7 +18,7 @@ from common.rpc import call, internal_token
 from common.security import require_user
 from common.identity import user_id
 from common.accounts import check_feature, features
-from integrations import codex, gemini, jev, telegram, context
+from integrations import codex, gemini, jev, telegram, context, jobs
 from common import extraction as pipeline
 from common.settings import SECRET_FIELDS, public_settings, read_settings, report, save_settings
 from common.models.integration import CodexRun, Suggestion
@@ -41,6 +42,11 @@ async def provider_call(name, operation):
 
 router = APIRouter(prefix='/api/integrations', tags=['integrations'], dependencies=[Depends(require_user)])
 inbox = APIRouter(prefix='/api/inbox', tags=['inbox'], dependencies=[Depends(require_user)])
+
+
+@router.get('/jobs/{job_id}')
+def agent_job(job_id: str):
+    return jobs.result(job_id)
 
 
 @router.get('/progress')
@@ -97,6 +103,7 @@ class CollectorConfig(BaseModel):
 
 class ContextConfig(BaseModel):
     enabled: bool = True
+    rewrite_title: bool = False
     base_url: Literal['https://lenec.tech/v1'] = 'https://lenec.tech/v1'
     model: Literal['gpt-6-luna'] = 'gpt-6-luna'
 
@@ -224,7 +231,9 @@ async def codex_check():
 
 
 @router.post('/jev/check')
-async def jev_check():
+async def jev_check(background: bool = False):
+    if background:
+        return jobs.start(lambda: provider_call('jev', jev.evaluate()))
     return await provider_call('jev', jev.evaluate())
 
 
@@ -235,15 +244,19 @@ def jev_ranking():
 
 
 @router.post('/jev/rank')
-async def jev_rank():
+async def jev_rank(background: bool = False):
+    if background:
+        return jobs.start(lambda: provider_call('jev', jev.rank_all(force=True)))
     return await provider_call('jev', jev.rank_all(force=True))
 
 
 @router.post('/tasks/{task_id}/jev')
-async def jev_score(task_id: int):
+async def jev_score(task_id: int, background: bool = False):
     config, _ = read_settings('jev')
     if not config['enabled']:
         raise HTTPException(400, 'Включите Jev в настройках')
+    if background:
+        return jobs.start(lambda: provider_call('jev', jev.evaluate(task_id)))
     return await provider_call('jev', jev.evaluate(task_id))
 
 
@@ -375,22 +388,54 @@ def task_context(task_id: int):
 
 
 @router.post('/tasks/{task_id}/context/analyze')
-async def analyze_context(task_id: int):
+async def analyze_context(task_id: int, background: bool = False):
+    if background:
+        return jobs.start(lambda: provider_call('context', context.prepare(task_id, force=True)))
     return await provider_call('context', context.prepare(task_id, force=True))
 
 
 @router.post('/tasks/{task_id}/context')
-async def answer_context(task_id: int, body: ContextAnswer):
+async def answer_context(task_id: int, body: ContextAnswer, background: bool = False):
     check_feature('context')
     context.save_answer(task_id, body.subject, body.answer)
     if not features()['jev']:
         return {'status': 'saved'}
+    if background:
+        return jobs.start(lambda: provider_call('jev', jev.evaluate(task_id)))
     return await provider_call('jev', jev.evaluate(task_id))
 
 
 class ContextFile(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     content: str = Field(max_length=14 * 1024 * 1024)
+
+
+class WorkspaceFile(BaseModel):
+    path: str = Field(min_length=1, max_length=500)
+    content: str = Field(max_length=1024 * 1024)
+    version: str | None = Field(default=None, pattern=r'^[a-f0-9]{64}$')
+
+
+@router.get('/context/workspace')
+async def workspace_tree():
+    return await call('context', '/workspace', method='GET')
+
+
+@router.get('/context/workspace/file')
+async def workspace_read(path: str):
+    return await call('context', '/workspace/file?path=' + quote(path, safe=''), method='GET')
+
+
+@router.post('/context/workspace/folder')
+async def workspace_folder(path: str):
+    return await call('context', '/workspace/folder?path=' + quote(path, safe=''))
+
+
+@router.put('/context/workspace/file')
+async def workspace_save(body: WorkspaceFile):
+    result = await call('context', '/workspace/file', body.model_dump(), method='PUT')
+    context.invalidate_file_contexts(result.get('task_id'))
+    return result
 
 
 class SavedContextFile(BaseModel):
@@ -484,6 +529,39 @@ async def delete_browser_site(site_id: str):
     if len(site_id) != 32 or any(c not in '0123456789abcdef' for c in site_id):
         raise HTTPException(404, 'Личный кабинет не найден')
     return await call('context', f'/browser/sites/{site_id}', method='DELETE')
+
+
+@router.get('/context/browser/screen')
+async def luna_screen(response: Response):
+    response.headers['Cache-Control'] = 'no-store'
+    return await call('context', '/browser/screen', method='GET', timeout=5)
+
+
+@router.get('/context/browser/stream')
+async def luna_browser_stream():
+    check_feature('context')
+    client = httpx.AsyncClient(timeout=15)
+    try:
+        upstream = await client.send(client.build_request('GET', 'http://browser:8000/stream',
+            headers={'X-Service-Token': internal_token('context'), 'X-User-ID': str(user_id())}), stream=True)
+    except httpx.HTTPError:
+        await client.aclose()
+        raise HTTPException(503, 'Видеопоток браузера недоступен') from None
+    if not upstream.is_success:
+        await upstream.aclose()
+        await client.aclose()
+        raise HTTPException(503, 'Браузер не открыл видеопоток')
+
+    async def frames():
+        try:
+            async for chunk in upstream.aiter_bytes():
+                yield chunk
+        finally:
+            await upstream.aclose()
+            await client.aclose()
+
+    return StreamingResponse(frames(), media_type='multipart/x-mixed-replace; boundary=frame',
+                             headers={'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no'})
 
 
 @router.api_route('/tasks/{task_id}/context/browser', methods=['GET', 'PUT'])

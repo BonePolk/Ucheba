@@ -6,9 +6,10 @@ from sqlmodel import Session, select
 
 from common.database import get_engine
 from common.models.integration import TaskContext
+from common.models.context import ContextTaskUpdate
 from common.models.task import Task
 from common.rpc import call
-from common.settings import read_settings
+from common.settings import read_config, read_settings
 
 
 def snapshot(task):
@@ -27,6 +28,7 @@ def get_context(task_id):
         return row.model_dump(exclude={'questions', 'task_snapshot', 'usage'}) | {
             'questions': json.loads(row.questions), 'usage': json.loads(row.usage),
             'status': row.status if row.task_snapshot == snapshot(task) else 'new',
+            'full_markdown': json.loads(row.usage).get('full_markdown', row.summary),
         }
 
 
@@ -73,17 +75,36 @@ def save_answer(task_id, subject, answer):
         session.commit()
 
 
+def invalidate_file_contexts(task_id=None):
+    # Личный документ мог использоваться несколькими задачами пользователя.
+    with Session(get_engine()) as session:
+        query = select(TaskContext)
+        if task_id is not None:
+            query = query.where(TaskContext.task_id == task_id)
+        for row in session.exec(query).all():
+            row.status = 'new'
+            row.updated_at = datetime.now(timezone.utc)
+            session.add(row)
+            task = session.get(Task, row.task_id)
+            if task:
+                task.ai_score = task.ai_details = task.ai_scored_at = None
+                session.add(task)
+        session.commit()
+
+
 async def prepare(task_id, force=False):
     with Session(get_engine()) as session:
         task = session.get(Task, task_id)
         if not task:
             raise HTTPException(404, 'Задача не найдена')
         task_state = snapshot(task)
+        task_version = task.updated_at
         row = session.get(TaskContext, task_id)
         version = row.updated_at if row else None
         row = row or TaskContext(task_id=task_id)
-        if not force and row.task_snapshot == task_state and row.status in ('ready', 'needs_context'):
-            return {'status': row.status, 'summary': row.summary, 'questions': json.loads(row.questions)}
+        if not force and row.task_snapshot == task_state and row.status in ('ready', 'needs_context') and json.loads(row.usage).get('full_markdown'):
+            return {'status': row.status, 'summary': row.summary, 'questions': json.loads(row.questions),
+                    'task_snapshot': task_state}
         subject, notes = row.subject, row.owner_notes
         memory = []
         query = select(TaskContext).where(TaskContext.task_id != task_id)
@@ -103,19 +124,37 @@ async def prepare(task_id, force=False):
         'config': config, 'api_key': secrets['api_key'],
         'task_id': task_id, 'task': json.loads(task_state), 'subject': subject,
         'owner_notes': notes, 'past_tasks': memory,
-    }, timeout=300)
+        'allow_title_rewrite': config['rewrite_title'],
+    }, timeout=None)
+    changes = ContextTaskUpdate.model_validate(result.get('task_update') or {
+        'title': None,
+    })
     with Session(get_engine()) as session:
         task = session.get(Task, task_id)
         row = session.get(TaskContext, task_id)
         current_version = row.updated_at if row else None
         row = row or TaskContext(task_id=task_id)
-        if not task or snapshot(task) != task_state or row.subject != subject or row.owner_notes != notes or current_version != version:
+        if not task or task.updated_at != task_version or snapshot(task) != task_state or row.subject != subject or row.owner_notes != notes or current_version != version:
             raise HTTPException(409, 'Задача или контекст изменились. Повторите оценку')
+        changed_fields = []
+        # Даже если модель нарушит инструкцию, описание и категория не меняются.
+        allow_title = config['rewrite_title'] and read_config('context')['rewrite_title']
+        if allow_title and changes.title is not None and changes.title != task.title:
+            task.title = changes.title
+            changed_fields.append('title')
+        if changed_fields:
+            task.updated_at = datetime.now(timezone.utc)
+            task.ai_score = task.ai_details = task.ai_scored_at = None
+            session.add(task)
+        result['updated_fields'] = changed_fields
+        result['task_snapshot'] = snapshot(task)
         row.status = result['status']
         row.summary = result['summary']
         row.questions = json.dumps(result['questions'], ensure_ascii=False)
-        row.task_snapshot = task_state
-        row.usage = json.dumps(result.get('usage', {}))
+        row.task_snapshot = snapshot(task)
+        row.usage = json.dumps(result.get('usage', {}) | {
+            'updated_fields': changed_fields, 'full_markdown': result['full_markdown'],
+        })
         row.updated_at = datetime.now(timezone.utc)
         session.add(row)
         session.commit()

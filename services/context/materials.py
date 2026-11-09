@@ -198,7 +198,11 @@ def upload(memory, task_id, name, content, deduplicate=False):
     if deduplicate:
         for file in existing:
             if file['id'] == file_id:
-                return file
+                if memory.read_bytes(file_key(task_id, file_id) + '.bin') == content:
+                    return file
+                # Отредактированный файл сохраняем, скачанную версию кладём отдельно.
+                file_id = uuid4().hex
+                break
     if len(existing) >= MAX_FILES:
         raise HTTPException(400, 'К задаче можно прикрепить до пяти файлов')
     name = name.replace('\\', '/').split('/')[-1][:200]
@@ -233,3 +237,25 @@ def model_input(memory, task_id):
     files = [file | {'task_id': task_id} for file in list_files(memory, task_id)]
     return [{'type': 'input_text', 'text': 'Каталог прикреплённых файлов. Выбери нужные и открой через read_file; '
              'это только сведения о документах, полное содержимое ещё не прочитано.\n' + json.dumps(files, ensure_ascii=False)}]
+
+
+def browser_images(output):
+    """Снимок идёт в image-input, а длинная страница — читаемыми полосами сверху вниз."""
+    content = base64.b64decode(output.pop('image'), validate=True)
+    with Image.open(io.BytesIO(content)) as image:
+        if image.width * image.height > 33000000:
+            raise HTTPException(413, 'Снимок слишком большой, просматривайте страницу прокруткой')
+        parts = []
+        for top in range(0, image.height, 1400):
+            for left in range(0, image.width, 1100):
+                right, bottom = min(left + 1100, image.width), min(top + 1400, image.height)
+                with image.crop((left, top, right, bottom)) as piece:
+                    data = io.BytesIO()
+                    with piece.convert('RGB') as rgb:
+                        rgb.save(data, format='JPEG', quality=85)
+                parts.append({'type': 'input_text', 'text':
+                    f"Снимок {output.get('url', '')}: область x={left}..{right}, y={top}..{bottom}. "
+                    'Клики используют координаты видимой области 1100×750, не всей страницы; сначала прокрути к нужному месту.'})
+                parts.append({'type': 'input_image', 'image_url': 'data:image/jpeg;base64,' +
+                              base64.b64encode(data.getvalue()).decode(), 'detail': 'high'})
+    return parts
