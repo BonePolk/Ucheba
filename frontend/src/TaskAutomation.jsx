@@ -2,6 +2,8 @@ import { useState } from 'react';
 import { Alert, Anchor, Badge, Button, Group, Paper, Stack, Text, TextInput, Textarea, Title } from '@mantine/core';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { request } from './api';
+import ContextFiles from './ContextFiles';
+import ContextBrowser from './ContextBrowser';
 
 function RunFiles({ run }) {
   const files = useQuery({ queryKey: ['integrations', 'files', run.id], queryFn: () => request(`/integrations/codex/runs/${run.id}/files`), enabled: run.status === 'succeeded' });
@@ -27,6 +29,8 @@ function ContextForm({ taskId, jevEnabled }) {
   return <Paper withBorder p="md"><Stack gap="sm">
     <Title order={5}>Контекст · GPT-6 Luna</Title>
     <Text size="sm">Luna проверяет контекст перед Jev. Укажи один и тот же предмет для связанных задач: ответы сохраняются в памяти предмета и используются в следующих оценках.</Text>
+    <ContextFiles taskId={taskId} disabled={analyze.isPending || save.isPending} />
+    <ContextBrowser taskId={taskId} disabled={analyze.isPending || save.isPending} />
     <Button variant="light" loading={analyze.isPending} disabled={save.isPending} onClick={() => analyze.mutate()}>Проверить контекст через Luna</Button>
     {analyze.isSuccess && <Text size="sm">{analyze.data.status === 'ready' ? 'Контекста достаточно для оценки Jev.' : 'Luna запросила уточнения — ответь на вопросы ниже.'}</Text>}
     {context.data?.usage && <Text size="xs" c="dimmed">Последняя проверка: вход {context.data.usage.input_tokens ?? 0}, выход {context.data.usage.output_tokens ?? 0} токенов</Text>}

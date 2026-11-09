@@ -186,6 +186,31 @@ services:
         - action: rebuild
           path: ./services/context/Dockerfile
 
+  browser:
+    build:
+      context: .
+      dockerfile: services/browser/Dockerfile
+    healthcheck: *health
+    environment:
+      INTERNAL_SECRET: ${INTEGRATION_ENCRYPTION_KEY:-}
+    volumes:
+      - browser-data:/browser
+    shm_size: 256mb
+    networks:
+      default:
+      context-egress:
+        gw_priority: 1
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./services/browser
+          target: /app
+          ignore: [Dockerfile, requirements.txt, __pycache__]
+        - action: rebuild
+          path: ./services/browser/requirements.txt
+        - action: rebuild
+          path: ./services/browser/Dockerfile
+
   silo:
     image: pgsty/silo:RELEASE.2026-10-26T00-00-00Z
     command: server /data --console-address ":9001"
@@ -284,6 +309,7 @@ networks:
       com.docker.network.driver.mtu: "1200"
 
 volumes:
+  browser-data:
   silo-data:
   codex-home:
   codex-work:

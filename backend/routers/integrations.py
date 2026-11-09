@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import binascii
 import json
 from pathlib import Path
 from urllib.parse import quote
@@ -344,7 +346,7 @@ def task_context(task_id: int):
 
 @router.post('/tasks/{task_id}/context/analyze')
 async def analyze_context(task_id: int):
-    return await provider_call('context', context.prepare(task_id))
+    return await provider_call('context', context.prepare(task_id, force=True))
 
 
 @router.post('/tasks/{task_id}/context')
@@ -354,3 +356,98 @@ async def answer_context(task_id: int, body: ContextAnswer):
     if not features()['jev']:
         return {'status': 'saved'}
     return await provider_call('jev', jev.evaluate(task_id))
+
+
+class ContextFile(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    content: str = Field(max_length=14 * 1024 * 1024)
+
+
+@router.get('/tasks/{task_id}/context/files')
+async def context_files(task_id: int):
+    context.get_context(task_id)  # Проверяем задачу в базе текущего пользователя.
+    return await call('context', f'/tasks/{task_id}/files', method='GET')
+
+
+@router.post('/tasks/{task_id}/context/files')
+async def attach_context_file(task_id: int, body: ContextFile):
+    check_feature('context')
+    context.get_context(task_id)
+    try:
+        content = base64.b64decode(body.content, validate=True)
+    except (ValueError, binascii.Error):
+        raise HTTPException(422, 'Не удалось прочитать загруженный файл') from None
+    if not content or len(content) > 10 * 1024 * 1024:
+        raise HTTPException(413, 'Максимальный размер файла — 10 МБ')
+    try:
+        async with httpx.AsyncClient(timeout=90) as client:
+            result = await client.post(f'http://context:8000/tasks/{task_id}/files', params={'name': body.name},
+                headers={'X-Service-Token': internal_token('context'), 'X-User-ID': str(user_id())}, content=content)
+    except httpx.HTTPError:
+        raise HTTPException(503, 'Хранилище файлов недоступно') from None
+    if not result.is_success:
+        try:
+            detail = result.json()['detail']
+        except (ValueError, KeyError):
+            detail = 'Не удалось сохранить файл'
+        raise HTTPException(result.status_code, detail)
+    context.invalidate(task_id)
+    return result.json()
+
+
+@router.delete('/tasks/{task_id}/context/files/{file_id}')
+async def delete_context_file(task_id: int, file_id: str):
+    context.get_context(task_id)
+    if len(file_id) != 32 or any(c not in '0123456789abcdef' for c in file_id):
+        raise HTTPException(404, 'Файл не найден')
+    result = await call('context', f'/tasks/{task_id}/files/{file_id}', method='DELETE')
+    context.invalidate(task_id)
+    return result
+
+
+@router.get('/tasks/{task_id}/context/files/{file_id}')
+async def download_context_file(task_id: int, file_id: str):
+    check_feature('context')
+    context.get_context(task_id)
+    if len(file_id) != 32 or any(c not in '0123456789abcdef' for c in file_id):
+        raise HTTPException(404, 'Файл не найден')
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            result = await client.get(f'http://context:8000/tasks/{task_id}/files/{file_id}',
+                headers={'X-Service-Token': internal_token('context'), 'X-User-ID': str(user_id())})
+    except httpx.HTTPError:
+        raise HTTPException(503, 'Хранилище файлов недоступно') from None
+    return Response(result.content, status_code=result.status_code,
+                    headers={key: result.headers[key] for key in ('content-type', 'content-disposition') if key in result.headers})
+
+
+@router.api_route('/context/browser/sites', methods=['GET', 'POST'])
+async def browser_sites(request: Request):
+    body = await request.json() if request.method == 'POST' else None
+    return await call('context', '/browser/sites', body, method=request.method)
+
+
+@router.delete('/context/browser/sites/{site_id}')
+async def delete_browser_site(site_id: str):
+    if len(site_id) != 32 or any(c not in '0123456789abcdef' for c in site_id):
+        raise HTTPException(404, 'Личный кабинет не найден')
+    return await call('context', f'/browser/sites/{site_id}', method='DELETE')
+
+
+@router.api_route('/tasks/{task_id}/context/browser', methods=['GET', 'PUT'])
+async def task_browser(task_id: int, request: Request):
+    context.get_context(task_id)
+    body = await request.json() if request.method == 'PUT' else None
+    result = await call('context', f'/tasks/{task_id}/browser', body, method=request.method)
+    if request.method == 'PUT':
+        context.invalidate(task_id)
+    return result
+
+
+@router.post('/tasks/{task_id}/context/browser/action')
+async def browser_action(task_id: int, body: dict):
+    context.get_context(task_id)
+    result = await call('context', '/browser/manual', body)
+    if body.get('action') != 'state':
+        context.invalidate(task_id)
+    return result

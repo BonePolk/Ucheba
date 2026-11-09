@@ -34,7 +34,10 @@ class Memory:
     def list_files(self):
         files = []
         for item in self.client.list_objects(self.bucket, prefix=self.prefix, recursive=True):
-            files.append(item.object_name[len(self.prefix):])
+            name = item.object_name[len(self.prefix):]
+            if not re.fullmatch(r'task-[1-9][0-9]*\.json', name):
+                continue
+            files.append(name)
             if len(files) == 100:
                 break
         return files
@@ -46,12 +49,18 @@ class Memory:
         return self.prefix + filename
 
     def read(self, filename):
-        response = self.client.get_object(self.bucket, self.key(filename))
+        return self.read_bytes(self.key(filename)[len(self.prefix):], 32000).decode('utf-8', errors='replace')
+
+    def read_bytes(self, key, limit=15 * 1024 * 1024):
+        response = self.client.get_object(self.bucket, self.prefix + key)
         try:
-            return response.read(32000).decode('utf-8', errors='replace')
+            return response.read(limit)
         finally:
             response.close()
             response.release_conn()
+
+    def put_bytes(self, key, content, mime):
+        self.client.put_object(self.bucket, self.prefix + key, io.BytesIO(content), len(content), content_type=mime)
 
     def save(self, task_id, data):
         content = json.dumps(data, ensure_ascii=False, default=str).encode()

@@ -30,6 +30,20 @@ def get_context(task_id):
         }
 
 
+def invalidate(task_id):
+    with Session(get_engine()) as session:
+        task = session.get(Task, task_id)
+        if not task:
+            raise HTTPException(404, 'Задача не найдена')
+        row = session.get(TaskContext, task_id) or TaskContext(task_id=task_id)
+        row.status = 'new'
+        row.updated_at = datetime.now(timezone.utc)
+        task.ai_score = task.ai_details = task.ai_scored_at = None
+        session.add(row)
+        session.add(task)
+        session.commit()
+
+
 def save_answer(task_id, subject, answer):
     with Session(get_engine()) as session:
         task = session.get(Task, task_id)
@@ -59,14 +73,16 @@ def save_answer(task_id, subject, answer):
         session.commit()
 
 
-async def prepare(task_id):
+async def prepare(task_id, force=False):
     with Session(get_engine()) as session:
         task = session.get(Task, task_id)
         if not task:
             raise HTTPException(404, 'Задача не найдена')
         task_state = snapshot(task)
-        row = session.get(TaskContext, task_id) or TaskContext(task_id=task_id)
-        if row.task_snapshot == task_state and row.status in ('ready', 'needs_context'):
+        row = session.get(TaskContext, task_id)
+        version = row.updated_at if row else None
+        row = row or TaskContext(task_id=task_id)
+        if not force and row.task_snapshot == task_state and row.status in ('ready', 'needs_context'):
             return {'status': row.status, 'summary': row.summary, 'questions': json.loads(row.questions)}
         subject, notes = row.subject, row.owner_notes
         memory = []
@@ -90,8 +106,10 @@ async def prepare(task_id):
     }, timeout=300)
     with Session(get_engine()) as session:
         task = session.get(Task, task_id)
-        row = session.get(TaskContext, task_id) or TaskContext(task_id=task_id)
-        if not task or snapshot(task) != task_state or row.subject != subject or row.owner_notes != notes:
+        row = session.get(TaskContext, task_id)
+        current_version = row.updated_at if row else None
+        row = row or TaskContext(task_id=task_id)
+        if not task or snapshot(task) != task_state or row.subject != subject or row.owner_notes != notes or current_version != version:
             raise HTTPException(409, 'Задача или контекст изменились. Повторите оценку')
         row.status = result['status']
         row.summary = result['summary']
