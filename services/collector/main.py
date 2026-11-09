@@ -6,8 +6,9 @@ from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from common.bot_runtime import check_bot, poll
-from common.database import engine
+from common.database import get_engine
 from common.http import private_app
+from common.runtime import for_users
 from common.models.integration import BotChat, CollectedMessage
 from common.settings import save_settings
 import bot
@@ -15,7 +16,7 @@ import bot
 
 @asynccontextmanager
 async def lifespan(app):
-    background = asyncio.create_task(poll('collector', bot.dispatcher, bot.maintain))
+    background = asyncio.create_task(for_users(lambda: poll('collector', bot.dispatcher, bot.maintain)))
     try:
         yield
     finally:
@@ -33,7 +34,7 @@ async def check():
 
 @app.get('/chats')
 async def chats():
-    with Session(engine) as session:
+    with Session(get_engine()) as session:
         return session.exec(select(BotChat)).all()
 
 
@@ -43,8 +44,8 @@ class Selection(BaseModel):
 
 @app.post('/chats')
 async def select_chats(body: Selection):
-    async with bot.analysis_lock:
-        with Session(engine) as session:
+    async with bot.analysis_lock():
+        with Session(get_engine()) as session:
             available = {chat.id for chat in session.exec(select(BotChat)).all()}
             if set(body.chat_ids) - available:
                 raise HTTPException(422, 'Выберите известные боту чаты')

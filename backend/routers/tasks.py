@@ -3,16 +3,17 @@ import json
 from datetime import datetime, timezone
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
+from common.security import require_user
 from sqlalchemy import case
 from sqlmodel import Session, select
 
-from common.database import engine
+from common.database import get_engine
 from common.settings import read_config
 from common.models.integration import TaskAction
 from common.models.task import Task, TaskCreate, TaskStatus, TaskUpdate
 
-router = APIRouter(prefix="/api/tasks", tags=["tasks"])
+router = APIRouter(prefix="/api/tasks", tags=["tasks"], dependencies=[Depends(require_user)])
 
 
 @router.get("", response_model=list[Task])
@@ -56,13 +57,14 @@ def list_tasks(
     if sort_by in ("deadline", "ai_score"):
         statement = statement.order_by(column.is_(None))
     statement = statement.order_by(column.asc() if order == "asc" else column.desc(), Task.id.desc())
-    with Session(engine) as session:
-        return session.exec(statement).all()
+    with Session(get_engine()) as session:
+        tasks = session.exec(statement).all()
+        return tasks
 
 
 @router.get("/{task_id}", response_model=Task)
 def get_task(task_id: int):
-    with Session(engine) as session:
+    with Session(get_engine()) as session:
         task = session.get(Task, task_id)
         if task is None:
             raise HTTPException(404, "Задача не найдена")
@@ -71,7 +73,7 @@ def get_task(task_id: int):
 
 @router.post("", response_model=Task, status_code=201)
 def create_task(data: TaskCreate):
-    with Session(engine) as session:
+    with Session(get_engine()) as session:
         task = Task.model_validate(data)
         session.add(task)
         session.commit()
@@ -83,13 +85,13 @@ def create_task(data: TaskCreate):
 
 @router.patch("/{task_id}", response_model=Task)
 def update_task(task_id: int, data: TaskUpdate):
-    with Session(engine) as session:
+    with Session(get_engine()) as session:
         task = session.get(Task, task_id)
         if task is None:
             raise HTTPException(404, "Задача не найдена")
         changes = data.model_dump(exclude_unset=True)
         task.sqlmodel_update(changes)
-        if set(changes) & {'title', 'description', 'deadline'}:
+        if set(changes) & {'title', 'description', 'deadline', 'priority', 'status', 'category'}:
             task.ai_score = task.ai_details = task.ai_scored_at = None
         session.add(TaskAction(task_id=task_id, action='update', details=json.dumps(
             {key: value for key, value in changes.items() if key in {'status', 'priority', 'archived'}})))
@@ -102,7 +104,7 @@ def update_task(task_id: int, data: TaskUpdate):
 
 @router.delete("/{task_id}", status_code=204)
 def delete_task(task_id: int, permanent: bool = False):
-    with Session(engine) as session:
+    with Session(get_engine()) as session:
         task = session.get(Task, task_id)
         if task is None:
             raise HTTPException(404, "Задача не найдена")

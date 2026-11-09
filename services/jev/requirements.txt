@@ -1,1 +1,1 @@
-cloudflare>=4,<6
+laya==0.4.30

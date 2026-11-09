@@ -6,13 +6,20 @@ from aiogram.types import Message
 from fastapi import HTTPException
 from sqlmodel import Session, select
 
-from common.database import engine
+from common.database import get_engine
 from common.security import decrypt, encrypt
 from common.settings import read_settings, report
 from common.models.integration import BotChat, CollectedMessage, TelegramChat
 from common.extraction import process_batch
 
-analysis_lock = asyncio.Lock()
+from collections import defaultdict
+from common.identity import user_id
+
+locks = defaultdict(asyncio.Lock)
+
+
+def analysis_lock():
+    return locks[user_id()]
 
 
 async def collect(message: Message):
@@ -20,7 +27,7 @@ async def collect(message: Message):
     if not config['enabled']:
         return
     overflow = False
-    with Session(engine) as session:
+    with Session(get_engine()) as session:
         chat = session.get(BotChat, message.chat.id) or BotChat(id=message.chat.id, title='')
         chat.title = message.chat.title or message.chat.full_name or str(message.chat.id)
         chat.username = message.chat.username
@@ -52,9 +59,9 @@ def dispatcher():
 
 
 async def analyze():
-    if analysis_lock.locked():
+    if analysis_lock().locked():
         raise HTTPException(409, 'Анализ уже выполняется')
-    async with analysis_lock:
+    async with analysis_lock():
         config, _ = read_settings('collector')
         gemini, _ = read_settings('gemini')
         if not gemini['enabled']:
@@ -64,7 +71,7 @@ async def analyze():
         owner = {'id': read_settings('notifications')[0]['owner_id'], 'context': gemini['owner_context']}
         counts = {'messages': 0, 'created': 0, 'pending': 0}
         for chat_id in config['chat_ids']:
-            with Session(engine) as session:
+            with Session(get_engine()) as session:
                 meta = session.get(BotChat, chat_id)
                 if not meta:
                     continue
@@ -76,7 +83,7 @@ async def analyze():
                 continue
             result = await process_batch(chat, [json.loads(decrypt(m.payload)) for m in messages],
                                          [m.message_id for m in messages], owner)
-            with Session(engine) as session:
+            with Session(get_engine()) as session:
                 for message in messages:
                     stored = session.get(CollectedMessage, (chat_id, message.message_id))
                     if stored:

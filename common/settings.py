@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from fastapi import HTTPException
 from sqlmodel import Session
 
-from common.database import engine
+from common.database import get_engine
 from common.security import decrypt, encrypt
 from common.models.integration import IntegrationSetting
 
@@ -14,23 +14,28 @@ DEFAULTS = {
     'telegram': {'enabled': False, 'chat_ids': []},
     'gemini': {'enabled': False, 'model': 'gemini-3.8-flash', 'interval_seconds': 300,
                'confidence_threshold': 0.9, 'timezone': 'UTC', 'owner_context': ''},
+    'context': {'enabled': True, 'base_url': 'https://lenec.tech/v1', 'model': 'gpt-6-luna'},
     'codex': {'enabled': False, 'auto_prepare': False},
     'jev': {'enabled': False, 'account_id': '', 'model': 'typesafe/jev'},
 }
 SECRET_FIELDS = {
     'notifications': {'bot_token'}, 'collector': {'bot_token'},
     'telegram': {'api_id', 'api_hash', 'phone', 'session'},
-    'gemini': {'api_key'}, 'codex': set(), 'jev': {'api_token'},
+    'gemini': {'api_key'}, 'context': {'api_key'}, 'codex': set(), 'jev': {'api_token'},
 }
 
 
 def read_settings(name):
     if name not in DEFAULTS:
         raise HTTPException(404, 'Неизвестная интеграция')
-    with Session(engine) as session:
+    with Session(get_engine()) as session:
         row = session.get(IntegrationSetting, name)
-        config = DEFAULTS[name] | (json.loads(row.config) if row else {})
+        stored = json.loads(row.config) if row else {}
+        config = {key: stored.get(key, default) for key, default in DEFAULTS[name].items()}
         secrets = json.loads(decrypt(row.secrets)) if row and row.secrets else {}
+        from common.accounts import features
+        if not features()[name]:
+            config['enabled'] = False
         return config, secrets
 
 
@@ -38,7 +43,10 @@ def save_settings(name, config=None, secrets=None):
     current, private = read_settings(name)
     current.update(config or {})
     private.update(secrets or {})
-    with Session(engine) as session:
+    if name in ('collector', 'notifications') and secrets is not None and 'bot_token' in secrets:
+        from common.accounts import claim_bot
+        claim_bot(name, private.get('bot_token', ''))
+    with Session(get_engine()) as session:
         row = session.get(IntegrationSetting, name) or IntegrationSetting(name=name)
         row.config = json.dumps(current)
         if secrets is not None:
@@ -48,7 +56,7 @@ def save_settings(name, config=None, secrets=None):
 
 
 def report(name, error=None, success=False):
-    with Session(engine) as session:
+    with Session(get_engine()) as session:
         row = session.get(IntegrationSetting, name) or IntegrationSetting(name=name)
         row.last_error = error
         if success:
@@ -59,7 +67,7 @@ def report(name, error=None, success=False):
 
 def public_settings():
     result = {}
-    with Session(engine) as session:
+    with Session(get_engine()) as session:
         for name in DEFAULTS:
             row = session.get(IntegrationSetting, name)
             config, secrets = read_settings(name)
@@ -73,6 +81,11 @@ def public_settings():
 
 
 def read_config(name):
-    with Session(engine) as session:
+    with Session(get_engine()) as session:
         row = session.get(IntegrationSetting, name)
-        return DEFAULTS[name] | (json.loads(row.config) if row else {}) | {'last_error': row.last_error if row else None}
+        stored = json.loads(row.config) if row else {}
+        config = {key: stored.get(key, default) for key, default in DEFAULTS[name].items()}
+        from common.accounts import features
+        if not features()[name]:
+            config['enabled'] = False
+        return config | {'last_error': row.last_error if row else None}

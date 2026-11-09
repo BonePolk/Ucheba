@@ -17,8 +17,11 @@ services:
       dockerfile: backend/Dockerfile
     healthcheck: *health
     environment:
-      DATABASE_URL: sqlite:////data/tasks.db
+      <<: *environment
       DATA_DIR: /data
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      LUNA_API_KEY: ${LUNA_API_KEY:-}
     volumes:
       - ./data:/data
     develop:
@@ -37,37 +40,6 @@ services:
           path: ./common/requirements.txt
         - action: rebuild
           path: ./backend/Dockerfile
-
-  admin-backend:
-    build:
-      context: .
-      dockerfile: admin/backend/Dockerfile
-    healthcheck: *health
-    environment:
-      <<: *environment
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
-      COOKIE_SECURE: ${COOKIE_SECURE:-false}
-    volumes:
-      - ./data:/data
-    depends_on:
-      backend:
-        condition: service_healthy
-    develop:
-      watch:
-        - action: sync+restart
-          path: ./admin/backend
-          target: /app
-          ignore: [Dockerfile, requirements.txt, __pycache__]
-        - action: sync+restart
-          path: ./common
-          target: /app/common
-          ignore: [requirements.txt, __pycache__]
-        - action: rebuild
-          path: ./admin/backend/requirements.txt
-        - action: rebuild
-          path: ./common/requirements.txt
-        - action: rebuild
-          path: ./admin/backend/Dockerfile
 
   telegram:
     build:
@@ -162,6 +134,8 @@ services:
     healthcheck: *health
     environment:
       INTERNAL_SECRET: ${INTEGRATION_ENCRYPTION_KEY:-}
+    volumes:
+      - jev-models:/models
     depends_on:
       backend:
         condition: service_healthy
@@ -181,6 +155,45 @@ services:
           path: ./common/requirements.txt
         - action: rebuild
           path: ./services/jev/Dockerfile
+
+  context:
+    build:
+      context: .
+      dockerfile: services/context/Dockerfile
+    healthcheck: *health
+    environment:
+      INTERNAL_SECRET: ${INTEGRATION_ENCRYPTION_KEY:-}
+      SILO_ACCESS_KEY: ${SILO_ACCESS_KEY:-}
+      SILO_SECRET_KEY: ${SILO_SECRET_KEY:-}
+    networks:
+      default:
+      context-egress:
+        gw_priority: 1
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./services/context
+          target: /app
+          ignore: [Dockerfile, requirements.txt, __pycache__]
+        - action: sync+restart
+          path: ./common
+          target: /app/common
+          ignore: [requirements.txt, __pycache__]
+        - action: rebuild
+          path: ./services/context/requirements.txt
+        - action: rebuild
+          path: ./common/requirements.txt
+        - action: rebuild
+          path: ./services/context/Dockerfile
+
+  silo:
+    image: pgsty/silo:RELEASE.2026-10-26T00-00-00Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${SILO_ACCESS_KEY:-}
+      MINIO_ROOT_PASSWORD: ${SILO_SECRET_KEY:-}
+    volumes:
+      - silo-data:/data
 
   collector:
     build:
@@ -240,16 +253,6 @@ services:
         - action: rebuild
           path: ./services/notifications/Dockerfile
 
-  admin-frontend:
-    build: ./admin/frontend
-    depends_on:
-      admin-backend:
-        condition: service_healthy
-    develop:
-      watch:
-        - action: rebuild
-          path: ./admin/frontend
-
   frontend:
     build: ./frontend
     develop:
@@ -264,11 +267,7 @@ services:
     depends_on:
       frontend:
         condition: service_started
-      admin-frontend:
-        condition: service_started
       backend:
-        condition: service_healthy
-      admin-backend:
         condition: service_healthy
     develop:
       watch:
@@ -278,6 +277,14 @@ services:
         - action: rebuild
           path: ./nginx/Dockerfile
 
+networks:
+  context-egress:
+    driver: bridge
+    driver_opts:
+      com.docker.network.driver.mtu: "1200"
+
 volumes:
+  silo-data:
   codex-home:
   codex-work:
+  jev-models:

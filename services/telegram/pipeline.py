@@ -2,17 +2,24 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException
 from sqlmodel import Session
-from common.database import engine
+from common.database import get_engine
 from common.settings import read_settings, report, save_settings
 from common.models.integration import TelegramChat
 from common.extraction import process_batch
 import client as telegram
 
-analysis_lock = asyncio.Lock()
+from collections import defaultdict
+from common.identity import user_id
+
+locks = defaultdict(asyncio.Lock)
+
+
+def analysis_lock():
+    return locks[user_id()]
 
 
 async def select_chats(chat_ids):
-    async with analysis_lock:
+    async with analysis_lock():
         available = {d['id']: d for d in await telegram.dialogs()}
         if any(chat_id not in available for chat_id in chat_ids):
             raise HTTPException(422, 'Выберите чат из списка Telegram')
@@ -21,7 +28,7 @@ async def select_chats(chat_ids):
         for chat_id in chat_ids:
             if chat_id not in old['chat_ids']:
                 latest = await current.get_messages(chat_id, limit=1)
-                with Session(engine) as session:
+                with Session(get_engine()) as session:
                     chat = session.get(TelegramChat, chat_id) or TelegramChat(id=chat_id, title=available[chat_id]['title'])
                     chat.title = available[chat_id]['title']
                     chat.username = available[chat_id]['username']
@@ -33,9 +40,9 @@ async def select_chats(chat_ids):
 
 
 async def process_messages(manual=False):
-    if analysis_lock.locked():
+    if analysis_lock().locked():
         raise HTTPException(409, 'Анализ уже выполняется')
-    async with analysis_lock:
+    async with analysis_lock():
         tg, _ = read_settings('telegram')
         config, secrets = read_settings('gemini')
         if not config['enabled'] or not secrets.get('api_key'):
@@ -43,14 +50,14 @@ async def process_messages(manual=False):
         if not tg['chat_ids']:
             raise HTTPException(400, 'Выберите чаты для анализа')
         current = await telegram.get_client()
-        if not telegram.connected:
+        if not telegram.state().connected:
             raise HTTPException(401, 'Подключите Telegram заново')
         await current.get_dialogs(limit=300)
         me = await current.get_me()
         owner = {'id': me.id, 'username': me.username, 'name': me.first_name}
         counts = {'messages': 0, 'created': 0, 'pending': 0}
         for chat_id in tg['chat_ids']:
-            with Session(engine) as session:
+            with Session(get_engine()) as session:
                 chat = session.get(TelegramChat, chat_id)
                 if not chat:
                     continue

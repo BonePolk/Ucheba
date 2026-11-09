@@ -1,0 +1,796 @@
+jev-1  | INFO:     Started server process [1]
+jev-1       | INFO:     Waiting for application startup.
+jev-1       | INFO:     Application startup complete.
+jev-1       | INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+jev-1       | INFO:     127.0.0.1:34090 - "GET /health HTTP/1.1" 200 OK
+frontend-1  | /docker-entrypoint.sh: /docker-entrypoint.d/ is not empty, will attempt to perform configuration
+jev-1       | INFO:     127.0.0.1:45202 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:52566 - "GET /health HTTP/1.1" 200 OK
+frontend-1  | /docker-entrypoint.sh: Looking for shell scripts in /docker-entrypoint.d/
+jev-1       | INFO:     127.0.0.1:56104 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:37136 - "GET /health HTTP/1.1" 200 OK
+frontend-1  | /docker-entrypoint.sh: Launching /docker-entrypoint.d/10-listen-on-ipv6-by-default.sh
+jev-1       | INFO:     127.0.0.1:53920 - "GET /health HTTP/1.1" 200 OK
+frontend-1  | 10-listen-on-ipv6-by-default.sh: info: Getting the checksum of /etc/nginx/conf.d/default.conf
+frontend-1  | 10-listen-on-ipv6-by-default.sh: info: /etc/nginx/conf.d/default.conf differs from the packaged version
+frontend-1  | /docker-entrypoint.sh: Sourcing /docker-entrypoint.d/15-local-resolvers.envsh
+jev-1       | INFO:     127.0.0.1:34224 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:39852 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:45992 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:37872 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:57224 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:39354 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:58738 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:47308 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:41240 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:45270 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:34636 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:35338 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:42406 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:59878 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:40392 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:57296 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:53968 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:33248 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:39502 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:51958 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:37800 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:53744 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:52706 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:41106 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:48774 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:36396 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:45722 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:58902 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:40488 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:58630 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:48678 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:41568 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:54096 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:43622 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:35162 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:36108 - "GET /health HTTP/1.1" 200 OK
+jev-1       | Fetching 5 files:   0%|          | 0/5 [00:00<?, ?it/s]Fetching 5 files: 100%|██████████| 5/5 [00:00<00:00, 860.26it/s]
+jev-1       | INFO:     172.22.0.2:37330 - "POST /evaluate HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:47212 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:51548 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:40500 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:52964 - "GET /health HTTP/1.1" 200 OK
+context-1   | INFO:     Started server process [1]
+jev-1       | INFO:     127.0.0.1:44502 - "GET /health HTTP/1.1" 200 OK
+context-1   | INFO:     Waiting for application startup.
+frontend-1  | /docker-entrypoint.sh: Launching /docker-entrypoint.d/20-envsubst-on-templates.sh
+context-1   | INFO:     Application startup complete.
+context-1   | INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+frontend-1  | /docker-entrypoint.sh: Launching /docker-entrypoint.d/30-tune-worker-processes.sh
+collector-1  | INFO:     Started server process [1]
+notifications-1  | INFO:     Started server process [1]
+collector-1      | INFO:     Waiting for application startup.
+notifications-1  | INFO:     Waiting for application startup.
+backend-1   | INFO:     Started server process [1]
+notifications-1  | INFO:     Application startup complete.
+frontend-1   | /docker-entrypoint.sh: Configuration complete; ready for start up
+backend-1        | INFO:     Waiting for application startup.
+context-1    | INFO:     127.0.0.1:34082 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:38676 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     Application startup complete.
+context-1        | INFO:     127.0.0.1:52552 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:48712 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+context-1        | INFO:     127.0.0.1:37134 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:38646 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:50418 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:45238 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:34212 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:43834 - "GET /health HTTP/1.1" 200 OK
+jev-1       | INFO:     127.0.0.1:33822 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     Started server process [1]
+jev-1            | INFO:     172.22.0.2:43570 - "POST /evaluate HTTP/1.1" 200 OK
+jev-1            | INFO:     127.0.0.1:33444 - "GET /health HTTP/1.1" 200 OK
+jev-1            | INFO:     127.0.0.1:54448 - "GET /health HTTP/1.1" 200 OK
+jev-1            | INFO:     127.0.0.1:40008 - "GET /health HTTP/1.1" 200 OK
+jev-1            | INFO:     127.0.0.1:54804 - "GET /health HTTP/1.1" 200 OK
+jev-1            | INFO:     127.0.0.1:49750 - "GET /health HTTP/1.1" 200 OK
+jev-1            | INFO:     127.0.0.1:53516 - "GET /health HTTP/1.1" 200 OK
+jev-1            | INFO:     127.0.0.1:34332 - "GET /health HTTP/1.1" 200 OK
+jev-1            | INFO:     127.0.0.1:41052 - "GET /health HTTP/1.1" 200 OK
+jev-1            | INFO:     127.0.0.1:53040 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     Started server process [1]
+telegram-1       | INFO:     Waiting for application startup.
+jev-1            | INFO:     127.0.0.1:48138 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:48684 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:56138 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:50410 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:53944 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:43814 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:39886 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:42396 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+collector-1      | INFO:     127.0.0.1:37916 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:38158 - "GET /health HTTP/1.1" 200 OK
+frontend-1       | 2026/11/09 17:26:45 [notice] 1#1: using the "epoll" event method
+gemini-1         | INFO:     Started server process [1]
+notifications-1  | INFO:     127.0.0.1:38662 - "GET /health HTTP/1.1" 200 OK
+frontend-1       | 2026/11/09 17:26:45 [notice] 1#1: nginx/1.31.6
+frontend-1       | 2026/11/09 17:26:45 [notice] 1#1: built by gcc 15.2.0 (Alpine 15.2.0) 
+context-1        | INFO:     127.0.0.1:45990 - "GET /health HTTP/1.1" 200 OK
+frontend-1       | 2026/11/09 17:26:45 [notice] 1#1: OS: Linux 7.2.14-arch1-1
+context-1        | INFO:     127.0.0.1:42408 - "GET /health HTTP/1.1" 200 OK
+frontend-1       | 2026/11/09 17:26:45 [notice] 1#1: getrlimit(RLIMIT_NOFILE): 1024:524288
+context-1        | INFO:     127.0.0.1:57216 - "GET /health HTTP/1.1" 200 OK
+frontend-1       | 2026/11/09 17:26:45 [notice] 1#1: start worker processes
+context-1        | INFO:     127.0.0.1:38196 - "GET /health HTTP/1.1" 200 OK
+frontend-1       | 2026/11/09 17:26:45 [notice] 1#1: start worker process 29
+context-1        | INFO:     127.0.0.1:53678 - "GET /health HTTP/1.1" 200 OK
+frontend-1       | 2026/11/09 17:26:45 [notice] 1#1: start worker process 30
+codex-1          | INFO:     Waiting for application startup.
+gemini-1         | INFO:     Waiting for application startup.
+frontend-1       | 2026/11/09 17:26:45 [notice] 1#1: start worker process 31
+codex-1          | INFO:     Application startup complete.
+backend-1        | INFO:     Application startup complete.
+context-1        | INFO:     127.0.0.1:47300 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+backend-1        | INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+context-1        | INFO:     127.0.0.1:41460 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:53650 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:45258 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:50970 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     127.0.0.1:41120 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:34108 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     Application startup complete.
+backend-1        | INFO:     127.0.0.1:48790 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:45208 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+backend-1        | INFO:     172.22.0.5:51596 - "GET /api/auth/me HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:34144 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     Application startup complete.
+telegram-1       | INFO:     127.0.0.1:45230 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:51614 - "GET /api/tasks?archived=false HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:52574 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:35322 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+backend-1        | INFO:     172.22.0.5:51612 - "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:58784 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:36614 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:45244 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:48694 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:41426 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:56142 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:56136 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | /docker-entrypoint.sh: /docker-entrypoint.d/ is not empty, will attempt to perform configuration
+codex-1          | INFO:     127.0.0.1:52570 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     172.22.0.2:57064 - "GET /status HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:41284 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:50938 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:34694 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:36606 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | /docker-entrypoint.sh: Looking for shell scripts in /docker-entrypoint.d/
+nginx-1          | /docker-entrypoint.sh: Launching /docker-entrypoint.d/10-listen-on-ipv6-by-default.sh
+nginx-1          | 10-listen-on-ipv6-by-default.sh: info: Getting the checksum of /etc/nginx/conf.d/default.conf
+nginx-1          | 10-listen-on-ipv6-by-default.sh: info: /etc/nginx/conf.d/default.conf differs from the packaged version
+nginx-1          | /docker-entrypoint.sh: Sourcing /docker-entrypoint.d/15-local-resolvers.envsh
+nginx-1          | /docker-entrypoint.sh: Launching /docker-entrypoint.d/20-envsubst-on-templates.sh
+nginx-1          | /docker-entrypoint.sh: Launching /docker-entrypoint.d/30-tune-worker-processes.sh
+context-1        | INFO:     127.0.0.1:59870 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | /docker-entrypoint.sh: Configuration complete; ready for start up
+context-1        | INFO:     127.0.0.1:32994 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 2026/11/09 17:20:23 [notice] 1#1: using the "epoll" event method
+notifications-1  | INFO:     127.0.0.1:50412 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 2026/11/09 17:20:23 [notice] 1#1: nginx/1.31.6
+codex-1          | INFO:     127.0.0.1:56118 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:42430 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:50404 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:32964 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:53938 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:37142 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:53958 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:43802 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:53924 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:39880 - "GET /health HTTP/1.1" 200 OK
+frontend-1       | 2026/11/09 17:26:45 [notice] 1#1: start worker process 32
+codex-1          | INFO:     127.0.0.1:34228 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:42388 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:39864 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:37904 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:46008 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:38152 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:37888 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:34130 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:40432 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:43816 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:45222 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:59310 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:57292 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:51630 - "GET /api/auth/me HTTP/1.1" 200 OK
+nginx-1          | 2026/11/09 17:20:23 [notice] 1#1: built by gcc 15.2.0 (Alpine 15.2.0) 
+backend-1        | INFO:     172.22.0.5:51644 - "GET /api/tasks?archived=false HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:52572 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:38136 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:51628 - "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:39360 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     127.0.0.1:36416 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 2026/11/09 17:20:23 [notice] 1#1: OS: Linux 7.2.14-arch1-1
+nginx-1          | 2026/11/09 17:20:23 [notice] 1#1: getrlimit(RLIMIT_NOFILE): 1024:524288
+nginx-1          | 2026/11/09 17:20:23 [notice] 1#1: start worker processes
+backend-1        | INFO:     172.22.0.5:48834 - "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 OK
+backend-1        | INFO:     127.0.0.1:45724 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:40316 - "GET /api/auth/me HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:40324 - "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 OK
+frontend-1       | 2026/11/09 17:26:45 [notice] 1#1: start worker process 33
+backend-1        | INFO:     127.0.0.1:58914 - "GET /health HTTP/1.1" 200 OK
+frontend-1       | 2026/11/09 17:26:45 [notice] 1#1: start worker process 34
+backend-1        | INFO:     172.22.0.5:50600 - "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 OK
+frontend-1       | 2026/11/09 17:26:45 [notice] 1#1: start worker process 35
+backend-1        | INFO:     172.22.0.5:50616 - "GET /api/auth/me HTTP/1.1" 200 OK
+frontend-1       | 2026/11/09 17:26:45 [notice] 1#1: start worker process 36
+backend-1        | INFO:     172.22.0.5:50622 - "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 OK
+frontend-1       | 2026/11/09 17:26:45 [notice] 1#1: start worker process 37
+telegram-1       | INFO:     127.0.0.1:39390 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:50636 - "GET /api/tasks?archived=false HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:59330 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 2026/11/09 17:20:23 [notice] 1#1: start worker process 29
+notifications-1  | INFO:     127.0.0.1:39898 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:56126 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 2026/11/09 17:20:23 [notice] 1#1: start worker process 30
+notifications-1  | INFO:     127.0.0.1:42402 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 2026/11/09 17:20:23 [notice] 1#1: start worker process 31
+backend-1        | INFO:     127.0.0.1:40494 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:57196 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 2026/11/09 17:20:23 [notice] 1#1: start worker process 32
+backend-1        | INFO:     172.22.0.5:50640 - "GET /api/auth/me HTTP/1.1" 200 OK
+nginx-1          | 2026/11/09 17:20:23 [notice] 1#1: start worker process 33
+gemini-1         | INFO:     127.0.0.1:37154 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:38170 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 2026/11/09 17:20:23 [notice] 1#1: start worker process 34
+gemini-1         | INFO:     127.0.0.1:53926 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 2026/11/09 17:20:23 [notice] 1#1: start worker process 35
+notifications-1  | INFO:     127.0.0.1:53654 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:54004 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:50656 - "GET /api/integrations HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:58786 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:36770 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:33240 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:41434 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:39540 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:36802 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:41298 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:38334 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:51948 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     127.0.0.1:56380 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:50954 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:38368 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:37842 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:51088 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:46064 - "GET /api/integrations HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:52756 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     127.0.0.1:48680 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:43512 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:56280 - "GET /api/auth/me HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:48800 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:56292 - "GET /api/integrations HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:43328 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     127.0.0.1:41572 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:59310 - "GET /api/integrations HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:58748 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:47320 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:41248 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:45274 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:34650 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:35350 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:42416 - "GET /health HTTP/1.1" 200 OK
+frontend-1       | 2026/11/09 17:26:45 [notice] 1#1: start worker process 38
+gemini-1         | INFO:     127.0.0.1:43790 - "GET /health HTTP/1.1" 200 OK
+frontend-1       | 2026/11/09 17:26:45 [notice] 1#1: start worker process 39
+notifications-1  | INFO:     127.0.0.1:34698 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:45756 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:39876 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:36608 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:59892 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:42372 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:42436 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:40408 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:42650 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 2026/11/09 17:20:23 [notice] 1#1: start worker process 36
+gemini-1         | INFO:     127.0.0.1:37894 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:40516 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 2026/11/09 17:20:23 [notice] 1#1: start worker process 37
+backend-1        | INFO:     127.0.0.1:54100 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:56412 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:38146 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:57892 - "GET /api/auth/me HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:48706 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:32974 - "GET /health HTTP/1.1" 200 OK
+frontend-1       | 2026/11/09 17:26:45 [notice] 1#1: start worker process 40
+telegram-1       | INFO:     127.0.0.1:58772 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:47324 - "GET /health HTTP/1.1" 200 OK
+frontend-1       | 172.22.0.5 - - [09/Nov/2026:17:27:43 +0000] "GET / HTTP/1.1" 200 455 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "172.22.0.1"
+collector-1      | INFO:     127.0.0.1:41610 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:53730 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:44578 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:57900 - "GET /api/integrations HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:57298 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:41274 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:53972 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:45290 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:51120 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:34680 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:35358 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:41102 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:43530 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:43644 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:36384 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:39374 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:43346 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:58764 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:58884 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:47322 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:42668 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:41262 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:58612 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:45284 - "GET /health HTTP/1.1" 200 OK
+frontend-1       | 172.22.0.5 - - [09/Nov/2026:17:27:43 +0000] "GET /assets/index-CSj4pkpd.js HTTP/1.1" 200 625898 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "172.22.0.1"
+context-1        | INFO:     172.22.0.2:35362 - "POST /analyze HTTP/1.1" 502 Bad Gateway
+nginx-1          | 2026/11/09 17:20:23 [notice] 1#1: start worker process 38
+context-1        | INFO:     127.0.0.1:56432 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     127.0.0.1:43628 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:32994 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:34532 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:54844 - "GET /api/integrations HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:34666 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:42426 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:36166 - "GET /health HTTP/1.1" 200 OK
+frontend-1       | 172.22.0.5 - - [09/Nov/2026:17:27:43 +0000] "GET /assets/index-CSj4pkpd.js HTTP/1.1" 200 625898 "-" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "172.22.0.1"
+collector-1      | INFO:     127.0.0.1:36142 - "GET /health HTTP/1.1" 200 OK
+frontend-1       | 172.22.0.5 - - [09/Nov/2026:17:28:15 +0000] "GET /icon.png HTTP/1.1" 200 10076 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "172.22.0.1"
+backend-1        | INFO:     127.0.0.1:35166 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:51596 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 2026/11/09 17:20:23 [notice] 1#1: start worker process 39
+nginx-1          | 2026/11/09 17:20:23 [notice] 1#1: start worker process 40
+backend-1        | INFO:     172.22.0.5:60016 - "GET /api/auth/me HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:20:39 +0000] "GET / HTTP/1.1" 304 0 "-" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+telegram-1       | INFO:     127.0.0.1:59898 - "GET /health HTTP/1.1" 200 OK
+frontend-1       | 172.22.0.5 - - [09/Nov/2026:17:29:04 +0000] "GET / HTTP/1.1" 304 0 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "172.22.0.1"
+frontend-1       | 172.22.0.5 - - [09/Nov/2026:17:29:04 +0000] "GET /assets/index-CSj4pkpd.js HTTP/1.1" 304 0 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "172.22.0.1"
+telegram-1       | INFO:     127.0.0.1:40424 - "GET /health HTTP/1.1" 200 OK
+frontend-1       | 172.22.0.5 - - [09/Nov/2026:17:29:04 +0000] "GET /assets/index-D9L_g19F.css HTTP/1.1" 200 223035 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "172.22.0.1"
+frontend-1       | 172.22.0.5 - - [09/Nov/2026:17:29:04 +0000] "GET /assets/index-CSj4pkpd.js HTTP/1.1" 304 0 "-" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "172.22.0.1"
+frontend-1       | 172.22.0.5 - - [09/Nov/2026:17:29:05 +0000] "GET /icon.png HTTP/1.1" 304 0 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "172.22.0.1"
+codex-1          | INFO:     127.0.0.1:33264 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:40444 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:20:39 +0000] "GET /assets/index-BhdHA4gx.js HTTP/1.1" 304 0 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+codex-1          | INFO:     127.0.0.1:39512 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:40038 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:20:39 +0000] "GET /assets/index-D9L_g19F.css HTTP/1.1" 304 0 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+telegram-1       | INFO:     127.0.0.1:57312 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:53020 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:20:39 +0000] "GET /assets/index-BhdHA4gx.js HTTP/1.1" 304 0 "-" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+collector-1      | INFO:     127.0.0.1:53022 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:20:40 +0000] "GET /api/auth/me HTTP/1.1" 401 45 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+context-1        | INFO:     127.0.0.1:41636 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:51964 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:44596 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:37816 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:43670 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:53752 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:60020 - "GET /api/integrations HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:35356 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:21:10 +0000] "POST /api/auth/login HTTP/1.1" 200 43 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+gemini-1         | INFO:     127.0.0.1:42420 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:21:10 +0000] "GET /api/auth/me HTTP/1.1" 200 183 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+telegram-1       | INFO:     127.0.0.1:53994 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:59894 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:21:11 +0000] "GET /api/auth/me HTTP/1.1" 200 183 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+telegram-1       | INFO:     127.0.0.1:33284 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:40420 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:21:11 +0000] "GET /icon.png HTTP/1.1" 200 10076 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+telegram-1       | INFO:     127.0.0.1:39536 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:57306 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:51982 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:21:11 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 12343 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+backend-1        | INFO:     127.0.0.1:36114 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:37830 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:53978 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:53772 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:32996 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:59318 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     172.22.0.2:40690 - "POST /analyze HTTP/1.1" 502 Bad Gateway
+notifications-1  | INFO:     127.0.0.1:54014 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:47200 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:36782 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:36154 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:39550 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:40474 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:38340 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:33268 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:52740 - "GET /health HTTP/1.1" 200 OK
+frontend-1       | 172.22.0.5 - - [09/Nov/2026:17:29:07 +0000] "GET /profile HTTP/1.1" 200 455 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "172.22.0.1"
+telegram-1       | INFO:     127.0.0.1:41136 - "GET /health HTTP/1.1" 200 OK
+frontend-1       | 172.22.0.5 - - [09/Nov/2026:17:32:33 +0000] "GET / HTTP/1.1" 304 0 "http://localhost:8080/profile" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "172.22.0.1"
+context-1        | INFO:     127.0.0.1:40044 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:48796 - "GET /health HTTP/1.1" 200 OK
+frontend-1       | 172.22.0.5 - - [09/Nov/2026:17:32:33 +0000] "GET /assets/index-CSj4pkpd.js HTTP/1.1" 304 0 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "172.22.0.1"
+telegram-1       | INFO:     127.0.0.1:43326 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:39524 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:45730 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:52722 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:42642 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:51980 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:41118 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:40508 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:37820 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:33868 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     172.22.0.2:33426 - "GET /status HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:48784 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:46480 - "GET /api/integrations HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:56402 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:56272 - "POST /api/integrations/jev/check HTTP/1.1" 200 OK
+telegram-1       | INFO:     172.22.0.2:36216 - "GET /status HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:44490 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:57388 - "GET /api/integrations HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:53024 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     127.0.0.1:47220 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:48702 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:49936 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:36408 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     172.22.0.2:33646 - "GET /status HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:54484 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     172.22.0.2:35674 - "POST /analyze HTTP/1.1" 502 Bad Gateway
+backend-1        | INFO:     172.22.0.5:57394 - "GET /api/auth/me HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:56804 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:33426 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:54826 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:57408 - "PATCH /api/integrations/context HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:49962 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:53766 - "GET /health HTTP/1.1" 200 OK
+frontend-1       | 172.22.0.5 - - [09/Nov/2026:17:32:33 +0000] "GET /assets/index-D9L_g19F.css HTTP/1.1" 304 0 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "172.22.0.1"
+codex-1          | INFO:     127.0.0.1:45714 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:58892 - "GET /health HTTP/1.1" 200 OK
+frontend-1       | 172.22.0.5 - - [09/Nov/2026:17:32:33 +0000] "GET /assets/index-CSj4pkpd.js HTTP/1.1" 304 0 "-" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "172.22.0.1"
+codex-1          | INFO:     127.0.0.1:40484 - "GET /health HTTP/1.1" 200 OK
+frontend-1       | 172.22.0.5 - - [09/Nov/2026:17:32:34 +0000] "GET /icon.png HTTP/1.1" 304 0 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "172.22.0.1"
+codex-1          | INFO:     127.0.0.1:58624 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:48674 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:41566 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:21:11 +0000] "GET /api/tasks?archived=false HTTP/1.1" 200 12343 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+backend-1        | INFO:     172.22.0.5:57420 - "GET /api/integrations HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:39998 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:35624 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:56812 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:54082 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:53570 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:49730 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:43608 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:57530 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:52730 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:41086 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:49138 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:41130 - "GET /health HTTP/1.1" 200 OK
+collector-1      | INFO:     127.0.0.1:48178 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:48794 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:43320 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:45740 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:37856 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:42638 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:21:14 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=true HTTP/1.1" 200 2 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+codex-1          | INFO:     127.0.0.1:35158 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     127.0.0.1:51562 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:21:14 +0000] "GET /api/tasks?archived=true HTTP/1.1" 200 2 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+context-1        | INFO:     127.0.0.1:35636 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:40502 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:56386 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:36100 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:47210 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:51544 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:40490 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:52956 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:44496 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:33816 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:33436 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:54432 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:51102 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:33780 - "GET /api/integrations HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:34312 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:21:15 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 12343 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+notifications-1  | INFO:     127.0.0.1:52762 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:40006 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:41594 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:43528 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:48688 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     172.22.0.2:52448 - "GET /status HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:48810 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:41586 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:21:15 +0000] "GET /api/tasks?archived=false HTTP/1.1" 200 12343 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+codex-1          | INFO:     127.0.0.1:54788 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:54116 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:21:18 +0000] "GET /inbox HTTP/1.1" 200 455 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+gemini-1         | INFO:     127.0.0.1:43632 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:21:18 +0000] "GET /api/auth/me HTTP/1.1" 200 183 "http://localhost:8080/inbox" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+telegram-1       | INFO:     127.0.0.1:54120 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:35174 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:43336 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     127.0.0.1:40504 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     172.22.0.2:48396 - "GET /status HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:45758 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     172.22.0.2:45534 - "POST /analyze HTTP/1.1" 502 Bad Gateway
+notifications-1  | INFO:     127.0.0.1:42658 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:44330 - "GET /api/auth/me HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:40524 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:49736 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:43642 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:44338 - "GET /api/integrations HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:53508 - "GET /health HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:57544 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:56428 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:34516 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:34324 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     127.0.0.1:52976 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:41046 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:39972 - "GET /api/integrations HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:53030 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     127.0.0.1:44516 - "GET /health HTTP/1.1" 200 OK
+codex-1          | INFO:     127.0.0.1:48126 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:49782 - "GET /api/auth/me HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:49786 - "GET /api/integrations HTTP/1.1" 200 OK
+backend-1        | INFO:     127.0.0.1:33830 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:41624 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:59400 - "GET /api/integrations HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:51014 - "GET /api/auth/me HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:21:19 +0000] "GET /api/inbox HTTP/1.1" 200 2 "http://localhost:8080/inbox" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+backend-1        | INFO:     172.22.0.5:51018 - "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:53024 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:51034 - "GET /api/tasks?archived=false HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:36128 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:44582 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:51040 - "PATCH /api/tasks/3 HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:47222 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:43658 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:51578 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:32988 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:40516 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:36158 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:52982 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:36128 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:44518 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:51594 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:33860 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:40032 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:33464 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:53004 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:54482 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:53018 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:21:19 +0000] "GET /api/tasks? HTTP/1.1" 200 12343 "http://localhost:8080/inbox" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+backend-1        | INFO:     172.22.0.5:51048 - "GET /api/tasks?archived=false HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:33862 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:21:20 +0000] "GET /profile HTTP/1.1" 200 455 "http://localhost:8080/inbox" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+backend-1        | INFO:     172.22.0.5:51046 - "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 OK
+telegram-1       | INFO:     172.22.0.2:59212 - "GET /status HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:21:21 +0000] "GET /api/auth/me HTTP/1.1" 200 183 "http://localhost:8080/profile" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+telegram-1       | INFO:     127.0.0.1:35176 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:21:22 +0000] "GET /api/integrations HTTP/1.1" 200 1174 "http://localhost:8080/profile" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+telegram-1       | INFO:     172.22.0.2:47618 - "GET /status HTTP/1.1" 200 OK
+context-1        | INFO:     127.0.0.1:49152 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:36144 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:40030 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:21:30 +0000] "GET /api/auth/me HTTP/1.1" 200 183 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+gemini-1         | INFO:     127.0.0.1:54816 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:49946 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:49762 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:53538 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:54494 - "GET /health HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:57500 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     172.22.0.2:37360 - "GET /status HTTP/1.1" 200 OK
+backend-1        | INFO:     127.0.0.1:33450 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:21:30 +0000] "GET /api/tasks?archived=false HTTP/1.1" 200 12343 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+telegram-1       | INFO:     172.22.0.2:37414 - "GET /status HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:56806 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:47236 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:54842 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     172.22.0.2:37430 - "GET /status HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:35620 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:51582 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:53558 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     172.22.0.2:41512 - "GET /status HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:57522 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:40518 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:41092 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     172.22.0.2:40482 - "GET /status HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:49146 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:52988 - "GET /health HTTP/1.1" 200 OK
+notifications-1  | INFO:     127.0.0.1:48166 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     172.22.0.2:60840 - "GET /status HTTP/1.1" 200 OK
+gemini-1         | INFO:     127.0.0.1:41064 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:44520 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:51066 - "PATCH /api/tasks/7 HTTP/1.1" 200 OK
+telegram-1       | INFO:     172.22.0.2:41026 - "GET /status HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:33844 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:51096 - "GET /api/tasks?archived=false HTTP/1.1" 200 OK
+telegram-1       | INFO:     172.22.0.2:49038 - "GET /status HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:51080 - "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:33458 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:50280 - "PATCH /api/tasks/4 HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:54470 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:50284 - "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:40026 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:54818 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:21:30 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 12343 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+telegram-1       | INFO:     127.0.0.1:49774 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:21:39 +0000] "PATCH /api/tasks/3 HTTP/1.1" 200 476 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+telegram-1       | INFO:     127.0.0.1:53552 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:50298 - "GET /api/tasks?archived=false HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:57516 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:41074 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:21:39 +0000] "GET /api/tasks?archived=false HTTP/1.1" 200 12343 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+gemini-1         | INFO:     127.0.0.1:49110 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:21:39 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 12343 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+gemini-1         | INFO:     127.0.0.1:48150 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:50306 - "PATCH /api/tasks/6 HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:21:54 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 12343 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+backend-1        | INFO:     172.22.0.5:50310 - "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 OK
+backend-1        | INFO:     172.22.0.5:50326 - "GET /api/tasks?archived=false HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:22:00 +0000] "GET /api/auth/me HTTP/1.1" 200 183 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+telegram-1       | INFO:     127.0.0.1:49122 - "GET /health HTTP/1.1" 200 OK
+telegram-1       | INFO:     127.0.0.1:48156 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     127.0.0.1:54460 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:22:09 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 12343 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+backend-1        | INFO:     172.22.0.5:47472 - "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:22:15 +0000] "PATCH /api/tasks/7 HTTP/1.1" 200 329 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+backend-1        | INFO:     172.22.0.5:42352 - "GET /api/auth/me HTTP/1.1" 200 OK
+backend-1        | INFO:     127.0.0.1:40022 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     127.0.0.1:54806 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     127.0.0.1:49758 - "GET /health HTTP/1.1" 200 OK
+backend-1        | INFO:     127.0.0.1:53524 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:22:15 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 11393 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:22:15 +0000] "GET /api/tasks?archived=false HTTP/1.1" 200 11393 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:22:17 +0000] "PATCH /api/tasks/4 HTTP/1.1" 200 370 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:22:17 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 10443 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:22:17 +0000] "GET /api/tasks?archived=false HTTP/1.1" 200 10443 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:22:20 +0000] "PATCH /api/tasks/6 HTTP/1.1" 200 329 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:22:20 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:22:20 +0000] "GET /api/tasks?archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:22:30 +0000] "GET /api/auth/me HTTP/1.1" 200 183 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+backend-1        | INFO:     127.0.0.1:34336 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:22:35 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:22:50 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:23:46 +0000] "GET /api/auth/me HTTP/1.1" 200 183 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+backend-1        | INFO:     127.0.0.1:41058 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:23:46 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+backend-1        | INFO:     127.0.0.1:53056 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:23:46 +0000] "GET /api/tasks?archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+backend-1        | INFO:     127.0.0.1:48142 - "GET /health HTTP/1.1" 200 OK
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:23:48 +0000] "GET /api/auth/me HTTP/1.1" 200 183 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:23:48 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:23:48 +0000] "GET /api/tasks?archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:24:03 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:24:18 +0000] "GET /api/auth/me HTTP/1.1" 200 183 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:24:18 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:24:33 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:24:48 +0000] "GET /api/auth/me HTTP/1.1" 200 183 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:24:48 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:25:03 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:25:18 +0000] "GET /api/auth/me HTTP/1.1" 200 183 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:25:18 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:25:33 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:25:48 +0000] "GET /api/auth/me HTTP/1.1" 200 183 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:25:48 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:26:03 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:26:06 +0000] "GET /?task=3 HTTP/1.1" 200 455 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:26:06 +0000] "GET /assets/index-BhdHA4gx.js HTTP/1.1" 304 0 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:26:06 +0000] "GET /assets/index-D9L_g19F.css HTTP/1.1" 304 0 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:26:06 +0000] "GET /assets/index-BhdHA4gx.js HTTP/1.1" 304 0 "-" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:26:06 +0000] "GET /api/auth/me HTTP/1.1" 200 183 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:26:07 +0000] "GET /api/tasks/3 HTTP/1.1" 200 476 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:26:07 +0000] "GET /api/integrations/tasks/3/context HTTP/1.1" 200 74 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:26:07 +0000] "GET /api/integrations/tasks/3/runs HTTP/1.1" 200 2 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:26:12 +0000] "GET /api/integrations/tasks/3/context HTTP/1.1" 200 74 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:26:12 +0000] "GET /api/integrations/tasks/3/runs HTTP/1.1" 200 2 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:26:14 +0000] "POST /api/integrations/tasks/3/jev HTTP/1.1" 500 21 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:26:17 +0000] "GET /api/integrations/tasks/3/runs HTTP/1.1" 200 2 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:26:17 +0000] "GET /api/integrations/tasks/3/context HTTP/1.1" 200 74 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:26:22 +0000] "GET /api/integrations/tasks/3/context HTTP/1.1" 200 74 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:26:22 +0000] "GET /api/integrations/tasks/3/runs HTTP/1.1" 200 2 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:26:27 +0000] "GET /api/integrations/tasks/3/runs HTTP/1.1" 200 2 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:26:27 +0000] "GET /api/integrations/tasks/3/context HTTP/1.1" 200 74 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:26:35 +0000] "GET /api/auth/me HTTP/1.1" 200 183 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:26:35 +0000] "GET /api/integrations/tasks/3/context HTTP/1.1" 200 74 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:26:35 +0000] "GET /api/tasks/3 HTTP/1.1" 200 476 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:26:35 +0000] "GET /api/integrations/tasks/3/runs HTTP/1.1" 200 2 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:26:40 +0000] "GET /api/integrations/tasks/3/context HTTP/1.1" 200 74 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:26:40 +0000] "GET /api/integrations/tasks/3/runs HTTP/1.1" 200 2 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:26:45 +0000] "GET /api/integrations/tasks/3/context HTTP/1.1" 200 74 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:26:45 +0000] "GET /api/integrations/tasks/3/runs HTTP/1.1" 200 2 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:26:50 +0000] "GET /api/integrations/tasks/3/context HTTP/1.1" 200 74 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:26:50 +0000] "GET /api/integrations/tasks/3/runs HTTP/1.1" 200 2 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:26:55 +0000] "GET /api/integrations/tasks/3/runs HTTP/1.1" 200 2 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:26:55 +0000] "GET /api/integrations/tasks/3/context HTTP/1.1" 200 74 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:27:00 +0000] "GET /api/integrations/tasks/3/runs HTTP/1.1" 200 2 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:27:00 +0000] "GET /api/integrations/tasks/3/context HTTP/1.1" 200 74 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:27:05 +0000] "GET /api/auth/me HTTP/1.1" 200 183 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:27:05 +0000] "GET /api/integrations/tasks/3/runs HTTP/1.1" 200 2 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:27:05 +0000] "GET /api/integrations/tasks/3/context HTTP/1.1" 200 74 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:27:10 +0000] "GET /api/integrations/tasks/3/runs HTTP/1.1" 200 2 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:27:10 +0000] "GET /api/integrations/tasks/3/context HTTP/1.1" 200 74 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:27:15 +0000] "GET /api/integrations/tasks/3/runs HTTP/1.1" 200 2 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:27:15 +0000] "GET /api/integrations/tasks/3/context HTTP/1.1" 200 74 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:27:20 +0000] "GET /api/integrations/tasks/3/runs HTTP/1.1" 200 2 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:27:20 +0000] "GET /api/integrations/tasks/3/context HTTP/1.1" 200 74 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:27:26 +0000] "GET /api/integrations/tasks/3/runs HTTP/1.1" 200 2 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:27:26 +0000] "GET /api/integrations/tasks/3/context HTTP/1.1" 200 74 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:27:31 +0000] "GET /api/integrations/tasks/3/runs HTTP/1.1" 200 2 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:27:31 +0000] "GET /api/integrations/tasks/3/context HTTP/1.1" 200 74 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:27:35 +0000] "GET /api/auth/me HTTP/1.1" 200 183 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:27:36 +0000] "GET /api/integrations/tasks/3/runs HTTP/1.1" 200 2 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:27:36 +0000] "GET /api/integrations/tasks/3/context HTTP/1.1" 200 74 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:27:41 +0000] "GET /api/integrations/tasks/3/runs HTTP/1.1" 200 2 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:27:41 +0000] "GET /api/integrations/tasks/3/context HTTP/1.1" 200 74 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:27:43 +0000] "GET / HTTP/1.1" 200 455 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:27:43 +0000] "GET /assets/index-CSj4pkpd.js HTTP/1.1" 200 625898 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:27:43 +0000] "GET /assets/index-CSj4pkpd.js HTTP/1.1" 200 625898 "-" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:27:44 +0000] "GET /api/auth/me HTTP/1.1" 502 157 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 2026/11/09 17:27:44 [error] 29#29: *1 connect() failed (111: Connection refused) while connecting to upstream, client: 172.22.0.1, server: , request: "GET /api/auth/me HTTP/1.1", upstream: "http://172.22.0.2:8000/api/auth/me", host: "localhost:8080", referrer: "http://localhost:8080/"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:28:15 +0000] "GET /api/auth/me HTTP/1.1" 200 183 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:28:15 +0000] "GET /icon.png HTTP/1.1" 200 10076 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:28:15 +0000] "GET /api/tasks?archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:28:15 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:28:16 +0000] "GET /api/auth/me HTTP/1.1" 200 183 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:28:16 +0000] "GET /api/tasks?archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:28:16 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:28:31 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:28:46 +0000] "GET /api/auth/me HTTP/1.1" 200 183 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:28:46 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:29:01 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:29:04 +0000] "GET / HTTP/1.1" 304 0 "http://localhost:8080/?task=3" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:29:04 +0000] "GET /assets/index-CSj4pkpd.js HTTP/1.1" 304 0 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:29:04 +0000] "GET /assets/index-D9L_g19F.css HTTP/1.1" 200 223035 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:29:04 +0000] "GET /assets/index-CSj4pkpd.js HTTP/1.1" 304 0 "-" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:29:05 +0000] "GET /api/auth/me HTTP/1.1" 200 183 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:29:05 +0000] "GET /icon.png HTTP/1.1" 304 0 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:29:05 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:29:05 +0000] "GET /api/tasks?archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:29:07 +0000] "GET /profile HTTP/1.1" 200 455 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:29:08 +0000] "GET /api/auth/me HTTP/1.1" 200 183 "http://localhost:8080/profile" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:29:08 +0000] "GET /api/integrations HTTP/1.1" 200 1174 "http://localhost:8080/profile" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:29:23 +0000] "GET /api/integrations HTTP/1.1" 200 1174 "http://localhost:8080/profile" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:29:38 +0000] "GET /api/auth/me HTTP/1.1" 200 183 "http://localhost:8080/profile" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:29:38 +0000] "GET /api/integrations HTTP/1.1" 200 1174 "http://localhost:8080/profile" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:29:53 +0000] "GET /api/integrations HTTP/1.1" 200 1174 "http://localhost:8080/profile" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:30:08 +0000] "GET /api/auth/me HTTP/1.1" 200 183 "http://localhost:8080/profile" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:30:08 +0000] "GET /api/integrations HTTP/1.1" 200 1174 "http://localhost:8080/profile" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:30:23 +0000] "GET /api/integrations HTTP/1.1" 200 1174 "http://localhost:8080/profile" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:30:38 +0000] "GET /api/auth/me HTTP/1.1" 200 183 "http://localhost:8080/profile" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:30:38 +0000] "GET /api/integrations HTTP/1.1" 200 1174 "http://localhost:8080/profile" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:30:54 +0000] "GET /api/integrations HTTP/1.1" 200 1174 "http://localhost:8080/profile" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:31:00 +0000] "POST /api/integrations/jev/check HTTP/1.1" 200 1230 "http://localhost:8080/profile" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:31:00 +0000] "GET /api/integrations HTTP/1.1" 200 1097 "http://localhost:8080/profile" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:31:08 +0000] "GET /api/auth/me HTTP/1.1" 200 183 "http://localhost:8080/profile" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:31:09 +0000] "PATCH /api/integrations/context HTTP/1.1" 200 11 "http://localhost:8080/profile" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:31:09 +0000] "GET /api/integrations HTTP/1.1" 200 1097 "http://localhost:8080/profile" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:31:24 +0000] "GET /api/integrations HTTP/1.1" 200 1097 "http://localhost:8080/profile" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:31:38 +0000] "GET /api/auth/me HTTP/1.1" 200 183 "http://localhost:8080/profile" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:31:39 +0000] "GET /api/integrations HTTP/1.1" 200 1097 "http://localhost:8080/profile" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:31:55 +0000] "GET /api/integrations HTTP/1.1" 200 1097 "http://localhost:8080/profile" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:32:08 +0000] "GET /api/auth/me HTTP/1.1" 200 183 "http://localhost:8080/profile" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:32:10 +0000] "GET /api/integrations HTTP/1.1" 200 1097 "http://localhost:8080/profile" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:32:25 +0000] "GET /api/integrations HTTP/1.1" 200 1097 "http://localhost:8080/profile" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:32:32 +0000] "POST /api/integrations/jev/check HTTP/1.1" 499 0 "http://localhost:8080/profile" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:32:33 +0000] "GET / HTTP/1.1" 304 0 "http://localhost:8080/profile" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:32:33 +0000] "GET /assets/index-CSj4pkpd.js HTTP/1.1" 304 0 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:32:33 +0000] "GET /assets/index-D9L_g19F.css HTTP/1.1" 304 0 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:32:33 +0000] "GET /assets/index-CSj4pkpd.js HTTP/1.1" 304 0 "-" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:32:34 +0000] "GET /api/auth/me HTTP/1.1" 200 183 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:32:34 +0000] "GET /icon.png HTTP/1.1" 304 0 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:32:34 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:32:34 +0000] "GET /api/tasks?archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:32:38 +0000] "PATCH /api/tasks/3 HTTP/1.1" 200 476 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:32:38 +0000] "GET /api/tasks?archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:32:38 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:32:40 +0000] "PATCH /api/tasks/7 HTTP/1.1" 200 329 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:32:40 +0000] "GET /api/tasks?archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:32:40 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:32:41 +0000] "PATCH /api/tasks/4 HTTP/1.1" 200 370 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:32:41 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:32:41 +0000] "GET /api/tasks?archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:32:43 +0000] "PATCH /api/tasks/6 HTTP/1.1" 200 329 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:32:44 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:32:44 +0000] "GET /api/tasks?archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:32:59 +0000] "GET /api/tasks?sort_by=deadline&order=asc&archived=false HTTP/1.1" 200 9493 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"
+nginx-1          | 172.22.0.1 - - [09/Nov/2026:17:33:04 +0000] "GET /api/auth/me HTTP/1.1" 200 183 "http://localhost:8080/" "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0" "-"

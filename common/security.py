@@ -1,5 +1,3 @@
-import hashlib
-import hmac
 import os
 import time
 from collections import defaultdict, deque
@@ -36,33 +34,41 @@ def decrypt(value: str) -> str:
 
 def signer():
     cipher()
-    password = os.getenv('ADMIN_PASSWORD', '')
-    if len(password) < 16:
-        raise HTTPException(503, 'Задайте ADMIN_PASSWORD длиной не менее 16 символов в .env')
-    key = os.environ['INTEGRATION_ENCRYPTION_KEY'] + password
-    return URLSafeTimedSerializer(hashlib.sha256(key.encode()).digest(), salt='owner')
+    return URLSafeTimedSerializer(os.environ['INTEGRATION_ENCRYPTION_KEY'], salt='user-session-v1')
+
+
+def session_user(request: Request):
+    token = request.cookies.get('user_session', '')
+    try:
+        session = signer().loads(token, max_age=43200)
+        if not isinstance(session, dict) or not isinstance(session.get('id'), int) or session['id'] < 1:
+            raise BadSignature('invalid')
+    except (BadSignature, SignatureExpired):
+        return None
+    from common.accounts import account
+    row = account(session['id'])
+    return row if row.session_version == session.get('version') else None
+
+
+def require_user(request: Request):
+    if not getattr(request.state, 'user', None):
+        raise HTTPException(401, 'Войдите в аккаунт')
+    return request.state.user
 
 
 def require_owner(request: Request):
-    token = request.cookies.get('owner_session', '')
-    try:
-        if signer().loads(token, max_age=43200) != 'owner':
-            raise BadSignature('invalid')
-    except (BadSignature, SignatureExpired):
-        raise HTTPException(401, 'Войдите как владелец') from None
+    user = require_user(request)
+    if not user.is_admin:
+        raise HTTPException(403, 'Требуется доступ администратора')
+    return user
 
 
-def login(password: str, request: Request):
-    serializer = signer()
-    key = request.client.host
+def throttle(request: Request):
+    key = request.headers.get('x-real-ip', request.client.host)
     now = time.monotonic()
     recent = attempts[key]
     while recent and recent[0] < now - 60:
         recent.popleft()
-    if len(recent) >= 5:
+    if len(recent) >= 10:
         raise HTTPException(429, 'Слишком много попыток. Подождите минуту')
     recent.append(now)
-    if not hmac.compare_digest(password.encode(), os.environ['ADMIN_PASSWORD'].encode()):
-        raise HTTPException(401, 'Неверный пароль')
-    recent.clear()
-    return serializer.dumps('owner')

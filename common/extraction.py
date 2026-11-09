@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from fastapi import HTTPException
 from sqlmodel import Session, select
 
-from common.database import engine
+from common.database import get_engine
 from common.security import decrypt, encrypt
 from common import gemini
 from common.settings import read_settings
@@ -50,7 +50,7 @@ def apply_suggestion(session, suggestion, values=None):
 
 async def process_batch(chat, messages, message_ids, owner):
     config, _ = read_settings('gemini')
-    with Session(engine) as session:
+    with Session(get_engine()) as session:
         unseen = {mid for mid in message_ids if not session.get(ProcessedMessage, (chat.id, mid))}
         messages = [m for m in messages if m['id'] in unseen]
         if not unseen:
@@ -67,7 +67,7 @@ async def process_batch(chat, messages, message_ids, owner):
     if analysis and any(t.source_message_id not in {m['id'] for m in messages} for t in analysis.tasks):
         raise HTTPException(502, 'Gemini вернул неизвестный источник; пакет не отмечен обработанным')
     counts = {'messages': len(unseen), 'created': 0, 'pending': 0}
-    with Session(engine) as session:
+    with Session(get_engine()) as session:
         for found in analysis.tasks if analysis else []:
             key = hashlib.sha256(f'{chat.id}:{found.source_message_id}:{found.action}:{found.target_task_id}:{found.title.casefold()}'.encode()).hexdigest()
             if session.exec(select(Suggestion).where(Suggestion.dedup_key == key)).first():

@@ -3,12 +3,13 @@ from contextlib import asynccontextmanager
 
 from common.bot_runtime import check_bot, poll
 from common.http import private_app
+from common.runtime import for_users
 import bot
 
 
 @asynccontextmanager
 async def lifespan(app):
-    background = asyncio.create_task(poll('notifications', bot.dispatcher, bot.maintain))
+    background = asyncio.create_task(for_users(lambda: poll('notifications', bot.dispatcher, bot.maintain)))
     try:
         yield
     finally:

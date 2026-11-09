@@ -4,7 +4,7 @@ import uuid
 from fastapi import HTTPException
 from sqlmodel import Session, select
 
-from common.database import engine
+from common.database import get_engine
 from common.rpc import call
 from common.settings import read_settings, report
 from common.models.integration import CodexRun, TaskAction
@@ -33,13 +33,13 @@ async def check():
 
 async def execute(run_id, payload):
     try:
-        with Session(engine) as session:
+        with Session(get_engine()) as session:
             run = session.get(CodexRun, run_id)
             run.status = 'running'
             session.add(run)
             session.commit()
         result = await call('codex', '/run', {'run_id': run_id, 'payload': payload}, timeout=320)
-        with Session(engine) as session:
+        with Session(get_engine()) as session:
             run = session.get(CodexRun, run_id)
             run.status, run.summary = 'succeeded', result['summary']
             session.add(run)
@@ -53,7 +53,7 @@ async def execute(run_id, payload):
     except asyncio.CancelledError:
         raise
     except Exception:
-        with Session(engine) as session:
+        with Session(get_engine()) as session:
             run = session.get(CodexRun, run_id)
             run.status = 'failed'
             run.error = 'Codex недоступен: проверьте авторизацию, лимит и Linux sandbox'
@@ -68,7 +68,7 @@ def start_task(task_id):
         raise HTTPException(400, 'Включите Codex в настройках')
     if job_task and not job_task.done():
         raise HTTPException(409, 'Codex уже обрабатывает задачу')
-    with Session(engine) as session:
+    with Session(get_engine()) as session:
         task = session.get(Task, task_id)
         if not task or task.archived:
             raise HTTPException(404, 'Задача не найдена или находится в архиве')
@@ -82,7 +82,7 @@ def start_task(task_id):
 
 
 def recover_runs():
-    with Session(engine) as session:
+    with Session(get_engine()) as session:
         for run in session.exec(select(CodexRun).where(CodexRun.status.in_(['queued', 'running']))).all():
             run.status = 'interrupted'
             run.error = 'Админка перезапущена. Повторите запуск вручную.'

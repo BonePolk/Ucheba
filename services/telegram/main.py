@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse
 from telethon.errors import RPCError
 
 from common.http import private_app
+from common.runtime import for_users
 from common.settings import read_settings, report
 import client
 import pipeline
@@ -17,12 +18,12 @@ async def monitor():
             config, secret = read_settings('telegram')
             gemini, _ = read_settings('gemini')
             now = asyncio.get_running_loop().time()
-            if secret.get('session') and not client.connected and now >= next_analysis:
+            if secret.get('session') and not client.state().connected and now >= next_analysis:
                 next_analysis = now + 60
                 await client.get_client()
-                if not client.connected:
+                if not client.state().connected:
                     report('telegram', error='Авторизация Telegram истекла. Подключите аккаунт заново.')
-            if config['enabled'] and gemini['enabled'] and client.connected and now >= next_analysis:
+            if config['enabled'] and gemini['enabled'] and client.state().connected and now >= next_analysis:
                 next_analysis = now + gemini['interval_seconds']
                 await pipeline.process_messages()
         except Exception:
@@ -33,13 +34,19 @@ async def monitor():
 
 @asynccontextmanager
 async def lifespan(app):
-    background = asyncio.create_task(monitor())
+    background = asyncio.create_task(for_users(monitor))
     try:
         yield
     finally:
         background.cancel()
         await asyncio.gather(background, return_exceptions=True)
-        await client.close()
+        from common.identity import current_user_id
+        for owner in list(client.connections):
+            token = current_user_id.set(owner)
+            try:
+                await client.close()
+            finally:
+                current_user_id.reset(token)
 
 
 app = private_app('telegram', lifespan)
@@ -54,7 +61,7 @@ async def telegram_error(request, exc):
 
 @app.get('/status')
 async def status():
-    return {'connected': client.connected, 'analyzing': pipeline.analysis_lock.locked()}
+    return {'connected': client.state().connected, 'analyzing': pipeline.analysis_lock().locked()}
 
 
 @app.post('/code')
@@ -69,14 +76,20 @@ async def login(body: dict):
 
 @app.post('/close')
 async def close():
-    async with pipeline.analysis_lock:
-        await client.close()
+    async with pipeline.analysis_lock():
+        from common.identity import current_user_id
+        for owner in list(client.connections):
+            token = current_user_id.set(owner)
+            try:
+                await client.close()
+            finally:
+                current_user_id.reset(token)
     return {'ok': True}
 
 
 @app.post('/disconnect')
 async def disconnect():
-    async with pipeline.analysis_lock:
+    async with pipeline.analysis_lock():
         await client.disconnect()
     return {'ok': True}
 

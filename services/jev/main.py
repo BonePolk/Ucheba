@@ -5,5 +5,5 @@ app = private_app('jev')
 
 
 @app.post('/evaluate')
-async def evaluate(body: dict):
-    return await evaluate_local(**body)
+def evaluate(body: dict):
+    return evaluate_local(body['state'])

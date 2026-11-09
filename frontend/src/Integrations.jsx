@@ -11,19 +11,20 @@ function ConnectionInfo({ value }) {
   </>;
 }
 
-export default function Integrations() {
+export default function Integrations({ features = {} }) {
   const query = useQuery({ queryKey: ['integrations'], queryFn: () => request('/integrations'), refetchInterval: 15000, retry: false });
   if (query.isPending) return <Loader />;
   if (query.error) return <Alert color="red">{query.error.message}</Alert>;
-  return <IntegrationForms data={query.data} />;
+  return <IntegrationForms data={query.data} features={features} />;
 }
 
-function IntegrationForms({ data }) {
+function IntegrationForms({ data, features }) {
   const client = useQueryClient();
   const [telegram, setTelegram] = useState({ enabled: data.telegram.enabled, api_id: '', api_hash: '', phone: '' });
   const [gemini, setGemini] = useState({ enabled: data.gemini.enabled, model: data.gemini.model, interval_seconds: data.gemini.interval_seconds, confidence_threshold: data.gemini.confidence_threshold, timezone: data.gemini.timezone, owner_context: data.gemini.owner_context, api_key: '' });
   const [codex, setCodex] = useState({ enabled: data.codex.enabled, auto_prepare: data.codex.auto_prepare });
-  const [jev, setJev] = useState({ enabled: data.jev.enabled, account_id: data.jev.account_id, api_token: '' });
+  const [context, setContext] = useState({ enabled: data.context.enabled, api_key: '' });
+  const [jev, setJev] = useState({ enabled: data.jev.enabled });
   const [code, setCode] = useState('');
   const [password, setPassword] = useState('');
   const [step, setStep] = useState('');
@@ -31,7 +32,8 @@ function IntegrationForms({ data }) {
   const [notice, setNotice] = useState('');
   const chats = useQuery({ queryKey: ['integrations', 'chats'], queryFn: () => request('/integrations/telegram/chats'), enabled: false, retry: false });
   const models = useQuery({ queryKey: ['integrations', 'models'], queryFn: () => request('/integrations/gemini/models'), enabled: false, retry: false });
-  const codexState = useQuery({ queryKey: ['integrations', 'codex'], queryFn: () => request('/integrations/codex/status'), refetchInterval: 10000, retry: false });
+  const [codexOpened, setCodexOpened] = useState(data.codex.enabled);
+  const codexState = useQuery({ queryKey: ['integrations', 'codex'], enabled: features.codex !== false && codexOpened, queryFn: () => request('/integrations/codex/status'), refetchInterval: 10000, retry: false });
   const mutation = useMutation({
     mutationFn: ({ path, body, method = 'POST' }) => request(`/integrations/${path}`, { method, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) }),
     onSuccess: async (result) => {
@@ -43,7 +45,7 @@ function IntegrationForms({ data }) {
     },
   });
   const run = (path, body, method) => mutation.mutate({ path, body, method });
-  const save = (name, values, setter) => mutation.mutate({ path: name, body: values, method: 'PATCH' }, { onSuccess: () => setter((current) => Object.fromEntries(Object.entries(current).map(([key, value]) => [key, ['api_id', 'api_hash', 'phone', 'api_key', 'api_token'].includes(key) ? '' : value]))) });
+  const save = (name, values, setter) => mutation.mutate({ path: name, body: { ...values, ...(features[name] === false ? { enabled: false } : {}) }, method: 'PATCH' }, { onSuccess: () => setter((current) => Object.fromEntries(Object.entries(current).map(([key, value]) => [key, ['api_id', 'api_hash', 'phone', 'api_key', 'api_token'].includes(key) ? '' : value]))) });
   const field = (setter, name) => (event) => setter((current) => ({ ...current, [name]: event.currentTarget.value }));
   const toggle = (setter, name) => (event) => setter((current) => ({ ...current, [name]: event.currentTarget.checked }));
   const error = mutation.error || chats.error || models.error || codexState.error;
@@ -52,7 +54,16 @@ function IntegrationForms({ data }) {
     {error && <Alert color="red">{error.message}</Alert>}
     {notice && <Alert color="purple" withCloseButton onClose={() => setNotice('')}>{notice}</Alert>}
     <SimpleGrid cols={{ base: 1, md: 2 }}>
-      <Paper withBorder p="lg"><Stack>
+      {features.context !== false && <Paper withBorder p="lg"><Stack>
+        <Title order={3}>Контекст · GPT-6 Luna</Title>
+        <Text size="sm">Личный ключ шлюза lenec.tech. Память контекста и ответы доступны только в твоём аккаунте.</Text>
+        <PasswordInput label="API-ключ" placeholder={data.context.configured.api_key ? 'Сохранён' : ''} value={context.api_key} onChange={field(setContext, 'api_key')} />
+        <Switch label="Проверять контекст перед Jev" checked={context.enabled} onChange={toggle(setContext, 'enabled')} />
+        <Group><Button loading={mutation.isPending} onClick={() => save('context', context, setContext)}>Сохранить</Button><Button variant="subtle" color="red" disabled={mutation.isPending} onClick={() => run('context', { api_key: null, enabled: false }, 'PATCH')}>Удалить ключ</Button></Group>
+        <ConnectionInfo value={data.context} />
+      </Stack></Paper>}
+
+      {features.telegram !== false && <Paper withBorder p="lg"><Stack>
         <Group justify="space-between"><Title order={3}>Telegram</Title><Badge color={data.telegram_connected ? 'green' : 'gray'}>{data.telegram_connected ? 'Подключён' : 'Не подключён'}</Badge></Group>
         <PasswordInput label="API ID" placeholder={data.telegram.configured.api_id ? 'Сохранён' : ''} value={telegram.api_id} onChange={field(setTelegram, 'api_id')} />
         <PasswordInput label="API Hash" placeholder={data.telegram.configured.api_hash ? 'Сохранён' : ''} value={telegram.api_hash} onChange={field(setTelegram, 'api_hash')} />
@@ -67,10 +78,8 @@ function IntegrationForms({ data }) {
         <Text size="xs" c="dimmed">Ручной анализ: до 50 последних сообщений за 7 дней в каждом выбранном чате. Повторно обработанные сообщения пропускаются.</Text>
         <Button color="red" variant="subtle" disabled={mutation.isPending} onClick={() => { if (window.confirm('Отключить Telegram?')) run('telegram/disconnect'); }}>Отключить аккаунт</Button>
         <ConnectionInfo value={data.telegram} />
-        <BotSettings name="collector" data={data.collector} />
-        <BotSettings name="notifications" data={data.notifications} />
-      </Stack></Paper>
-      <Paper withBorder p="lg"><Stack>
+      </Stack></Paper>}
+      {features.gemini !== false && <Paper withBorder p="lg"><Stack>
         <Title order={3}>Gemini</Title>
         <PasswordInput label="API-ключ" placeholder={data.gemini.configured.api_key ? 'Сохранён' : ''} value={gemini.api_key} onChange={field(setGemini, 'api_key')} />
         <Select label="Модель" searchable data={[...new Set([gemini.model, ...(models.data ?? [])])]} value={gemini.model} allowDeselect={false} onChange={(model) => setGemini({ ...gemini, model })} />
@@ -83,12 +92,12 @@ function IntegrationForms({ data }) {
         <Text size="xs" c="dimmed">Изменения, отмена, неясный адресат и неоднозначные задачи всегда требуют подтверждения.</Text>
         <Group><Button loading={mutation.isPending} onClick={() => save('gemini', gemini, setGemini)}>Сохранить</Button><Button variant="default" disabled={mutation.isPending} onClick={() => run('gemini/check')}>Проверить подключение</Button><Button variant="subtle" color="red" disabled={mutation.isPending} onClick={() => run('gemini', { api_key: null, enabled: false }, 'PATCH')}>Удалить ключ</Button></Group>
         <ConnectionInfo value={data.gemini} />
-      </Stack></Paper>
-      <Paper withBorder p="lg"><Stack>
+      </Stack></Paper>}
+      {features.codex !== false && <Paper withBorder p="lg"><Stack>
         <Group justify="space-between"><Title order={3}>Codex</Title><Badge color={codexState.data?.authorized ? 'green' : 'gray'}>{codexState.data?.authorized ? 'Вход выполнен' : 'Нет авторизации'}</Badge></Group>
         <Text size="sm">Официальный Python SDK openai-codex с входом ChatGPT по device code. Включите device code login в настройках безопасности ChatGPT. Доступ зависит от подписки и лимитов аккаунта.</Text>
         {codexState.data && !codexState.data.sandbox_available && <Alert color="yellow">Linux sandbox недоступен в этом окружении. Выполнение заблокировано; режим без защиты не используется.</Alert>}
-        <Group><Button disabled={mutation.isPending} onClick={() => run('codex/connect')}>Подключить через ChatGPT</Button><Button variant="default" disabled={mutation.isPending} onClick={() => run('codex/check')}>Проверить доступность</Button></Group>
+        <Group><Button disabled={mutation.isPending} onClick={() => { setCodexOpened(true); run('codex/connect'); }}>Подключить через ChatGPT</Button><Button variant="default" disabled={mutation.isPending} onClick={() => { setCodexOpened(true); run('codex/check'); }}>Проверить доступность</Button></Group>
         {codexState.data?.device?.state === 'waiting' && <Alert color="purple"><Stack gap="xs"><Text>Подтвердите вход в браузере:</Text>{codexState.data.device.url && <Anchor href={codexState.data.device.url} target="_blank" rel="noreferrer">Открыть страницу OpenAI</Anchor>}<Text fw={700}>{codexState.data.device.code ?? 'Ожидание кода…'}</Text></Stack></Alert>}
         {['failed', 'expired'].includes(codexState.data?.device?.state) && <Alert color="yellow">Вход не завершён или код истёк. Запросите новый код.</Alert>}
         <Switch label="Включить агента" checked={codex.enabled} onChange={toggle(setCodex, 'enabled')} />
@@ -96,17 +105,17 @@ function IntegrationForms({ data }) {
         <Text size="xs" c="dimmed">Одна задача за раз, до 5 минут. Подготовка файлов и встроенный поиск; сетевой доступ команд отключён. Результат переводит задачу «На проверку». Публикация и отправка сообщений не выполняются.</Text>
         <Group><Button loading={mutation.isPending} onClick={() => save('codex', codex, setCodex)}>Сохранить</Button><Button color="red" variant="subtle" disabled={mutation.isPending} onClick={() => run('codex/disconnect')}>Отключить</Button></Group>
         <ConnectionInfo value={data.codex} />
-      </Stack></Paper>
-      <Paper withBorder p="lg"><Stack>
-        <Title order={3}>Jev · Cloudflare AI</Title>
-        <TextInput label="Account ID" value={jev.account_id} onChange={field(setJev, 'account_id')} />
-        <PasswordInput label="API-токен" placeholder={data.jev.configured.api_token ? 'Сохранён' : ''} value={jev.api_token} onChange={field(setJev, 'api_token')} />
-        <Text size="sm">Модель: typesafe/jev. Доступность и квота зависят от аккаунта Cloudflare. Бесплатный доступ именно к этой сторонней модели не гарантируется.</Text>
+      </Stack></Paper>}
+      {features.jev !== false && <Paper withBorder p="lg"><Stack>
+        <Title order={3}>Приоритеты · Laya Multilingual</Title>
+        <Text size="sm">Локальная альтернатива Jev: 322M параметров, CPU, поддержка русского. Ключи и оплата Cloudflare не нужны. При первой проверке скачивается модель; первый запрос может занять несколько минут. Ориентир памяти сервиса — 2–3 ГБ, фактический расход зависит от текста.</Text>
         <Switch label="Автоматически оценивать приоритеты" checked={jev.enabled} onChange={toggle(setJev, 'enabled')} />
-        <Text size="xs" c="dimmed">ИИ-оценка хранится отдельно от ручного приоритета. При ошибках обычный список задач продолжает работать.</Text>
-        <Group><Button loading={mutation.isPending} onClick={() => save('jev', jev, setJev)}>Сохранить</Button><Button variant="default" disabled={mutation.isPending} onClick={() => run('jev/check')}>Проверить подключение</Button><Button variant="subtle" color="red" disabled={mutation.isPending} onClick={() => run('jev', { api_token: null, enabled: false }, 'PATCH')}>Удалить токен</Button></Group>
+        <Text size="xs" c="dimmed">Сначала GPT-6 Luna проверяет задачу с памятью прошлых задач. При нехватке контекста задаёт вопросы; после ответа выполняется локальная оценка Jev. ИИ-оценка хранится отдельно от ручного приоритета. При ошибках обычный список задач продолжает работать.</Text>
+        <Group><Button loading={mutation.isPending} onClick={() => save('jev', jev, setJev)}>Сохранить</Button><Button variant="default" disabled={mutation.isPending} onClick={() => run('jev/check')}>Проверить модель</Button></Group>
         <ConnectionInfo value={data.jev} />
-      </Stack></Paper>
+      </Stack></Paper>}
+      {features.collector !== false && <Paper withBorder p="lg"><BotSettings name="collector" data={data.collector} /></Paper>}
+      {features.notifications !== false && <Paper withBorder p="lg"><BotSettings name="notifications" data={data.notifications} /></Paper>}
     </SimpleGrid>
   </Stack>;
 }

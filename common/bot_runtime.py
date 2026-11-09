@@ -5,6 +5,7 @@ from aiogram.exceptions import TelegramAPIError
 from fastapi import HTTPException
 
 from common.settings import read_settings, report
+from common.accounts import claim_bot
 
 
 async def check_bot(name):
@@ -26,6 +27,7 @@ async def poll(name, dispatcher_factory, maintenance):
             continue
         polling = upkeep = bot = None
         try:
+            claim_bot(name, token)
             bot = Bot(token)
             await bot.get_me()
             report(name, success=True)
@@ -38,7 +40,7 @@ async def poll(name, dispatcher_factory, maintenance):
                 updated, secret = read_settings(name)
                 if not updated['enabled'] or secret.get('bot_token') != token:
                     break
-        except (TelegramAPIError, ValueError, OSError):
+        except (TelegramAPIError, ValueError, OSError, HTTPException):
             report(name, error='Бот недоступен: проверьте токен, webhook и запуск другой копии бота')
         finally:
             for task in (polling, upkeep):

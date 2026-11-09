@@ -1,6 +1,5 @@
 import asyncio
 import json
-import os
 from pathlib import Path
 from urllib.parse import quote
 from typing import Literal
@@ -11,10 +10,12 @@ import httpx
 from pydantic import BaseModel, Field, ValidationError
 from sqlmodel import Session, select
 
-from common.database import engine
+from common.database import get_engine
 from common.rpc import call, internal_token
-from common.security import login, require_owner, signer
-from integrations import codex, gemini, jev, telegram
+from common.security import require_user
+from common.identity import user_id
+from common.accounts import check_feature, features
+from integrations import codex, gemini, jev, telegram, context
 from common import extraction as pipeline
 from common.settings import SECRET_FIELDS, public_settings, read_settings, report, save_settings
 from common.models.integration import CodexRun, Suggestion
@@ -22,57 +23,22 @@ from common.models.task import TaskCreate
 
 settings_lock = asyncio.Lock()
 
-admin = APIRouter(prefix='/api/auth', tags=['owner'])
-router = APIRouter(prefix='/api/integrations', tags=['integrations'], dependencies=[Depends(require_owner)])
-inbox = APIRouter(prefix='/api/inbox', tags=['inbox'], dependencies=[Depends(require_owner)])
-
-
-class Login(BaseModel):
-    password: str
-
-
-@admin.get('/status')
-def owner_status(request: Request):
-    try:
-        signer()
-    except HTTPException as exc:
-        return {'configured': False, 'authenticated': False, 'detail': exc.detail}
-    try:
-        require_owner(request)
-        authenticated = True
-    except HTTPException:
-        authenticated = False
-    return {'configured': True, 'authenticated': authenticated}
-
-
-@admin.post('/login')
-def owner_login(body: Login, request: Request, response: Response):
-    token = login(body.password, request)
-    response.set_cookie('owner_session', token, httponly=True, samesite='strict', max_age=43200,
-                        secure=os.getenv('COOKIE_SECURE', 'false').lower() == 'true', path='/')
-    response.delete_cookie('owner_session', path='/api')
-    return {'ok': True}
-
-
-@admin.post('/logout')
-def owner_logout(response: Response):
-    response.delete_cookie('owner_session', path='/')
-    response.delete_cookie('owner_session', path='/api')
-    return {'ok': True}
-
 
 async def provider_call(name, operation):
     try:
-        return await operation
+        result = await operation
     except HTTPException as exc:
         report(name, error=str(exc.detail))
         raise
-    except (httpx.HTTPError, OSError, TimeoutError):
-        message = f'{name}: сервис недоступен или превышено время ожидания'
-    except (ValidationError, ValueError, KeyError, TypeError):
-        message = f'{name}: неожиданный формат ответа или некорректные настройки'
-    report(name, error=message)
-    raise HTTPException(502, message)
+    except httpx.HTTPError:
+        detail = f'{name}: сервис недоступен или превышено время ожидания'
+        report(name, error=detail)
+        raise HTTPException(502, detail) from None
+    report(name, success=True)
+    return result
+
+router = APIRouter(prefix='/api/integrations', tags=['integrations'], dependencies=[Depends(require_user)])
+inbox = APIRouter(prefix='/api/inbox', tags=['inbox'], dependencies=[Depends(require_user)])
 
 
 class TelegramConfig(BaseModel):
@@ -108,7 +74,13 @@ class CollectorConfig(BaseModel):
     enabled: bool = False
 
 
-CONFIG_MODELS = {'notifications': NotificationsConfig, 'collector': CollectorConfig, 'telegram': TelegramConfig, 'gemini': GeminiConfig, 'codex': CodexConfig, 'jev': JevConfig}
+class ContextConfig(BaseModel):
+    enabled: bool = True
+    base_url: Literal['https://lenec.tech/v1'] = 'https://lenec.tech/v1'
+    model: Literal['gpt-6-luna'] = 'gpt-6-luna'
+
+
+CONFIG_MODELS = {'context': ContextConfig, 'notifications': NotificationsConfig, 'collector': CollectorConfig, 'telegram': TelegramConfig, 'gemini': GeminiConfig, 'codex': CodexConfig, 'jev': JevConfig}
 
 
 @router.get('')
@@ -121,7 +93,9 @@ async def settings():
 
 
 @router.patch('/{name}')
-async def configure(name: Literal['telegram', 'gemini', 'codex', 'jev', 'collector', 'notifications'], body: dict):
+async def configure(name: Literal['telegram', 'gemini', 'codex', 'jev', 'collector', 'notifications', 'context'], body: dict):
+    if body.get('enabled'):
+        check_feature(name)
     allowed = set(CONFIG_MODELS[name].model_fields) | (SECRET_FIELDS[name] - {'session'})
     if set(body) - allowed:
         raise HTTPException(422, 'Неизвестное поле настроек')
@@ -248,12 +222,12 @@ async def codex_task(task_id: int):
 
 @router.get('/tasks/{task_id}/runs')
 def runs(task_id: int):
-    with Session(engine) as session:
+    with Session(get_engine()) as session:
         return session.exec(select(CodexRun).where(CodexRun.task_id == task_id).order_by(CodexRun.created_at.desc())).all()
 
 
 def require_run(run_id):
-    with Session(engine) as session:
+    with Session(get_engine()) as session:
         if not session.get(CodexRun, run_id):
             raise HTTPException(404, 'Запуск не найден')
 
@@ -278,7 +252,7 @@ async def download(run_id: str, filename: str):
 
 @inbox.get('')
 def pending_suggestions():
-    with Session(engine) as session:
+    with Session(get_engine()) as session:
         return session.exec(select(Suggestion).where(Suggestion.status == 'pending').order_by(Suggestion.id.desc())).all()
 
 
@@ -289,7 +263,7 @@ class Acceptance(BaseModel):
 
 @inbox.post('/{suggestion_id}/accept')
 def accept(suggestion_id: int, body: Acceptance):
-    with Session(engine) as session:
+    with Session(get_engine()) as session:
         suggestion = session.get(Suggestion, suggestion_id)
         if not suggestion:
             raise HTTPException(404, 'Предложение не найдено')
@@ -306,7 +280,7 @@ def accept(suggestion_id: int, body: Acceptance):
 
 @inbox.post('/{suggestion_id}/reject')
 def reject(suggestion_id: int):
-    with Session(engine) as session:
+    with Session(get_engine()) as session:
         suggestion = session.get(Suggestion, suggestion_id)
         if not suggestion:
             raise HTTPException(404, 'Предложение не найдено')
@@ -340,11 +314,12 @@ async def collector_analyze():
 
 @router.api_route('/services/{name}/{path:path}', methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'])
 async def service_access(
-    name: Literal['telegram', 'gemini', 'codex', 'jev', 'collector', 'notifications'],
+    name: Literal['telegram', 'gemini', 'codex', 'jev', 'collector', 'notifications', 'context'],
     path: str,
     request: Request,
 ):
-    headers = {'X-Service-Token': internal_token(name)}
+    check_feature(name)
+    headers = {'X-Service-Token': internal_token(name), 'X-User-ID': str(user_id())}
     if request.headers.get('content-type'):
         headers['Content-Type'] = request.headers['content-type']
     try:
@@ -355,3 +330,27 @@ async def service_access(
         raise HTTPException(502, 'Сервис недоступен или превышено время ожидания') from None
     response_headers = {key: result.headers[key] for key in ('content-type', 'content-disposition') if key in result.headers}
     return Response(content=result.content, status_code=result.status_code, headers=response_headers)
+
+
+class ContextAnswer(BaseModel):
+    subject: str = Field(default='', max_length=200)
+    answer: str = Field(min_length=1, max_length=12000)
+
+
+@router.get('/tasks/{task_id}/context')
+def task_context(task_id: int):
+    return context.get_context(task_id)
+
+
+@router.post('/tasks/{task_id}/context/analyze')
+async def analyze_context(task_id: int):
+    return await provider_call('context', context.prepare(task_id))
+
+
+@router.post('/tasks/{task_id}/context')
+async def answer_context(task_id: int, body: ContextAnswer):
+    check_feature('context')
+    context.save_answer(task_id, body.subject, body.answer)
+    if not features()['jev']:
+        return {'status': 'saved'}
+    return await provider_call('jev', jev.evaluate(task_id))

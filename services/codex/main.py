@@ -53,7 +53,7 @@ async def run(body: Run):
 def result_root(run_id):
     if len(run_id) != 32 or any(c not in '0123456789abcdef' for c in run_id):
         raise HTTPException(404, 'Запуск не найден')
-    return runner.WORK / run_id
+    return runner.work() / run_id
 
 
 @app.get('/runs/{run_id}/files')

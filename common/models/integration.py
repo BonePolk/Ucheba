@@ -97,3 +97,15 @@ class CollectedMessage(SQLModel, table=True):
 class NotificationSent(SQLModel, table=True):
     key: str = Field(primary_key=True)
     sent_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class TaskContext(SQLModel, table=True):
+    task_id: int = Field(primary_key=True)
+    subject: str = ''
+    owner_notes: str = ''
+    summary: str = ''
+    questions: str = '[]'
+    status: str = 'new'
+    task_snapshot: str = ''
+    usage: str = '{}'
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

@@ -41,7 +41,7 @@ export default function TaskForm({ task, onClose, onSubmit, pending, error, allo
         deadline: values.deadline ? dayjs(values.deadline).toISOString() : null,
         description: values.description.trim() || null,
         category: values.category.trim() || null,
-      }, { openAutomation }))}>
+      }, { openAutomation: allowAutomation && openAutomation }))}>
         <Stack>
           <TextInput label="Название" required {...form.getInputProps('title')} />
           <Textarea label="Описание" autosize minRows={3} {...form.getInputProps('description')} />
@@ -49,7 +49,7 @@ export default function TaskForm({ task, onClose, onSubmit, pending, error, allo
           <Select label="Приоритет" data={priorities} allowDeselect={false} {...form.getInputProps('priority')} />
           <Select label="Статус" data={statuses} allowDeselect={false} {...form.getInputProps('status')} />
           <TextInput label="Категория" {...form.getInputProps('category')} />
-          {allowAutomation && <Checkbox label="Открыть действия Codex / Jev после сохранения" checked={openAutomation} onChange={(event) => setOpenAutomation(event.currentTarget.checked)} />}
+          {allowAutomation && <Checkbox label="Открыть действия ИИ после сохранения" checked={openAutomation} onChange={(event) => setOpenAutomation(event.currentTarget.checked)} />}
           {error && <Alert color="red">{error.message}</Alert>}
           <Group justify="flex-end">
             <Button variant="default" onClick={onClose}>Отмена</Button>
