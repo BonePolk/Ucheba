@@ -16,7 +16,7 @@ admin = APIRouter(prefix='/api/admin', dependencies=[Depends(require_owner)])
 
 
 class Credentials(BaseModel):
-    username: str = Field(min_length=3, max_length=64, pattern=r'^[a-zA-Z0-9_.-]+$')
+    username: str = Field(min_length=3, max_length=64, pattern=r'^[a-zA-Zа-яА-ЯёЁ0-9_.-]+$')
     password: str = Field(min_length=12, max_length=256)
 
 

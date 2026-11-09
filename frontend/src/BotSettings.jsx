@@ -15,10 +15,13 @@ export default function BotSettings({ name, data }) {
   const available = useQuery({ queryKey: ['integrations', 'collector-chats'], queryFn: () => request('/integrations/bots/collector/chats'), enabled: false, retry: false });
   const action = useMutation({
     mutationFn: ({ path, body, method = 'POST' }) => request(`/integrations/${path}`, { method, body: JSON.stringify(body) }),
-    onSuccess: async (result) => {
-      setToken('');
+    onSuccess: async (result, variables) => {
+      if (variables.method === 'PATCH') {
+        if ('bot_token' in variables.body) setToken('');
+        if ('enabled' in variables.body) setEnabled(variables.body.enabled);
+      }
       setNotice(result.username ? `Подключён @${result.username}` : result.messages !== undefined ? `Обработано сообщений: ${result.messages}` : 'Сохранено');
-      await client.invalidateQueries({ queryKey: ['integrations'] });
+      await client.invalidateQueries({ queryKey: ['integrations'], exact: true });
       await client.invalidateQueries({ queryKey: ['inbox'] });
       await client.invalidateQueries({ queryKey: ['tasks'] });
     },

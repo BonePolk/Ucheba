@@ -5,6 +5,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from common.http import private_app
+from common.progress import Progress
 import runner
 
 
@@ -43,11 +44,13 @@ async def check():
 class Run(BaseModel):
     run_id: str = Field(pattern=r'^[a-f0-9]{32}$')
     payload: dict
+    task_id: int = Field(default=0, ge=0)
 
 
 @app.post('/run')
 async def run(body: Run):
-    return await runner.execute(body.run_id, body.payload)
+    with Progress('Codex', body.task_id) as progress:
+        return await runner.execute(body.run_id, body.payload, progress)
 
 
 def result_root(run_id):

@@ -5,6 +5,7 @@ import { deleteTask, getTasks, request, saveTask } from './api';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
 import TaskForm, { priorities, statuses } from './TaskForm';
+import JevProgress from './JevProgress';
 
 dayjs.extend(utc);
 
@@ -45,7 +46,7 @@ export default function TaskBoard({ features = {} }) {
     refetchInterval: 15000,
     enabled: taskView,
   });
-  const allTasks = useQuery({ queryKey: ['tasks', 'all', archived], queryFn: () => getTasks({ archived: String(archived) }), enabled: taskView });
+  const categories = useQuery({ queryKey: ['tasks', 'categories', archived], queryFn: () => request(`/tasks/categories?archived=${archived}`), enabled: taskView });
   const refresh = () => Promise.all([
     queryClient.invalidateQueries({ queryKey: ['tasks'] }),
     queryClient.invalidateQueries({ queryKey: ['jev-ranking'] }),
@@ -75,7 +76,6 @@ export default function TaskBoard({ features = {} }) {
     },
   });
   const remove = useMutation({ mutationFn: deleteTask, onSuccess: refresh });
-  const categories = [...new Set((allTasks.data ?? []).map((task) => task.category).filter(Boolean))].sort();
   const rows = [...(tasks.data ?? [])].sort((a, b) => Number(Boolean(isOverdue(b, now))) - Number(Boolean(isOverdue(a, now))));
   const error = tasks.error || update.error || remove.error || ranking.error || rank.error;
   const changeFilter = (name, value) => setFilters((current) => ({ ...current, [name]: value }));
@@ -101,14 +101,14 @@ export default function TaskBoard({ features = {} }) {
           <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }}>
             <Select label="Статус" placeholder="Все статусы" data={statuses} clearable value={filters.status} onChange={(value) => changeFilter('status', value)} />
             <Select label="Приоритет" placeholder="Все приоритеты" data={[{ value: 'overdue', label: 'Просрочено — наивысший' }, ...priorities]} clearable value={filters.priority} onChange={(value) => changeFilter('priority', value)} />
-            <Select label="Категория" placeholder="Все категории" data={categories} clearable searchable value={filters.category} onChange={(value) => changeFilter('category', value)} />
+            <Select label="Категория" placeholder="Все категории" data={categories.data ?? []} clearable searchable value={filters.category} onChange={(value) => changeFilter('category', value)} />
             <Select label="Сортировка" data={sorting.filter((item) => features.jev !== false || item.value !== 'jev:asc')} value={currentSort} allowDeselect={false} onChange={setSort} />
           </SimpleGrid>
         </Paper>
-        {features.jev !== false && !archived && <Group>
+        {features.jev !== false && !archived && <Stack gap="xs"><Group>
           <Button variant="light" loading={rank.isPending} onClick={() => rank.mutate()}>Обновить порядок Jev</Button>
           <Text size="sm" c="dimmed">{ranking.data?.needs_refresh ? 'Порядок нужно обновить.' : `Сравнено задач: ${ranking.data?.ranked_count ?? 0}.`}{ranking.data?.pending_count > 0 && ` Ожидают контекста Luna: ${ranking.data.pending_count}.`}{ranking.data?.uncertain_comparisons > 0 && ' При неуверенном сравнении сохранён ручной приоритет и дедлайн.'}</Text>
-        </Group>}
+        </Group><JevProgress active={rank.isPending} /></Stack>}
         {error && <Alert color="red">{error.message}</Alert>}
         {tasks.isPending ? <Loader aria-label="Загрузка задач" /> : (
           <Paper withBorder radius="md" p="sm">

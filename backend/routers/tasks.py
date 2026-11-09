@@ -77,6 +77,15 @@ def list_tasks(
         return tasks
 
 
+@router.get('/categories', response_model=list[str])
+def list_categories(archived: bool = False):
+    with Session(get_engine()) as session:
+        statement = select(Task.category).where(
+            Task.archived == archived, Task.category.is_not(None), Task.category != '',
+        ).distinct().order_by(Task.category)
+        return session.exec(statement).all()
+
+
 @router.get("/{task_id}", response_model=Task)
 def get_task(task_id: int):
     with Session(get_engine()) as session:

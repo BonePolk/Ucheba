@@ -31,14 +31,14 @@ async def check():
     return result
 
 
-async def execute(run_id, payload):
+async def execute(run_id, payload, task_id):
     try:
         with Session(get_engine()) as session:
             run = session.get(CodexRun, run_id)
             run.status = 'running'
             session.add(run)
             session.commit()
-        result = await call('codex', '/run', {'run_id': run_id, 'payload': payload}, timeout=320)
+        result = await call('codex', '/run', {'run_id': run_id, 'payload': payload, 'task_id': task_id}, timeout=320)
         with Session(get_engine()) as session:
             run = session.get(CodexRun, run_id)
             run.status, run.summary = 'succeeded', result['summary']
@@ -77,7 +77,7 @@ def start_task(task_id):
         session.commit()
         run_id = run.id
         payload = {'title': task.title, 'description': task.description}
-    job_task = asyncio.create_task(execute(run_id, payload))
+    job_task = asyncio.create_task(execute(run_id, payload, task_id))
     return {'id': run_id, 'status': 'queued'}
 
 

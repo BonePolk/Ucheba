@@ -4,13 +4,15 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { request } from './api';
 import ContextFiles from './ContextFiles';
 import ContextBrowser from './ContextBrowser';
+import AgentProgress from './AgentProgress';
+import JevProgress from './JevProgress';
 
 function RunFiles({ run }) {
   const files = useQuery({ queryKey: ['integrations', 'files', run.id], queryFn: () => request(`/integrations/codex/runs/${run.id}/files`), enabled: run.status === 'succeeded' });
   return <Stack gap="xs">{files.data?.map((name) => <Anchor key={name} href={`/api/integrations/codex/runs/${run.id}/files/${name.split('/').map(encodeURIComponent).join('/')}`} download>{name}</Anchor>)}{files.error && <Text c="red">{files.error.message}</Text>}</Stack>;
 }
 
-function ContextForm({ taskId, jevEnabled }) {
+function ContextForm({ taskId, jevEnabled, jevBusy }) {
   const client = useQueryClient();
   const [subject, setSubject] = useState(null);
   const [answer, setAnswer] = useState(null);
@@ -37,6 +39,8 @@ function ContextForm({ taskId, jevEnabled }) {
     <ContextFiles taskId={taskId} disabled={analyze.isPending || save.isPending} />
     <ContextBrowser taskId={taskId} disabled={analyze.isPending || save.isPending} />
     <Button variant="light" loading={analyze.isPending} disabled={save.isPending} onClick={() => analyze.mutate()}>Проверить контекст через Luna</Button>
+    <AgentProgress taskId={taskId} providers={['context']} active={analyze.isPending || save.isPending || jevBusy} />
+    {jevEnabled && <JevProgress taskId={taskId} active={save.isPending || jevBusy} />}
     {analyze.isSuccess && <Text size="sm">{analyze.data.status === 'ready' ? 'Контекста достаточно для оценки Jev.' : 'Luna запросила уточнения — ответь на вопросы ниже.'}</Text>}
     {context.data?.usage && <Text size="xs" c="dimmed">Последняя проверка: вход {context.data.usage.input_tokens ?? 0}, выход {context.data.usage.output_tokens ?? 0} токенов</Text>}
     {context.data?.questions?.length > 0 && <Alert color="yellow"><Stack gap="xs">{context.data.questions.map((question, i) => <Text key={i} size="sm">{question}</Text>)}</Stack></Alert>}
@@ -70,7 +74,8 @@ export default function TaskAutomation({ task, features = {} }) {
     <Text fw={500}>{task.title}</Text>
     <Text size="sm" c="dimmed">Сначала подключите провайдеров в разделе «Интеграции». Задача уже сохранена и не зависит от доступности ИИ.</Text>
     <Group>{features.codex !== false && <Button disabled={action.isPending} onClick={() => action.mutate('codex')}>Поручить Codex</Button>}{features.jev !== false && features.context !== false && <Button variant="light" disabled={action.isPending} onClick={() => action.mutate('jev')}>Обновить порядок Jev</Button>}</Group>
-    {features.context !== false && <ContextForm key={task.id} taskId={task.id} jevEnabled={features.jev !== false} />}
+    {features.codex !== false && <AgentProgress taskId={task.id} providers={['codex']} active={(action.isPending && action.variables === 'codex') || runs.data?.some((run) => ['queued', 'running'].includes(run.status))} />}
+    {features.context !== false && <ContextForm key={task.id} taskId={task.id} jevEnabled={features.jev !== false} jevBusy={action.isPending && action.variables === 'jev'} />}
     {notice && <Alert color="purple">{notice}</Alert>}
     {(action.error || runs.error) && <Alert color="red">{(action.error || runs.error).message}</Alert>}
     {features.codex !== false && runs.data?.map((run) => <Paper key={run.id} withBorder p="md"><Stack gap="sm">

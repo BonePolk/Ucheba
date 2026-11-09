@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 
 from common.rpc import require_service
 from common.identity import current_user_id
+from common.progress import get_progress
 
 
 def private_app(name, lifespan=None):
@@ -39,5 +40,9 @@ def private_app(name, lifespan=None):
     @app.get('/health')
     def health():
         return {'ok': True}
+
+    @app.get('/progress')
+    async def progress(task_id: int = 0):
+        return get_progress(task_id)
 
     return app

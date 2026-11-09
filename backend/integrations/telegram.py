@@ -22,4 +22,4 @@ async def disconnect():
 
 
 async def status():
-    return await call('telegram', '/status', method='GET')
+    return await call('telegram', '/status', method='GET', timeout=2)

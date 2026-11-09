@@ -66,11 +66,17 @@ def report(name, error=None, success=False):
 
 
 def public_settings():
+    from common.accounts import features
+    enabled = features()
     result = {}
     with Session(get_engine()) as session:
         for name in DEFAULTS:
             row = session.get(IntegrationSetting, name)
-            config, secrets = read_settings(name)
+            stored = json.loads(row.config) if row else {}
+            config = {key: stored.get(key, default) for key, default in DEFAULTS[name].items()}
+            if not enabled[name]:
+                config['enabled'] = False
+            secrets = json.loads(decrypt(row.secrets)) if row and row.secrets else {}
             result[name] = {
                 **config,
                 'configured': {key: bool(secrets.get(key)) for key in SECRET_FIELDS[name] if key != 'session'},

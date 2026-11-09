@@ -50,7 +50,7 @@ def ranking_status():
             'uncertain_comparisons': 0}
 
 
-async def rank_all(force=False):
+async def rank_all(force=False, task_id=0):
     check_feature('jev')
     if not read_config('jev')['enabled']:
         raise HTTPException(400, 'Включите Jev в настройках')
@@ -61,7 +61,7 @@ async def rank_all(force=False):
             if not force and saved and saved.snapshot == signature:
                 return json.loads(saved.result)
         if len(ready) > 1:
-            result = await call('jev', '/rank', {'tasks': ready, 'now': datetime.now(timezone.utc).isoformat()}, timeout=300)
+            result = await call('jev', '/rank', {'tasks': ready, 'now': datetime.now(timezone.utc).isoformat(), 'task_id': task_id}, timeout=300)
         else:
             result = {'task_ids': [task['id'] for task in ready], 'comparisons': 0, 'uncertain_comparisons': 0}
         ids = result.get('task_ids', [])
@@ -114,7 +114,7 @@ async def evaluate(task_id=None):
             session.add(task)
             session.commit()
         return {'rank': None, 'metrics': metrics}
-    result = await rank_all()
+    result = await rank_all(task_id=task_id)
     ids = result['task_ids']
     return result | {'rank': ids.index(task_id) + 1 if task_id in ids else None,
                      'metrics': {'status': 'ranked', 'version': 5}}

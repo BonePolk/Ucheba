@@ -43,6 +43,25 @@ router = APIRouter(prefix='/api/integrations', tags=['integrations'], dependenci
 inbox = APIRouter(prefix='/api/inbox', tags=['inbox'], dependencies=[Depends(require_user)])
 
 
+@router.get('/progress')
+async def agent_progress(task_id: int = 0, providers: str = 'context,codex'):
+    if task_id < 0:
+        raise HTTPException(422, 'Некорректный номер задачи')
+    if task_id:
+        context.get_context(task_id)
+    enabled = features()
+    names = [name for name in ('context', 'jev', 'codex') if name in providers.split(',') and enabled[name]]
+
+    async def read(name):
+        try:
+            result = await call(name, f'/progress?task_id={task_id}', method='GET', timeout=2)
+            return {'provider': name, 'run': result, 'available': True}
+        except (HTTPException, httpx.HTTPError):
+            return {'provider': name, 'run': None, 'available': False}
+
+    return await asyncio.gather(*(read(name) for name in names))
+
+
 class TelegramConfig(BaseModel):
     enabled: bool = False
 
