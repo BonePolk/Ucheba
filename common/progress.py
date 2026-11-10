@@ -32,7 +32,7 @@ class Progress:
                     break
                 if records[key]['status'] != 'running':
                     del records[key]
-        if self.record['agent'] not in ('Lucheba', 'Jeba'):
+        if self.record['agent'] not in ('Lucheba', 'Jeba', 'Ameba'):
             self.add('Начало работы')
         return self
 
@@ -61,7 +61,7 @@ class Progress:
     def __exit__(self, kind, error, traceback):
         status = 'completed' if kind is None else 'failed' if isinstance(error, Exception) else 'interrupted'
         message = {'completed': 'Работа завершена', 'failed': 'Операция завершилась ошибкой', 'interrupted': 'Работа прервана'}[status]
-        if self.record['agent'] not in ('Lucheba', 'Jeba'):
+        if self.record['agent'] not in ('Lucheba', 'Jeba', 'Ameba'):
             self.add(message)
         with records_lock:
             self.record['status'] = status
@@ -72,3 +72,14 @@ def get_progress(task_id=0, namespace='agent'):
     with records_lock:
         record = records.get((user_id(), task_id, namespace))
         return dict(record, events=list(record['events'])) if record else None
+
+
+def get_work_progress():
+    owner = user_id()
+    with records_lock:
+        runs = [record for (account, task, namespace), record in records.items()
+                if account == owner and namespace == 'agent']
+        if not runs:
+            return None
+        latest = max(runs, key=lambda run: (run['status'] == 'running', run['started_at']))
+        return dict(latest, events=[dict(event, task_id=latest['task_id']) for event in latest['events']])

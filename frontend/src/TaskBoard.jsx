@@ -1,11 +1,14 @@
 import { useEffect, useState } from 'react';
-import { Alert, Badge, Button, Checkbox, Container, Group, Loader, Paper, SegmentedControl, Select, SimpleGrid, Stack, Table, Text, Title } from '@mantine/core';
+import { Alert, Badge, Button, Checkbox, Container, Group, Loader, Paper, SegmentedControl, Select, SimpleGrid, Stack, Table, Text, Title, Tooltip } from '@mantine/core';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { agentRequest, deleteTask, getTasks, request, saveTask } from './api';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
 import TaskForm, { priorities, statuses } from './TaskForm';
 import JebaProgress from './JebaProgress';
+import AgentQueue from './AgentQueue';
+import AgentProgress from './AgentProgress';
+import RankingAssessment from './RankingAssessment';
 
 dayjs.extend(utc);
 
@@ -20,7 +23,7 @@ const sorting = [
   { value: 'priority:desc', label: 'Приоритет: сначала низкий' },
   { value: 'created_at:desc', label: 'Создание: сначала новые' },
   { value: 'created_at:asc', label: 'Создание: сначала старые' },
-  { value: 'jev:asc', label: 'Порядок Lucheba' },
+  { value: 'jev:asc', label: 'Порядок Ameba' },
 ];
 
 export default function TaskBoard({ features = {} }) {
@@ -53,9 +56,11 @@ export default function TaskBoard({ features = {} }) {
   ]);
   const ranking = useQuery({ queryKey: ['jev-ranking'], queryFn: () => request('/integrations/jev/ranking'),
     enabled: features.jev !== false && !archived, refetchInterval: 15000 });
+  const queue = useQuery({ queryKey: ['agent-queue'], queryFn: () => request('/integrations/queue'),
+    enabled: !archived && (features.context !== false || features.jev !== false), refetchInterval: 1000 });
   const rank = useMutation({ mutationFn: () => agentRequest('/integrations/jev/rank', { method: 'POST' }),
     onSuccess: async () => { setSort('jev:asc'); await queryClient.invalidateQueries({ queryKey: ['jev-ranking'] }); await refresh(); } });
-  const rankingReasons = new Map((ranking.data?.reasons ?? []).map((item) => [item.task_id, item.reason]));
+  const rankingReasons = new Map((ranking.data?.reasons ?? []).map((item) => [item.task_id, item]));
   const positions = new Map((ranking.data?.task_ids ?? []).map((id, index) => [id, index + 1]));
   const save = useMutation({
     mutationFn: saveTask,
@@ -77,7 +82,7 @@ export default function TaskBoard({ features = {} }) {
     },
   });
   const remove = useMutation({ mutationFn: deleteTask, onSuccess: refresh });
-  const rows = [...(tasks.data ?? [])].sort((a, b) => Number(Boolean(isOverdue(b, now))) - Number(Boolean(isOverdue(a, now))));
+  const rows = tasks.data ?? [];
   const error = tasks.error || update.error || remove.error || ranking.error || rank.error;
   const changeFilter = (name, value) => setFilters((current) => ({ ...current, [name]: value }));
 
@@ -101,15 +106,17 @@ export default function TaskBoard({ features = {} }) {
         <Paper withBorder p="md" radius="md">
           <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }}>
             <Select label="Статус" placeholder="Все статусы" data={statuses} clearable value={filters.status} onChange={(value) => changeFilter('status', value)} />
-            <Select label="Приоритет" placeholder="Все приоритеты" data={[{ value: 'overdue', label: 'Просрочено — наивысший' }, ...priorities]} clearable value={filters.priority} onChange={(value) => changeFilter('priority', value)} />
+            <Select label="Приоритет" placeholder="Все приоритеты" data={[{ value: 'overdue', label: 'Просрочено' }, ...priorities]} clearable value={filters.priority} onChange={(value) => changeFilter('priority', value)} />
             <Select label="Категория" placeholder="Все категории" data={categories.data ?? []} clearable searchable value={filters.category} onChange={(value) => changeFilter('category', value)} />
             <Select label="Сортировка" data={sorting.filter((item) => features.jev !== false || item.value !== 'jev:asc')} value={currentSort} allowDeselect={false} onChange={setSort} />
           </SimpleGrid>
         </Paper>
+        {!archived && features.context !== false && features.jev === false && <AgentProgress providers={['context']} active={queue.data?.active?.some((item) => item.provider === 'context')} />}
+        {!archived && (features.context !== false || features.jev !== false) && <AgentQueue queue={queue.data} error={queue.error} />}
         {features.jev !== false && !archived && <Stack gap="xs"><Group>
-          <Button variant="light" loading={rank.isPending} onClick={() => rank.mutate()}>Обновить порядок Lucheba</Button>
+          <Button variant="light" loading={rank.isPending} disabled={queue.data?.busy} onClick={() => rank.mutate()}>Обновить порядок Ameba</Button>
           <Text size="sm" c="dimmed">{ranking.data?.needs_refresh ? 'Порядок нужно обновить.' : `Сравнено задач: ${ranking.data?.ranked_count ?? 0}.`}{ranking.data?.pending_count > 0 && ` Ожидают контекста Lucheba: ${ranking.data.pending_count}.`}{ranking.data?.uncertain_comparisons > 0 && ' При неуверенном сравнении сохранён ручной приоритет и дедлайн.'}</Text>
-        </Group>{ranking.data?.explanation && <Text size="sm" c="dimmed">{ranking.data.needs_refresh ? 'Пояснение последней сортировки: ' : 'Почему такой порядок: '}{ranking.data.explanation}</Text>}<JebaProgress active={rank.isPending} /></Stack>}
+        </Group>{ranking.data?.explanation && <Tooltip multiline w={320} label={ranking.data.explanation} events={{ hover: true, focus: true, touch: true }}><Text component="button" type="button" size="xs" c="dimmed" style={{ cursor: 'help', background: 'none', border: 0, padding: 0, width: 'fit-content' }}>{ranking.data.needs_refresh ? 'О последней сортировке' : 'Почему такой порядок'}</Text></Tooltip>}<JebaProgress active={rank.isPending} /></Stack>}
         {error && <Alert color="red">{error.message}</Alert>}
         {tasks.isPending ? <Loader aria-label="Загрузка задач" /> : (
           <Paper withBorder radius="md" p="sm">
@@ -132,7 +139,7 @@ export default function TaskBoard({ features = {} }) {
                         {task.description && <Text size="sm" c="dimmed" lineClamp={2} style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{task.description}</Text>}
                       </Table.Td>
                       <Table.Td style={{ whiteSpace: 'nowrap' }}><Text size="sm" c={isOverdue(task, now) ? 'red' : undefined}>{task.deadline ? dayjs.utc(task.deadline).local().format('DD.MM.YYYY HH:mm') : '—'}</Text>{isOverdue(task, now) && <Text size="xs" c="red">Просрочено</Text>}</Table.Td>
-                      <Table.Td><Badge color={isOverdue(task, now) ? 'red' : { low: 'gray', medium: 'yellow', high: 'red' }[task.priority]} variant="light">{isOverdue(task, now) ? 'Наивысший' : priorities.find((item) => item.value === task.priority)?.label}</Badge>{features.context !== false && task.ai_details && JSON.parse(task.ai_details).status === 'needs_context' && <Text size="xs" c="yellow">Недостаточно контекста. {JSON.parse(task.ai_details).reason} <a href={`/?task=${task.id}`}>Ответить</a></Text>}{features.context !== false && task.ai_details && JSON.parse(task.ai_details).status === 'context_pending' && <Text size="xs" c="dimmed">Ожидает проверки Lucheba</Text>}{features.jev !== false && positions.has(task.id) && <Text size="xs" c="dimmed">Порядок Lucheba: {positions.get(task.id)} из {ranking.data.ranked_count}</Text>}{features.jev !== false && positions.has(task.id) && rankingReasons.has(task.id) && <Text size="xs" c="dimmed" maw={300}>{rankingReasons.get(task.id)}</Text>}</Table.Td>
+                      <Table.Td><Badge color={{ low: 'gray', medium: 'yellow', high: 'red' }[task.priority]} variant="light">{priorities.find((item) => item.value === task.priority)?.label}</Badge>{features.context !== false && task.ai_details && JSON.parse(task.ai_details).status === 'needs_context' && <Text size="xs" c="yellow">Недостаточно контекста. {JSON.parse(task.ai_details).reason} <a href={`/?task=${task.id}`}>Ответить</a></Text>}{features.context !== false && task.ai_details && JSON.parse(task.ai_details).status === 'context_pending' && <Text size="xs" c="dimmed">Ожидает проверки Lucheba</Text>}{features.jev !== false && positions.has(task.id) && <Text size="xs" c="dimmed">Порядок Ameba: {positions.get(task.id)} из {ranking.data.ranked_count}</Text>}{features.jev !== false && positions.has(task.id) && rankingReasons.has(task.id) && <RankingAssessment assessment={rankingReasons.get(task.id)} />}</Table.Td>
                       <Table.Td><Select aria-label={`Статус: ${task.title}`} w={160} data={statuses} value={completing === task.id ? 'done' : task.status} allowDeselect={false} disabled={update.isPending || archived} onChange={(value) => update.mutate({ id: task.id, data: { status: value } })} /></Table.Td>
                       <Table.Td>{task.category || '—'}</Table.Td>
                       <Table.Td>

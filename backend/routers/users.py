@@ -1,5 +1,7 @@
 import os
 
+from common.schedule import Week, default_week, read_week, save_week
+
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import func
@@ -25,6 +27,17 @@ def authenticate(response, row):
                         max_age=43200, secure=os.getenv('COOKIE_SECURE', 'false').lower() == 'true', path='/')
     response.delete_cookie('owner_session', path='/')
     return public_user(row)
+
+
+@router.get('/schedule', dependencies=[Depends(require_user)])
+def get_schedule():
+    saved = read_week()
+    return {'schedule': saved or default_week(), 'configured': saved is not None}
+
+
+@router.put('/schedule', dependencies=[Depends(require_user)])
+def update_schedule(body: Week):
+    return save_week(body)
 
 
 @router.get('/registration')

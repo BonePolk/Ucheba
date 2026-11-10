@@ -32,3 +32,41 @@
     animation: none;
   }
 }
+
+.ameba-timeline-task:hover,
+.ameba-timeline-task:focus-visible {
+  z-index: 1;
+  filter: brightness(1.15);
+  box-shadow: 0 3px 12px #7f49b455;
+  outline: 2px solid #b995dc;
+  outline-offset: 1px;
+}
+
+.ameba-timeline-task {
+  position: absolute;
+  box-sizing: border-box;
+  height: 34px;
+  padding: 9px 3px;
+  border-radius: 6px;
+  color: white;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 11px;
+  text-decoration: none;
+  transition: left 650ms cubic-bezier(.22, 1, .36, 1),
+    top 650ms cubic-bezier(.22, 1, .36, 1),
+    width 650ms cubic-bezier(.22, 1, .36, 1),
+    box-shadow 180ms ease;
+  animation: none;
+}
+
+.ameba-timeline-rest {
+  background: repeating-linear-gradient(135deg, #35333d, #35333d 5px, #403d49 5px, #403d49 10px);
+  color: #b9b4c4;
+  cursor: default;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ameba-timeline-task { transition: none; }
+}

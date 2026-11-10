@@ -3,9 +3,10 @@ import { Alert, Button, Collapse, Group, PasswordInput, Select, Stack, Text, Tex
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { request } from './api';
 
-export default function ContextBrowser({ taskId, disabled }) {
+export default function ContextBrowser({ taskId, disabled, initialSiteId = null }) {
   const client = useQueryClient();
-  const [opened, setOpened] = useState(false);
+  const [opened, setOpened] = useState(Boolean(initialSiteId));
+  const [profileId, setProfileId] = useState(initialSiteId);
   const [formOpened, setFormOpened] = useState(false);
   const [credentials, setCredentials] = useState({ name: '', url: '', username: '', password: '' });
   const [typing, setTyping] = useState('');
@@ -13,16 +14,18 @@ export default function ContextBrowser({ taskId, disabled }) {
   const path = `/integrations/tasks/${taskId}/context/browser`;
   const sitesPath = '/integrations/context/browser/sites';
   const sites = useQuery({ queryKey: ['context-browser-sites'], queryFn: () => request(sitesPath), enabled: opened });
-  const selected = useQuery({ queryKey: ['context-browser', taskId], queryFn: () => request(path), enabled: opened });
+  const selected = useQuery({ queryKey: ['context-browser', taskId], queryFn: () => request(path), enabled: opened && Boolean(taskId) });
   const refresh = async () => {
     await client.invalidateQueries({ queryKey: ['context-browser-sites'] });
-    await client.invalidateQueries({ queryKey: ['context-browser', taskId] });
-    await client.invalidateQueries({ queryKey: ['context', taskId] });
-    await client.invalidateQueries({ queryKey: ['tasks'] });
+    if (taskId) {
+      await client.invalidateQueries({ queryKey: ['context-browser', taskId] });
+      await client.invalidateQueries({ queryKey: ['context', taskId] });
+      await client.invalidateQueries({ queryKey: ['tasks'] });
+    }
   };
   const select = useMutation({
-    mutationFn: (site_id) => request(path, { method: 'PUT', body: JSON.stringify({ site_id }) }),
-    onSuccess: () => { setScreen(null); return refresh(); },
+    mutationFn: (site_id) => taskId ? request(path, { method: 'PUT', body: JSON.stringify({ site_id }) }) : Promise.resolve({ site_id }),
+    onSuccess: (data) => { setProfileId(data.site_id); setScreen(null); return refresh(); },
   });
   const save = useMutation({
     mutationFn: () => request(sitesPath, { method: 'POST', body: JSON.stringify(credentials) }),
@@ -34,15 +37,15 @@ export default function ContextBrowser({ taskId, disabled }) {
     },
   });
   const forget = useMutation({
-    mutationFn: () => request(`${sitesPath}/${selected.data.site_id}`, { method: 'DELETE' }),
+    mutationFn: () => request(`${sitesPath}/${siteId}`, { method: 'DELETE' }),
     onSuccess: () => { client.setQueryData(['luna-browser-screen'], null); select.mutate(null); },
   });
   const action = useMutation({
-    mutationFn: (values) => request(`${path}/action`, { method: 'POST', body: JSON.stringify({ site_id: selected.data.site_id, ...values }) }),
+    mutationFn: (values) => request(taskId ? `${path}/action` : '/integrations/context/browser/manual', { method: 'POST', body: JSON.stringify({ site_id: siteId, ...values }) }),
     onSuccess: (data) => { setScreen(data); return refresh(); },
   });
   const busy = disabled || select.isPending || save.isPending || forget.isPending || action.isPending;
-  const siteId = selected.data?.site_id;
+  const siteId = taskId ? selected.data?.site_id : profileId;
   const available = sites.data?.some((site) => site.id === siteId);
   const error = sites.error || selected.error || select.error || save.error || forget.error || action.error;
   const field = (name) => (event) => setCredentials({ ...credentials, [name]: event.currentTarget.value });

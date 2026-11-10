@@ -2,6 +2,8 @@ import { useState } from 'react';
 import { Alert, Button, Paper, PasswordInput, Stack, Title } from '@mantine/core';
 import { useMutation } from '@tanstack/react-query';
 import Integrations from './Integrations';
+import WeeklySchedule from './WeeklySchedule';
+import Cabinets from './Cabinets';
 import { request } from './api';
 
 export default function Account({ user }) {
@@ -20,6 +22,8 @@ export default function Account({ user }) {
       {change.error && <Alert color="red">{change.error.message}</Alert>}
       {change.isSuccess && <Alert color="green">Пароль изменён</Alert>}
     </Stack></form></Paper>
+    <WeeklySchedule features={user.features} />
+    {user.features?.context !== false && <Cabinets />}
     <Title order={3}>Мои интеграции и ключи</Title>
     <Integrations features={user.features} />
   </Stack>;

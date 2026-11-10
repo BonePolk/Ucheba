@@ -4,7 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import { request } from './api';
 
 export default function LuchebaBrowser({ active = false }) {
-  const [opened, setOpened] = useState(false);
+  const [opened, setOpened] = useState(() => new URLSearchParams(window.location.search).get('browser') === '1');
   const [streamFailed, setStreamFailed] = useState(false);
   useEffect(() => { if (active) setOpened(true); }, [active]);
   useEffect(() => { if (opened) setStreamFailed(false); }, [opened]);

@@ -400,6 +400,8 @@ async def visual(body: VisualAction):
 async def sites():
     async with lock():
         return [{'id': key, 'name': value['name'], 'url': safe_url(value['url']),
+                 'description': value.get('description', ''), 'group': value.get('group', ''),
+                 'color': value.get('color', '#7f49b4'),
                  'has_credentials': bool(value['password'])} for key, value in vault().items()]
 
 
@@ -408,6 +410,9 @@ class Site(BaseModel):
     url: str = Field(max_length=2000)
     username: SecretStr = Field(max_length=256)
     password: SecretStr = Field(max_length=2000)
+    description: str = Field(default='', max_length=300)
+    group: str = Field(default='', max_length=80)
+    color: str = Field(default='#7f49b4', pattern=r'^#[0-9a-fA-F]{6}$')
 
 
 @app.post('/sites')
@@ -419,9 +424,66 @@ async def add_site(body: Site):
         saved = vault()
         site_id = uuid4().hex
         saved[site_id] = {'name': body.name, 'url': body.url, 'username': body.username.get_secret_value(),
-                          'password': body.password.get_secret_value()}
+                          'password': body.password.get_secret_value(), 'description': body.description,
+                          'group': body.group, 'color': body.color}
         save_vault(saved)
     return {'id': site_id, 'name': body.name, 'has_credentials': True}
+
+
+@app.patch('/sites/{site_id}')
+async def edit_site(site_id: str, body: Site):
+    await public_url(body.url)
+    async with lock():
+        saved = vault()
+        if site_id not in saved:
+            raise HTTPException(404, 'Личный кабинет не найден')
+        site = saved[site_id]
+        site.update(name=body.name, url=body.url, description=body.description,
+                    group=body.group, color=body.color)
+        for name in ('username', 'password'):
+            value = getattr(body, name).get_secret_value()
+            if value:
+                site[name] = value
+        save_vault(saved)
+    return {'id': site_id, 'has_credentials': bool(site['password'])}
+
+
+class SchedulePage(BaseModel):
+    site_id: str
+    url: str = Field(default='', max_length=2000)
+    index: int | None = Field(default=None, ge=0, lt=100)
+
+
+@app.post('/schedule/read')
+async def schedule_page(body: SchedulePage):
+    get_site(body.site_id)
+    async with lock():
+        tab = await page()
+        watch_screen(tab)
+        url = body.url
+        if body.index is not None:
+            links = await schedule_links(tab)
+            if body.index >= len(links):
+                raise HTTPException(400, 'Ссылка изменилась. Перечитайте страницу расписания')
+            url = links[body.index]['href']
+        await public_url(url)
+        await tab.goto(url, wait_until='domcontentloaded')
+        if await tab.locator('input[type="password"]:visible').count():
+            return {'status': 'needs_login', 'reason': 'Завершите вход через основной ЛК в этом браузере'}
+        text = (await tab.locator('body').inner_text())[:40000]
+        for site in vault().values():
+            if site['password']:
+                text = text.replace(site['password'], '[скрыто]')
+        links = await schedule_links(tab)
+        return {'status': 'page', 'url': safe_url(tab.url), 'title': await tab.title(), 'text': text,
+                'links': [{'index': index, 'text': item['text']} for index, item in enumerate(links)]}
+
+
+async def schedule_links(tab):
+    links = await tab.locator('a[href]').evaluate_all(
+        '(items) => items.map(a => ({text: a.innerText.slice(0,150), href: a.href}))')
+    return [item for item in links if item['text'].strip()
+            and urlsplit(item['href']).scheme in ('http', 'https')][:100]
 
 
 @app.delete('/sites/{site_id}')
@@ -472,15 +534,13 @@ async def login(tab, site):
 async def read_page(tab, site):
     if tab.url == 'about:blank':
         return {'status': 'needs_login', 'reason': 'Используйте browser_login, чтобы открыть личный кабинет.'}
-    if origin(tab.url) != origin(site['url']):
-        return {'status': 'needs_user', 'reason': 'Откройте выбранный личный кабинет или завершите вход.'}
     if await tab.locator('input[type="password"]:visible').count():
         return {'status': 'needs_login', 'reason': 'Сайт показывает форму входа.'}
     # inner_text не возвращает значения полей ввода, cookie или storage.
     text = (await tab.locator('body').inner_text())[:40000]
     text = text.replace(site['password'], '[скрыто]')
     links = await tab.locator('a[href]').evaluate_all('(items) => items.map(a => ({text: a.innerText.slice(0, 150), href: a.href}))')
-    links = [item for item in links if item['text'].strip() and item['href'].startswith(origin(site['url']) + '/')][:100]
+    links = [item for item in links if item['text'].strip() and urlsplit(item['href']).scheme in ('http', 'https')][:100]
     return {'status': 'page', 'url': safe_url(tab.url), 'text': text,
             'title': await tab.title(),
             'links': [{'index': index, 'text': item['text']} for index, item in enumerate(links)]}
@@ -497,8 +557,6 @@ class Action(BaseModel):
 
 
 async def download_link(tab, site, url, image_mode=False):
-    if not image_mode and origin(url) != origin(site['url']):
-        raise HTTPException(400, 'Выберите ссылку из личного кабинета')
     max_size = 10 * 1024 * 1024
     try:
         async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
@@ -587,10 +645,10 @@ async def agent_action(body):
     if body.action == 'login':
         return await login(tab, site)
     if body.action in ('follow', 'download'):
-        if tab.url == 'about:blank' or origin(tab.url) != origin(site['url']):
+        if tab.url == 'about:blank':
             return {'status': 'needs_login', 'reason': 'Сначала войдите в выбранный личный кабинет.'}
         links = await tab.locator('a[href]').evaluate_all('(items) => items.map(a => ({text: a.innerText.slice(0, 150), href: a.href}))')
-        links = [item for item in links if item['text'].strip() and item['href'].startswith(origin(site['url']) + '/')][:100]
+        links = [item for item in links if item['text'].strip() and urlsplit(item['href']).scheme in ('http', 'https')][:100]
         if body.index >= len(links):
             raise HTTPException(400, 'Ссылка больше не доступна. Перечитайте страницу.')
         url = links[body.index]['href']

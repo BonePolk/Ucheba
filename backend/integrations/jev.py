@@ -11,6 +11,7 @@ from common.dates import normalize_utc
 from common.models.integration import TaskContext, TaskRanking
 from common.models.task import Task
 from common.rpc import call
+from common.schedule import read_week
 from common.settings import read_config, read_settings, report
 from integrations.context import context_status, prepare, snapshot
 from integrations import scheduler
@@ -32,22 +33,17 @@ def task_state(session):
             ready.append({'id': task.id, 'title': task.title, 'description': task.description or '',
                           'category': task.category, 'subject': context.subject, 'owner_notes': context.owner_notes,
                           'sources': usage.get('sources', []),
-                          'full_context': usage.get('full_markdown', context.summary),
-                          'ranking_summary': usage['ranking_summary'],
+                          'full_context': usage['full_markdown'],
+                          'time_estimate': usage.get('time_estimate'),
+                          'effort': usage.get('effort'), 'impact': usage.get('impact'),
                           'deadline': normalize_utc(task.deadline), 'priority': task.priority})
         else:
             waiting.append(task.id)
     # При равном сравнении сохраняем ручной приоритет, затем ближайший дедлайн.
     ready.sort(key=lambda task: ({'high': 0, 'medium': 1, 'low': 2}.get(task['priority'], 1),
                                  task['deadline'].isoformat() if task['deadline'] else '9999', task['id']))
-    signature = json.dumps({'version': 9, 'hour': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H'), 'tasks': state}, sort_keys=True)
+    signature = json.dumps({'version': 20, 'hour': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H'), 'tasks': state, 'weekly_schedule': read_week()}, sort_keys=True)
     return signature, ready, waiting
-
-
-def overdue_first(ids, ready):
-    now = datetime.now(timezone.utc)
-    overdue = {task['id'] for task in ready if task['deadline'] and task['deadline'] < now}
-    return sorted(ids, key=lambda task_id: task_id not in overdue)
 
 
 def ranking_status():
@@ -57,7 +53,7 @@ def ranking_status():
         result = json.loads(saved.result) if saved else {}
         ready_ids = {task['id'] for task in ready}
         # Изменение одной задачи или часа не должно стирать порядок остальных.
-        ids = overdue_first([task_id for task_id in result.get('task_ids', []) if task_id in ready_ids], ready)
+        ids = [task_id for task_id in result.get('task_ids', []) if task_id in ready_ids]
         return result | {'task_ids': ids, 'ranked_count': len(ids),
                          'reasons': [item for item in result.get('reasons', []) if item['task_id'] in ids],
                          'pending_count': len(waiting), 'total_count': len(ready) + len(waiting),
@@ -77,31 +73,32 @@ async def request_ranking(tasks, task_id=0):
     if not config['enabled'] or not secrets.get('api_key'):
         raise HTTPException(400, 'Включите Lucheba и сохраните API-ключ в профиле')
     return await call('context', '/rank', {'api_key': secrets['api_key'], 'tasks': tasks,
-                      'now': datetime.now(timezone.utc).isoformat(), 'task_id': task_id}, timeout=None)
+                      'now': datetime.now(timezone.utc).isoformat(), 'weekly_schedule': read_week(), 'task_id': task_id}, timeout=None)
 
 
 async def rank_all(force=False, task_id=0):
     check_feature('jev')
     if not read_config('jev')['enabled']:
-        raise HTTPException(400, 'Включите сортировку Lucheba в настройках')
+        raise HTTPException(400, 'Включите сортировку Ameba в настройках')
     async with ranking_lock:
         # Сначала собираем недостающий контекст, затем один раз сортируем весь список.
         with Session(get_engine()) as session:
             tasks = session.exec(select(Task).where(Task.archived == False, Task.status != 'done')).all()
             pending = [task.id for task in tasks
                        if context_status(task, session.get(TaskContext, task.id)) == 'new']
-        for pending_id in pending:
-            try:
-                await prepare(pending_id)
-            except HTTPException as exc:
-                report('context', error=str(exc.detail))
-                raise
+        async with scheduler.batch(pending):
+            for pending_id in pending:
+                try:
+                    await prepare(pending_id)
+                except HTTPException as exc:
+                    report('context', error=str(exc.detail))
+                    raise
         with Session(get_engine()) as session:
             signature, ready, waiting = task_state(session)
             saved = session.get(TaskRanking, 1)
             if not force and saved and saved.snapshot == signature:
                 return json.loads(saved.result)
-        if len(ready) > 1:
+        if ready:
             async with scheduler.slot('jev', task_id):
                 # Пока ждали Lucheba, контекст и состав задач могли измениться.
                 with Session(get_engine()) as session:
@@ -113,10 +110,9 @@ async def rank_all(force=False, task_id=0):
                       'reasons': [{'task_id': task['id'], 'reason': 'Единственная задача с готовым контекстом.'} for task in ready]}
         ids = result.get('task_ids', [])
         if len(ids) != len(ready) or set(ids) != {task['id'] for task in ready}:
-            raise HTTPException(502, 'Lucheba вернула неполный порядок задач')
-        ids = overdue_first(ids, ready)
+            raise HTTPException(502, 'Ameba вернула неполный порядок задач')
         result['task_ids'] = ids
-        result.update(ranked_count=len(ids), pending_count=len(waiting), total_count=len(ready) + len(waiting))
+        result.update(generated_at=datetime.now(timezone.utc).isoformat(), ranked_count=len(ids), pending_count=len(waiting), total_count=len(ready) + len(waiting))
         with Session(get_engine()) as session:
             if task_state(session)[0] != signature:
                 raise HTTPException(409, 'Задачи или контекст изменились. Повторите сортировку')
@@ -126,7 +122,7 @@ async def rank_all(force=False, task_id=0):
             session.add(saved)
             for task_id in ids:
                 task = session.get(Task, task_id)
-                task.ai_details = json.dumps({'version': 9, 'status': 'ranked'})
+                task.ai_details = json.dumps({'version': 20, 'status': 'ranked'})
                 task.ai_scored_at = datetime.now(timezone.utc)
                 session.add(task)
             session.commit()
@@ -147,15 +143,15 @@ async def check_model():
     result = await request_ranking([
         {'id': 1, 'title': 'Обновить оформление внутренней презентации',
          'deadline': (now + timedelta(days=14)).isoformat(),
-         'ranking_summary': 'Необязательная косметическая правка внутреннего черновика. '
+         'full_context': 'Необязательная косметическая правка внутреннего черновика. '
                          'Текущее оформление подходит, работа команды не заблокирована.'},
         {'id': 2, 'title': 'Отправить клиенту согласованный договор',
          'deadline': (now + timedelta(hours=1)).isoformat(),
-         'ranking_summary': 'Договор уже согласован и готов к отправке. Клиент ждёт его в течение часа '
+         'full_context': 'Договор уже согласован и готов к отправке. Клиент ждёт его в течение часа '
                          'для подписания и оплаты. Задержка сорвёт сегодняшнюю сделку и отложит оплату.'},
     ])
     if result.get('task_ids') != [2, 1]:
-        raise HTTPException(502, 'Lucheba не поставила срочную отправку договора клиенту выше косметической правки презентации. На порядок модели пока нельзя полагаться.')
+        raise HTTPException(502, 'Ameba не поставила срочную отправку договора клиенту выше косметической правки презентации. На порядок модели пока нельзя полагаться.')
     return {'ok': True, 'comparisons': result['comparisons']}
 
 
@@ -169,7 +165,7 @@ async def evaluate_task(task_id):
     # Lucheba могла уточнить поля задачи. Дальше сравниваем уже с её результатом.
     original = context['task_snapshot']
     if context['status'] != 'ready':
-        metrics = {'version': 9, 'status': 'needs_context', 'reason': ' '.join(context['questions'])}
+        metrics = {'version': 20, 'status': 'needs_context', 'reason': ' '.join(context['questions'])}
         with Session(get_engine()) as session:
             task = session.get(Task, task_id)
             if not task:
@@ -184,4 +180,4 @@ async def evaluate_task(task_id):
     result = await rank_all(task_id=task_id)
     ids = result['task_ids']
     return result | {'rank': ids.index(task_id) + 1 if task_id in ids else None,
-                     'metrics': {'status': 'ranked', 'version': 9}}
+                     'metrics': {'status': 'ranked', 'version': 20}}

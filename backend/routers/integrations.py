@@ -22,7 +22,8 @@ from integrations import codex, gemini, jev, telegram, context, jobs, scheduler
 from common import extraction as pipeline
 from common.settings import SECRET_FIELDS, public_settings, read_settings, report, save_settings
 from common.models.integration import CodexRun, Suggestion
-from common.models.task import TaskCreate
+from common.models.task import Task, TaskCreate
+from common.schedule import read_week
 
 settings_lock = asyncio.Lock()
 
@@ -49,6 +50,43 @@ def agent_job(job_id: str):
     return jobs.result(job_id)
 
 
+class ScheduleImport(BaseModel):
+    site_id: str = Field(min_length=1, max_length=32)
+    url: str = Field(min_length=1, max_length=2000)
+    notes: str = Field(default='', max_length=2000)
+
+
+@router.post('/context/schedule/import')
+async def import_schedule(body: ScheduleImport):
+    config, secrets = read_settings('context')
+    if not config['enabled'] or not secrets.get('api_key'):
+        raise HTTPException(400, 'Включите Lucheba и сохраните ключ в профиле')
+    async def operation():
+        from datetime import datetime, timezone
+        async with scheduler.slot('context'):
+            return await call('context', '/schedule/import', body.model_dump() | {
+                'api_key': secrets['api_key'], 'now': datetime.now(timezone.utc).isoformat(),
+                'weekly_schedule': read_week()}, timeout=None)
+    return jobs.start(operation)
+
+
+@router.get('/queue')
+async def agent_queue():
+    state = scheduler.queue_state()
+    enabled = features()
+    with Session(get_engine()) as session:
+        for group in ('active', 'waiting'):
+            entries = []
+            for item in state[group]:
+                if not enabled.get(item['provider'], False):
+                    continue
+                task = session.get(Task, item['task_id']) if item['task_id'] else None
+                entries.append({'provider': item['provider'], 'task_id': item['task_id'],
+                                'title': task.title if task else 'Импорт расписания' if item['provider'] == 'context' else 'Общая сортировка'})
+            state[group] = entries
+    return state
+
+
 @router.get('/progress')
 async def agent_progress(task_id: int = 0, providers: str = 'context,codex'):
     if task_id < 0:
@@ -63,6 +101,8 @@ async def agent_progress(task_id: int = 0, providers: str = 'context,codex'):
         try:
             service = 'context' if name == 'jev' else name
             path = '/ranking/progress' if name == 'jev' else '/progress'
+            if name == 'context' and task_id == 0:
+                path = '/work/progress'
             result = await call(service, f'{path}?task_id={task_id}', method='GET', timeout=2)
             return {'provider': name, 'run': result, 'available': True, 'queued': queued}
         except (HTTPException, httpx.HTTPError):
@@ -525,6 +565,18 @@ async def download_context_file(task_id: int, file_id: str):
 async def browser_sites(request: Request):
     body = await request.json() if request.method == 'POST' else None
     return await call('context', '/browser/sites', body, method=request.method)
+
+
+@router.post('/context/browser/manual')
+async def profile_browser_action(body: dict):
+    if scheduler.queue_state()['busy']:
+        raise HTTPException(409, 'Дождитесь завершения работы агентов перед ручным управлением браузером')
+    return await call('context', '/browser/manual', body)
+
+
+@router.patch('/context/browser/sites/{site_id}')
+async def update_browser_site(site_id: str, body: dict):
+    return await call('context', f'/browser/sites/{site_id}', body, method='PATCH')
 
 
 @router.delete('/context/browser/sites/{site_id}')

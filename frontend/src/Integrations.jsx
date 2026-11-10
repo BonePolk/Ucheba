@@ -126,10 +126,10 @@ function IntegrationForms({ data, features }) {
         <ConnectionInfo value={data.codex} />
       </Stack></Paper>}
       {features.jev !== false && <Paper withBorder p="lg"><Stack>
-        <Title order={3}>Приоритеты · Lucheba</Title>
-        <Text size="sm">Lucheba расставляет все готовые задачи одним запросом к шлюзу. Используется API-ключ из настроек контекста; каждый запрос расходует квоту.</Text>
+        <Title order={3}>Приоритеты · Ameba</Title>
+        <Text size="sm">Ameba оценивает время по этапам через инструмент планирования и расставляет готовые задачи. Используется API-ключ из настроек контекста; каждый запрос расходует квоту.</Text>
         <Switch label="Автоматически обновлять порядок задач" checked={jev.enabled} onChange={toggle(setJeba, 'enabled')} />
-        <Text size="xs" c="dimmed">Сначала Lucheba проверяет контекст. Затем Lucheba получает общий список с полным контекстом и возвращает порядок выполнения. Просроченные задачи остаются выше остальных. Задачи без готового контекста ожидают уточнений.</Text>
+        <Text size="xs" c="dimmed">Сначала Lucheba проверяет контекст. Затем Ameba получает общий список с полным контекстом и возвращает порядок выполнения. Просрочка учитывается вместе с последствиями и зависимостями, без автоматического подъёма наверх. Задачи без готового контекста ожидают уточнений.</Text>
         <Group><Button loading={saving('jev')} disabled={mutation.isPending} onClick={() => save('jev', jev)}>Сохранить</Button><Button variant="default" disabled={mutation.isPending} onClick={() => run('jev/check')}>Проверить модель</Button></Group>
         <JebaProgress active={mutation.isPending && mutation.variables?.path === 'jev/check'} />
         <ConnectionInfo value={data.jev} />

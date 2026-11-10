@@ -39,13 +39,13 @@ def list_tasks(
         & (Task.status != "done")
         & (Task.archived.is_(False))
     )
-    statement = select(Task).where(Task.archived == archived).order_by(case((overdue, 0), else_=1))
+    statement = select(Task).where(Task.archived == archived)
     if status is not None:
         statement = statement.where(Task.status == status)
     if priority == "overdue":
         statement = statement.where(overdue)
     elif priority is not None:
-        statement = statement.where(Task.priority == priority, ~case((overdue, True), else_=False))
+        statement = statement.where(Task.priority == priority)
     if category is not None:
         statement = statement.where(Task.category == category)
 
@@ -67,9 +67,7 @@ def list_tasks(
         tasks = session.exec(statement).all()
         if sort_by == 'jev':
             positions = {task_id: index for index, task_id in enumerate(jev_order.ranking_status()['task_ids'])}
-            now = datetime.now(timezone.utc).replace(tzinfo=None)
             tasks.sort(key=lambda task: (
-                0 if task.deadline and task.deadline.replace(tzinfo=None) < now and task.status != 'done' else 1,
                 positions.get(task.id, len(positions)),
                 {'high': 0, 'medium': 1, 'low': 2}.get(task.priority, 1),
                 task.deadline.replace(tzinfo=None) if task.deadline else datetime.max,

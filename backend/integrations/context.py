@@ -5,6 +5,7 @@ from fastapi import HTTPException
 from sqlmodel import Session, select
 
 from common.database import get_engine
+from common.dates import deadline_facts
 from common.models.integration import TaskContext
 from common.models.context import ContextTaskUpdate
 from common.models.task import Task
@@ -22,7 +23,7 @@ def context_status(task, row):
     if not row or row.task_snapshot != snapshot(task):
         return 'new'
     usage = json.loads(row.usage)
-    if usage.get('context_policy') != 4 or not usage.get('ranking_summary'):
+    if usage.get('context_policy') != 5 or not usage.get('full_markdown'):
         return 'new'
     if row.status == 'needs_context' and not json.loads(row.questions):
         return 'new'
@@ -141,6 +142,7 @@ async def prepare_task(task_id, force=False):
     result = await call('context', '/analyze', {
         'config': config, 'api_key': secrets['api_key'],
         'task_id': task_id, 'task': json.loads(task_state), 'subject': subject,
+        'current_clock': deadline_facts(task.deadline),
         'owner_notes': notes, 'past_tasks': memory,
         'allow_title_rewrite': config['rewrite_title'],
     }, timeout=None)
@@ -171,8 +173,8 @@ async def prepare_task(task_id, force=False):
         row.questions = json.dumps(result['questions'], ensure_ascii=False)
         row.task_snapshot = snapshot(task)
         row.usage = json.dumps(result.get('usage', {}) | {
-            'updated_fields': changed_fields, 'full_markdown': result['full_markdown'], 'context_policy': 4,
-            'ranking_summary': result['ranking_summary'],
+            'updated_fields': changed_fields, 'full_markdown': result['full_markdown'], 'context_policy': 5,
+            'time_estimate': result['time_estimate'], 'effort': result['effort'], 'impact': result['impact'],
         })
         row.updated_at = datetime.now(timezone.utc)
         # Старое «ждёт ответов» больше не описывает свежую проверку Lucheba.
