@@ -45,8 +45,8 @@ function ContextForm({ taskId, jevEnabled, jevBusy, context }) {
     <Button variant="light" loading={analyze.isPending} disabled={save.isPending} onClick={() => analyze.mutate()}>Проверить контекст через Lucheba</Button>
     <AgentProgress taskId={taskId} providers={['context']} active={analyze.isPending || save.isPending || jevBusy} />
     {jevEnabled && <JebaProgress taskId={taskId} active={save.isPending || jevBusy} />}
-    {analyze.isSuccess && <Text size="sm">{analyze.data.status === 'ready' ? 'Контекста достаточно для оценки Jeba.' : 'Lucheba запросила уточнения — ответь на вопросы ниже.'}</Text>}
-    {context.data?.usage?.ranking_summary && <Stack gap={4}><Text size="sm" fw={500}>Сводка для Jeba</Text><Text size="sm" style={{ whiteSpace: 'pre-wrap' }}>{context.data.usage.ranking_summary}</Text></Stack>}
+    {analyze.isSuccess && <Text size="sm">{analyze.data.status === 'ready' ? 'Контекста достаточно для оценки Lucheba.' : 'Lucheba запросила уточнения — ответь на вопросы ниже.'}</Text>}
+    {context.data?.usage?.ranking_summary && <Stack gap={4}><Text size="sm" fw={500}>Сводка для Lucheba</Text><Text size="sm" style={{ whiteSpace: 'pre-wrap' }}>{context.data.usage.ranking_summary}</Text></Stack>}
     {context.data?.usage && <Text size="xs" c="dimmed">Последняя проверка: вход {context.data.usage.input_tokens ?? 0}, выход {context.data.usage.output_tokens ?? 0} токенов</Text>}
     {context.data?.questions?.length > 0 && <Alert color="yellow"><Stack gap="xs">{context.data.questions.map((question, i) => <Text key={i} size="sm">{question}</Text>)}</Stack></Alert>}
     {context.data?.usage?.updated_fields?.length > 0 && <Text size="sm" c="dimmed">Lucheba обновила: {context.data.usage.updated_fields.map((name) => ({ title: 'название', description: 'описание', category: 'категорию' })[name]).join(', ')}.</Text>}
@@ -55,7 +55,8 @@ function ContextForm({ taskId, jevEnabled, jevBusy, context }) {
     <Textarea label="Ответы и известные факты" description="Сохрани полезные прошлые ответы; допиши новые уточнения. Данные отправляются в настроенный шлюз Lucheba." autosize minRows={3} value={answer ?? context.data?.owner_notes ?? ''} onChange={(event) => setAnswer(event.currentTarget.value)} />
     <Button loading={save.isPending} disabled={analyze.isPending || !(answer ?? context.data?.owner_notes ?? '').trim()} onClick={() => save.mutate()}>{jevEnabled ? 'Сохранить контекст и обновить порядок' : 'Сохранить контекст'}</Button>
     {save.data?.metrics?.status === 'needs_context' && <Text c="yellow">Нужны дополнительные уточнения — см. вопросы выше.</Text>}
-    {save.data?.rank != null && <Text>Порядок Jeba: {save.data.rank} из {save.data.ranked_count}</Text>}
+    {save.data?.rank != null && <Text>Порядок Lucheba: {save.data.rank} из {save.data.ranked_count}</Text>}
+    {save.data?.reasons?.find((item) => item.task_id === taskId)?.reason && <Text size="sm">{save.data.reasons.find((item) => item.task_id === taskId).reason}</Text>}
     {(save.error || analyze.error || context.error) && <Alert color="red">{(save.error || analyze.error || context.error).message}</Alert>}
   </Stack></Paper>;
 }
@@ -68,7 +69,7 @@ export default function TaskAutomation({ task, features = {} }) {
   const action = useMutation({
     mutationFn: (provider) => (provider === 'jev' ? agentRequest : request)(`/integrations/tasks/${task.id}/${provider}`, { method: 'POST' }),
     onSuccess: async (data, provider) => {
-      setNotice(provider === 'codex' ? 'Задача передана Codex' : data.metrics?.status === 'needs_context' ? `Jeba: недостаточно контекста. ${data.metrics.reason}` : data.rank != null ? `Порядок Jeba: ${data.rank} из ${data.ranked_count}` : 'Порядок Jeba обновлён');
+      setNotice(provider === 'codex' ? 'Задача передана Codex' : data.metrics?.status === 'needs_context' ? `Lucheba: недостаточно контекста. ${data.metrics.reason}` : data.rank != null ? `Порядок Lucheba: ${data.rank} из ${data.ranked_count}` : 'Порядок Lucheba обновлён');
       await client.invalidateQueries({ queryKey: ['jev-ranking'] });
       await client.invalidateQueries({ queryKey: ['tasks'] });
       await client.invalidateQueries({ queryKey: ['context', task.id] });
@@ -86,7 +87,7 @@ export default function TaskAutomation({ task, features = {} }) {
       <TaskMarkdown>{context.data.full_markdown || context.data.summary}</TaskMarkdown>
     </Stack></Paper>}
     <Text size="sm" c="dimmed">Сначала подключите провайдеров в разделе «Интеграции». Задача уже сохранена и не зависит от доступности ИИ.</Text>
-    <Group>{features.codex !== false && <Button disabled={action.isPending} onClick={() => action.mutate('codex')}>Поручить Codex</Button>}{features.jev !== false && features.context !== false && <Button variant="light" disabled={action.isPending} onClick={() => action.mutate('jev')}>Обновить порядок Jeba</Button>}</Group>
+    <Group>{features.codex !== false && <Button disabled={action.isPending} onClick={() => action.mutate('codex')}>Поручить Codex</Button>}{features.jev !== false && features.context !== false && <Button variant="light" disabled={action.isPending} onClick={() => action.mutate('jev')}>Обновить порядок Lucheba</Button>}</Group>
     {features.codex !== false && <AgentProgress taskId={task.id} providers={['codex']} active={(action.isPending && action.variables === 'codex') || runs.data?.some((run) => ['queued', 'running'].includes(run.status))} />}
     {features.context !== false && <ContextForm key={task.id} taskId={task.id} jevEnabled={features.jev !== false} jevBusy={action.isPending && action.variables === 'jev'} context={context} />}
     {notice && <Alert color="purple">{notice}</Alert>}

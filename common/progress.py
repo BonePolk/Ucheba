@@ -15,8 +15,8 @@ def timestamp():
 
 
 class Progress:
-    def __init__(self, agent, task_id=0):
-        self.key = (user_id(), task_id)
+    def __init__(self, agent, task_id=0, namespace='agent'):
+        self.key = (user_id(), task_id, namespace)
         self.record = {'id': uuid4().hex, 'agent': agent, 'task_id': task_id,
                        'status': 'running', 'started_at': timestamp(), 'events': []}
         self.sequence = 0
@@ -68,7 +68,7 @@ class Progress:
             self.record['finished_at'] = timestamp()
 
 
-def get_progress(task_id=0):
+def get_progress(task_id=0, namespace='agent'):
     with records_lock:
-        record = records.get((user_id(), task_id))
+        record = records.get((user_id(), task_id, namespace))
         return dict(record, events=list(record['events'])) if record else None

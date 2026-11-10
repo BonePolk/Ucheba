@@ -61,7 +61,9 @@ async def agent_progress(task_id: int = 0, providers: str = 'context,codex'):
     async def read(name):
         queued = scheduler.queued(name, task_id)
         try:
-            result = await call(name, f'/progress?task_id={task_id}', method='GET', timeout=2)
+            service = 'context' if name == 'jev' else name
+            path = '/ranking/progress' if name == 'jev' else '/progress'
+            result = await call(service, f'{path}?task_id={task_id}', method='GET', timeout=2)
             return {'provider': name, 'run': result, 'available': True, 'queued': queued}
         except (HTTPException, httpx.HTTPError):
             return {'provider': name, 'run': None, 'available': False, 'queued': queued}

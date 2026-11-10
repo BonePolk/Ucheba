@@ -20,7 +20,7 @@ const sorting = [
   { value: 'priority:desc', label: 'Приоритет: сначала низкий' },
   { value: 'created_at:desc', label: 'Создание: сначала новые' },
   { value: 'created_at:asc', label: 'Создание: сначала старые' },
-  { value: 'jev:asc', label: 'Порядок Jeba' },
+  { value: 'jev:asc', label: 'Порядок Lucheba' },
 ];
 
 export default function TaskBoard({ features = {} }) {
@@ -55,6 +55,7 @@ export default function TaskBoard({ features = {} }) {
     enabled: features.jev !== false && !archived, refetchInterval: 15000 });
   const rank = useMutation({ mutationFn: () => agentRequest('/integrations/jev/rank', { method: 'POST' }),
     onSuccess: async () => { setSort('jev:asc'); await queryClient.invalidateQueries({ queryKey: ['jev-ranking'] }); await refresh(); } });
+  const rankingReasons = new Map((ranking.data?.reasons ?? []).map((item) => [item.task_id, item.reason]));
   const positions = new Map((ranking.data?.task_ids ?? []).map((id, index) => [id, index + 1]));
   const save = useMutation({
     mutationFn: saveTask,
@@ -106,9 +107,9 @@ export default function TaskBoard({ features = {} }) {
           </SimpleGrid>
         </Paper>
         {features.jev !== false && !archived && <Stack gap="xs"><Group>
-          <Button variant="light" loading={rank.isPending} onClick={() => rank.mutate()}>Обновить порядок Jeba</Button>
+          <Button variant="light" loading={rank.isPending} onClick={() => rank.mutate()}>Обновить порядок Lucheba</Button>
           <Text size="sm" c="dimmed">{ranking.data?.needs_refresh ? 'Порядок нужно обновить.' : `Сравнено задач: ${ranking.data?.ranked_count ?? 0}.`}{ranking.data?.pending_count > 0 && ` Ожидают контекста Lucheba: ${ranking.data.pending_count}.`}{ranking.data?.uncertain_comparisons > 0 && ' При неуверенном сравнении сохранён ручной приоритет и дедлайн.'}</Text>
-        </Group><JebaProgress active={rank.isPending} /></Stack>}
+        </Group>{ranking.data?.explanation && <Text size="sm" c="dimmed">{ranking.data.needs_refresh ? 'Пояснение последней сортировки: ' : 'Почему такой порядок: '}{ranking.data.explanation}</Text>}<JebaProgress active={rank.isPending} /></Stack>}
         {error && <Alert color="red">{error.message}</Alert>}
         {tasks.isPending ? <Loader aria-label="Загрузка задач" /> : (
           <Paper withBorder radius="md" p="sm">
@@ -131,7 +132,7 @@ export default function TaskBoard({ features = {} }) {
                         {task.description && <Text size="sm" c="dimmed" lineClamp={2} style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{task.description}</Text>}
                       </Table.Td>
                       <Table.Td style={{ whiteSpace: 'nowrap' }}><Text size="sm" c={isOverdue(task, now) ? 'red' : undefined}>{task.deadline ? dayjs.utc(task.deadline).local().format('DD.MM.YYYY HH:mm') : '—'}</Text>{isOverdue(task, now) && <Text size="xs" c="red">Просрочено</Text>}</Table.Td>
-                      <Table.Td><Badge color={isOverdue(task, now) ? 'red' : { low: 'gray', medium: 'yellow', high: 'red' }[task.priority]} variant="light">{isOverdue(task, now) ? 'Наивысший' : priorities.find((item) => item.value === task.priority)?.label}</Badge>{features.context !== false && task.ai_details && JSON.parse(task.ai_details).status === 'needs_context' && <Text size="xs" c="yellow">Недостаточно контекста. {JSON.parse(task.ai_details).reason} <a href={`/?task=${task.id}`}>Ответить</a></Text>}{features.context !== false && task.ai_details && JSON.parse(task.ai_details).status === 'context_pending' && <Text size="xs" c="dimmed">Ожидает проверки Lucheba</Text>}{features.jev !== false && positions.has(task.id) && <Text size="xs" c="dimmed">Порядок Jeba: {positions.get(task.id)} из {ranking.data.ranked_count}</Text>}</Table.Td>
+                      <Table.Td><Badge color={isOverdue(task, now) ? 'red' : { low: 'gray', medium: 'yellow', high: 'red' }[task.priority]} variant="light">{isOverdue(task, now) ? 'Наивысший' : priorities.find((item) => item.value === task.priority)?.label}</Badge>{features.context !== false && task.ai_details && JSON.parse(task.ai_details).status === 'needs_context' && <Text size="xs" c="yellow">Недостаточно контекста. {JSON.parse(task.ai_details).reason} <a href={`/?task=${task.id}`}>Ответить</a></Text>}{features.context !== false && task.ai_details && JSON.parse(task.ai_details).status === 'context_pending' && <Text size="xs" c="dimmed">Ожидает проверки Lucheba</Text>}{features.jev !== false && positions.has(task.id) && <Text size="xs" c="dimmed">Порядок Lucheba: {positions.get(task.id)} из {ranking.data.ranked_count}</Text>}{features.jev !== false && positions.has(task.id) && rankingReasons.has(task.id) && <Text size="xs" c="dimmed" maw={300}>{rankingReasons.get(task.id)}</Text>}</Table.Td>
                       <Table.Td><Select aria-label={`Статус: ${task.title}`} w={160} data={statuses} value={completing === task.id ? 'done' : task.status} allowDeselect={false} disabled={update.isPending || archived} onChange={(value) => update.mutate({ id: task.id, data: { status: value } })} /></Table.Td>
                       <Table.Td>{task.category || '—'}</Table.Td>
                       <Table.Td>

@@ -76,7 +76,7 @@ function IntegrationForms({ data, features }) {
         <Title order={3}>Контекст · Lucheba</Title>
         <Text size="sm">Личный ключ шлюза lenec.tech. Память контекста и ответы доступны только в твоём аккаунте.</Text>
         <PasswordInput label="API-ключ" placeholder={data.context.configured.api_key ? 'Сохранён' : ''} value={context.api_key} onChange={field(setContext, 'api_key')} />
-        <Switch label="Проверять контекст перед Jeba" checked={context.enabled} onChange={toggle(setContext, 'enabled')} />
+        <Switch label="Собирать контекст перед сортировкой" checked={context.enabled} onChange={toggle(setContext, 'enabled')} />
         <Switch label="Разрешить Lucheba переписывать название задачи" checked={context.rewrite_title} onChange={toggle(setContext, 'rewrite_title')} />
         <Group><Button loading={saving('context')} disabled={mutation.isPending} onClick={() => save('context', context)}>Сохранить</Button><Button variant="subtle" color="red" disabled={mutation.isPending} onClick={() => run('context', { api_key: null, enabled: false }, 'PATCH')}>Удалить ключ</Button></Group>
         <ConnectionInfo value={data.context} />
@@ -126,10 +126,10 @@ function IntegrationForms({ data, features }) {
         <ConnectionInfo value={data.codex} />
       </Stack></Paper>}
       {features.jev !== false && <Paper withBorder p="lg"><Stack>
-        <Title order={3}>Приоритеты · Jeba</Title>
-        <Text size="sm">Jeba использует локальную модель Laya Multilingual: 322M параметров, CPU, поддержка русского. Ключи и оплата Cloudflare не нужны. При первой проверке скачивается модель; первый запрос может занять несколько минут. Ориентир памяти сервиса — 2–3 ГБ, фактический расход зависит от текста.</Text>
+        <Title order={3}>Приоритеты · Lucheba</Title>
+        <Text size="sm">Lucheba расставляет все готовые задачи одним запросом к шлюзу. Используется API-ключ из настроек контекста; каждый запрос расходует квоту.</Text>
         <Switch label="Автоматически обновлять порядок задач" checked={jev.enabled} onChange={toggle(setJeba, 'enabled')} />
-        <Text size="xs" c="dimmed">Сначала Lucheba проверяет контекст. Затем Jeba сравнивает задачи попарно и расставляет по важности, без баллов из 100. При неуверенном сравнении сохраняются ручной приоритет и дедлайн. Просроченные задачи остаются выше остальных. Задачи без готового контекста ожидают уточнений.</Text>
+        <Text size="xs" c="dimmed">Сначала Lucheba проверяет контекст. Затем Lucheba получает общий список с полным контекстом и возвращает порядок выполнения. Просроченные задачи остаются выше остальных. Задачи без готового контекста ожидают уточнений.</Text>
         <Group><Button loading={saving('jev')} disabled={mutation.isPending} onClick={() => save('jev', jev)}>Сохранить</Button><Button variant="default" disabled={mutation.isPending} onClick={() => run('jev/check')}>Проверить модель</Button></Group>
         <JebaProgress active={mutation.isPending && mutation.variables?.path === 'jev/check'} />
         <ConnectionInfo value={data.jev} />
