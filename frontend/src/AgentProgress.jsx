@@ -3,7 +3,7 @@ import { Alert, Badge, Button, Collapse, Group, Loader, Paper, Stack, Text } fro
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { request } from './api';
 
-const names = { context: 'Luna', codex: 'Codex' };
+const names = { context: 'Lucheba', codex: 'Codex' };
 const statuses = { running: 'Работает', completed: 'Завершено', failed: 'Ошибка', interrupted: 'Прервано' };
 
 export default function AgentProgress({ taskId = 0, providers, active = false }) {
@@ -18,11 +18,16 @@ export default function AgentProgress({ taskId = 0, providers, active = false })
   }
   const query = useQuery({
     queryKey: ['agent-progress', taskId, providerList],
-    queryFn: () => request(`/integrations/progress?task_id=${taskId}&providers=${providerList}`),
+    queryFn: async () => {
+      const entries = await request(`/integrations/progress?task_id=${taskId}&providers=${providerList}`);
+      const previous = client.getQueryData(['agent-progress', taskId, providerList]) ?? [];
+      // Временная недоступность сервиса не стирает уже полученный журнал.
+      return entries.map((entry) => ({ ...entry, run: entry.run ?? previous.find((item) => item.provider === entry.provider)?.run ?? null }));
+    },
     enabled: providers.length > 0,
     gcTime: Infinity,
     retry: false,
-    refetchInterval: (query) => active || query.state.data?.some((entry) => entry.run?.status === 'running') ? 1000 : false,
+    refetchInterval: (query) => active || opened || query.state.data?.some((entry) => entry.queued || entry.run?.status === 'running') ? 1000 : false,
   });
   useEffect(() => {
     if (active) {
@@ -31,17 +36,19 @@ export default function AgentProgress({ taskId = 0, providers, active = false })
     }
   }, [active, client, taskId, providerList]);
   useEffect(() => {
-    if (!active && opened) query.refetch();
+    if (active || opened) query.refetch();
   }, [active, opened, query.refetch]);
   useEffect(() => {
     if (viewport.current) viewport.current.scrollTop = viewport.current.scrollHeight;
   }, [query.data, opened]);
   const runs = (query.data ?? []).filter((entry) => entry.run);
-  const running = active || runs.some((entry) => entry.run.status === 'running');
-  const events = runs.flatMap(({ provider, run }) => run.events.map((event) => ({ ...event, provider, key: `${run.id}:${event.id}` })))
+  const queued = (query.data ?? []).some((entry) => entry.queued);
+  const running = active || queued || runs.some((entry) => entry.run.status === 'running');
+  const events = runs.flatMap(({ provider, run }) => (run.events ?? []).map((event) => ({ ...event, provider, key: `${run.id}:${event.id}` })))
     .sort((a, b) => a.at.localeCompare(b.at));
   if (!providers.length) return null;
   return <Paper withBorder p="sm" radius="md">
+    {queued && <Text size="xs" c="dimmed">Следующий запрос ожидает в очереди</Text>}
     <Button variant="subtle" size="xs" leftSection={running ? <Loader size="xs" /> : null} onClick={toggle}>
       Ход работы: {providers.map((name) => names[name]).join(', ')}
     </Button>

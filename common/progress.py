@@ -32,7 +32,7 @@ class Progress:
                     break
                 if records[key]['status'] != 'running':
                     del records[key]
-        if self.record['agent'] not in ('Luna', 'Jev'):
+        if self.record['agent'] not in ('Lucheba', 'Jeba'):
             self.add('Начало работы')
         return self
 
@@ -61,7 +61,7 @@ class Progress:
     def __exit__(self, kind, error, traceback):
         status = 'completed' if kind is None else 'failed' if isinstance(error, Exception) else 'interrupted'
         message = {'completed': 'Работа завершена', 'failed': 'Операция завершилась ошибкой', 'interrupted': 'Работа прервана'}[status]
-        if self.record['agent'] not in ('Luna', 'Jev'):
+        if self.record['agent'] not in ('Lucheba', 'Jeba'):
             self.add(message)
         with records_lock:
             self.record['status'] = status

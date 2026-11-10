@@ -12,7 +12,8 @@ from common.database import get_engine
 from common.settings import read_config
 from common.accounts import features
 from integrations import jev as jev_order
-from common.models.integration import TaskAction
+from integrations.context import context_status
+from common.models.integration import TaskAction, TaskContext
 from common.models.task import Task, TaskCreate, TaskStatus, TaskUpdate
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"], dependencies=[Depends(require_user)])
@@ -74,7 +75,20 @@ def list_tasks(
                 task.deadline.replace(tzinfo=None) if task.deadline else datetime.max,
                 task.id,
             ))
-        return tasks
+        contexts = {row.task_id: row for row in session.exec(select(TaskContext)).all()}
+        result = []
+        for task in tasks:
+            context = contexts.get(task.id)
+            state = context_status(task, context)
+            details = task.ai_details
+            if not task.archived and task.status != 'done' and state == 'needs_context':
+                details = json.dumps({'status': 'needs_context', 'reason': ' '.join(json.loads(context.questions))})
+            elif not task.archived and task.status != 'done' and state == 'new':
+                details = json.dumps({'status': 'context_pending'})
+            elif details and json.loads(details).get('status') == 'needs_context':
+                details = None
+            result.append(task.model_copy(update={'ai_details': details}))
+        return result
 
 
 @router.get('/categories', response_model=list[str])

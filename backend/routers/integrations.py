@@ -18,7 +18,7 @@ from common.rpc import call, internal_token
 from common.security import require_user
 from common.identity import user_id
 from common.accounts import check_feature, features
-from integrations import codex, gemini, jev, telegram, context, jobs
+from integrations import codex, gemini, jev, telegram, context, jobs, scheduler
 from common import extraction as pipeline
 from common.settings import SECRET_FIELDS, public_settings, read_settings, report, save_settings
 from common.models.integration import CodexRun, Suggestion
@@ -59,11 +59,12 @@ async def agent_progress(task_id: int = 0, providers: str = 'context,codex'):
     names = [name for name in ('context', 'jev', 'codex') if name in providers.split(',') and enabled[name]]
 
     async def read(name):
+        queued = scheduler.queued(name, task_id)
         try:
             result = await call(name, f'/progress?task_id={task_id}', method='GET', timeout=2)
-            return {'provider': name, 'run': result, 'available': True}
+            return {'provider': name, 'run': result, 'available': True, 'queued': queued}
         except (HTTPException, httpx.HTTPError):
-            return {'provider': name, 'run': None, 'available': False}
+            return {'provider': name, 'run': None, 'available': False, 'queued': queued}
 
     return await asyncio.gather(*(read(name) for name in names))
 
@@ -86,7 +87,7 @@ class CodexConfig(BaseModel):
     auto_prepare: bool = False
 
 
-class JevConfig(BaseModel):
+class JebaConfig(BaseModel):
     enabled: bool = False
     account_id: str = Field(default='', pattern=r'^(|[a-fA-F0-9]{32})$')
 
@@ -108,7 +109,7 @@ class ContextConfig(BaseModel):
     model: Literal['gpt-6-luna'] = 'gpt-6-luna'
 
 
-CONFIG_MODELS = {'context': ContextConfig, 'notifications': NotificationsConfig, 'collector': CollectorConfig, 'telegram': TelegramConfig, 'gemini': GeminiConfig, 'codex': CodexConfig, 'jev': JevConfig}
+CONFIG_MODELS = {'context': ContextConfig, 'notifications': NotificationsConfig, 'collector': CollectorConfig, 'telegram': TelegramConfig, 'gemini': GeminiConfig, 'codex': CodexConfig, 'jev': JebaConfig}
 
 
 @router.get('')
@@ -254,7 +255,7 @@ async def jev_rank(background: bool = False):
 async def jev_score(task_id: int, background: bool = False):
     config, _ = read_settings('jev')
     if not config['enabled']:
-        raise HTTPException(400, 'Включите Jev в настройках')
+        raise HTTPException(400, 'Включите Jeba в настройках')
     if background:
         return jobs.start(lambda: provider_call('jev', jev.evaluate(task_id)))
     return await provider_call('jev', jev.evaluate(task_id))

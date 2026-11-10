@@ -10,11 +10,23 @@ from common.models.context import ContextTaskUpdate
 from common.models.task import Task
 from common.rpc import call
 from common.settings import read_config, read_settings
+from integrations import scheduler
 
 
 def snapshot(task):
     return json.dumps(task.model_dump(include={'title', 'description', 'deadline', 'priority', 'status', 'category'}),
                       ensure_ascii=False, default=str, sort_keys=True)
+
+
+def context_status(task, row):
+    if not row or row.task_snapshot != snapshot(task):
+        return 'new'
+    usage = json.loads(row.usage)
+    if usage.get('context_policy') != 4 or not usage.get('ranking_summary'):
+        return 'new'
+    if row.status == 'needs_context' and not json.loads(row.questions):
+        return 'new'
+    return row.status
 
 
 def get_context(task_id):
@@ -26,8 +38,8 @@ def get_context(task_id):
         if not row:
             return {'status': 'new', 'subject': '', 'owner_notes': '', 'summary': '', 'questions': []}
         return row.model_dump(exclude={'questions', 'task_snapshot', 'usage'}) | {
-            'questions': json.loads(row.questions), 'usage': json.loads(row.usage),
-            'status': row.status if row.task_snapshot == snapshot(task) else 'new',
+            'questions': json.loads(row.questions) if context_status(task, row) == 'needs_context' else [],
+            'usage': json.loads(row.usage), 'status': context_status(task, row),
             'full_markdown': json.loads(row.usage).get('full_markdown', row.summary),
         }
 
@@ -93,6 +105,11 @@ def invalidate_file_contexts(task_id=None):
 
 
 async def prepare(task_id, force=False):
+    async with scheduler.slot('context', task_id):
+        return await prepare_task(task_id, force)
+
+
+async def prepare_task(task_id, force=False):
     with Session(get_engine()) as session:
         task = session.get(Task, task_id)
         if not task:
@@ -102,7 +119,8 @@ async def prepare(task_id, force=False):
         row = session.get(TaskContext, task_id)
         version = row.updated_at if row else None
         row = row or TaskContext(task_id=task_id)
-        if not force and row.task_snapshot == task_state and row.status in ('ready', 'needs_context') and json.loads(row.usage).get('full_markdown'):
+        usage = json.loads(row.usage)
+        if not force and context_status(task, row) in ('ready', 'needs_context') and usage.get('full_markdown'):
             return {'status': row.status, 'summary': row.summary, 'questions': json.loads(row.questions),
                     'task_snapshot': task_state}
         subject, notes = row.subject, row.owner_notes
@@ -119,7 +137,7 @@ async def prepare(task_id, force=False):
                                'owner_notes': item.owner_notes[:6000]})
     config, secrets = read_settings('context')
     if not config['enabled'] or not secrets.get('api_key'):
-        raise HTTPException(400, 'В профиле включите Luna и сохраните API-ключ')
+        raise HTTPException(400, 'В профиле включите Lucheba и сохраните API-ключ')
     result = await call('context', '/analyze', {
         'config': config, 'api_key': secrets['api_key'],
         'task_id': task_id, 'task': json.loads(task_state), 'subject': subject,
@@ -153,9 +171,13 @@ async def prepare(task_id, force=False):
         row.questions = json.dumps(result['questions'], ensure_ascii=False)
         row.task_snapshot = snapshot(task)
         row.usage = json.dumps(result.get('usage', {}) | {
-            'updated_fields': changed_fields, 'full_markdown': result['full_markdown'],
+            'updated_fields': changed_fields, 'full_markdown': result['full_markdown'], 'context_policy': 4,
+            'ranking_summary': result['ranking_summary'],
         })
         row.updated_at = datetime.now(timezone.utc)
+        # Старое «ждёт ответов» больше не описывает свежую проверку Lucheba.
+        task.ai_score = task.ai_details = task.ai_scored_at = None
+        session.add(task)
         session.add(row)
         session.commit()
     return result

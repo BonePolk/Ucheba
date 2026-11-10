@@ -45,7 +45,7 @@ export default function ContextFiles({ taskId, disabled }) {
   const error = files.error || library.error || upload.error || remove.error || reuse.error;
   return <Stack gap="xs">
     <Text fw={500}>Файлы для оценки контекста</Text>
-    <Text size="xs" c="dimmed">До 5 вложений по 10 МБ: PDF, DOCX, текст и изображения. Luna сама выбирает подходящие документы из вложений и сохранённой библиотеки, открывает их и нужные страницы PDF. Ручной выбор из библиотеки необязателен.</Text>
+    <Text size="xs" c="dimmed">До 5 вложений по 10 МБ: PDF, DOCX, текст и изображения. Lucheba сама выбирает подходящие документы из вложений и сохранённой библиотеки, открывает их и нужные страницы PDF. Ручной выбор из библиотеки необязателен.</Text>
     {files.data?.map((file) => <Group key={file.id} justify="space-between">
       <Anchor href={`/api${path}/${file.id}`} download>{file.name}{file.pages ? ` · ${file.pages} стр.` : ''}</Anchor>
       <Button size="xs" variant="subtle" color="red" disabled={busy} onClick={() => remove.mutate(file.id)}>Убрать из задачи</Button>

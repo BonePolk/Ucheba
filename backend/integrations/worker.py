@@ -6,8 +6,9 @@ from sqlmodel import Session, select
 
 from common.database import get_engine
 from integrations import codex, jev
+from integrations.context import context_status
 from common.settings import read_config, read_settings
-from common.models.integration import CodexRun
+from common.models.integration import CodexRun, TaskContext
 from common.models.task import Task
 
 
@@ -22,10 +23,18 @@ async def run():
             if config['enabled'] and now >= next_score:
                 next_score = now + 60
                 with Session(get_engine()) as session:
-                    ids = [t.id for t in session.exec(select(Task).where(
-                        Task.archived == False, Task.status != 'done', (Task.ai_scored_at.is_(None) | Task.ai_details.not_like('%"version": 6%'))).limit(3)).all()]
+                    tasks = session.exec(select(Task).where(
+                        Task.archived == False, Task.status != 'done').order_by(Task.id)).all()
+                    contexts = {row.task_id: row for row in session.exec(select(TaskContext)).all()}
+                    ids = [task.id for task in tasks if context_status(task, contexts.get(task.id)) == 'new'
+                           or task.ai_scored_at is None
+                           or '"version": 7' not in (task.ai_details or '')][:3]
                 for task_id in ids:
-                    await provider_call('jev', jev.evaluate(task_id))
+                    try:
+                        await provider_call('jev', jev.evaluate(task_id))
+                    except HTTPException:
+                        # Ошибка одной задачи не должна останавливать обработку остальных.
+                        continue
                 await provider_call('jev', jev.rank_all())
             agent, _ = read_settings('codex')
             if agent['enabled'] and agent['auto_prepare'] and now >= next_prepare and not (codex.job_task and not codex.job_task.done()):

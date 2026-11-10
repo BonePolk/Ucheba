@@ -3,7 +3,7 @@ import { Alert, Anchor, Badge, Button, Group, Loader, MultiSelect, NumberInput, 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { agentRequest, request } from './api';
 import BotSettings from './BotSettings';
-import JevProgress from './JevProgress';
+import JebaProgress from './JebaProgress';
 
 function ConnectionInfo({ value }) {
   return <>
@@ -28,7 +28,7 @@ function IntegrationForms({ data, features }) {
   const [gemini, setGemini] = useState({ enabled: data.gemini.enabled, model: data.gemini.model, interval_seconds: data.gemini.interval_seconds, confidence_threshold: data.gemini.confidence_threshold, timezone: data.gemini.timezone, owner_context: data.gemini.owner_context, api_key: '' });
   const [codex, setCodex] = useState({ enabled: data.codex.enabled, auto_prepare: data.codex.auto_prepare });
   const [context, setContext] = useState({ enabled: data.context.enabled, rewrite_title: data.context.rewrite_title ?? false, api_key: '' });
-  const [jev, setJev] = useState({ enabled: data.jev.enabled });
+  const [jev, setJeba] = useState({ enabled: data.jev.enabled });
   const [code, setCode] = useState('');
   const [password, setPassword] = useState('');
   const [step, setStep] = useState('');
@@ -42,7 +42,7 @@ function IntegrationForms({ data, features }) {
     mutationFn: ({ path, body, method = 'POST' }) => (path === 'jev/check' ? agentRequest : request)(`/integrations/${path}`, { method, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) }),
     onSuccess: async (result, variables) => {
       if (variables.method === 'PATCH') {
-        const setter = { telegram: setTelegram, gemini: setGemini, codex: setCodex, context: setContext, jev: setJev }[variables.path];
+        const setter = { telegram: setTelegram, gemini: setGemini, codex: setCodex, context: setContext, jev: setJeba }[variables.path];
         if (setter) setter((current) => Object.fromEntries(Object.entries(current).map(([key, value]) => [
           key, ['api_id', 'api_hash', 'phone', 'api_key', 'api_token'].includes(key) ? '' : variables.body[key] ?? value,
         ])));
@@ -73,11 +73,11 @@ function IntegrationForms({ data, features }) {
     {notice && <Alert color="purple" withCloseButton onClose={() => setNotice('')}>{notice}</Alert>}
     <SimpleGrid cols={{ base: 1, md: 2 }}>
       {features.context !== false && <Paper withBorder p="lg"><Stack>
-        <Title order={3}>Контекст · GPT-6 Luna</Title>
+        <Title order={3}>Контекст · Lucheba</Title>
         <Text size="sm">Личный ключ шлюза lenec.tech. Память контекста и ответы доступны только в твоём аккаунте.</Text>
         <PasswordInput label="API-ключ" placeholder={data.context.configured.api_key ? 'Сохранён' : ''} value={context.api_key} onChange={field(setContext, 'api_key')} />
-        <Switch label="Проверять контекст перед Jev" checked={context.enabled} onChange={toggle(setContext, 'enabled')} />
-        <Switch label="Разрешить Luna переписывать название задачи" checked={context.rewrite_title} onChange={toggle(setContext, 'rewrite_title')} />
+        <Switch label="Проверять контекст перед Jeba" checked={context.enabled} onChange={toggle(setContext, 'enabled')} />
+        <Switch label="Разрешить Lucheba переписывать название задачи" checked={context.rewrite_title} onChange={toggle(setContext, 'rewrite_title')} />
         <Group><Button loading={saving('context')} disabled={mutation.isPending} onClick={() => save('context', context)}>Сохранить</Button><Button variant="subtle" color="red" disabled={mutation.isPending} onClick={() => run('context', { api_key: null, enabled: false }, 'PATCH')}>Удалить ключ</Button></Group>
         <ConnectionInfo value={data.context} />
       </Stack></Paper>}
@@ -126,12 +126,12 @@ function IntegrationForms({ data, features }) {
         <ConnectionInfo value={data.codex} />
       </Stack></Paper>}
       {features.jev !== false && <Paper withBorder p="lg"><Stack>
-        <Title order={3}>Приоритеты · Laya Multilingual</Title>
-        <Text size="sm">Локальная альтернатива Jev: 322M параметров, CPU, поддержка русского. Ключи и оплата Cloudflare не нужны. При первой проверке скачивается модель; первый запрос может занять несколько минут. Ориентир памяти сервиса — 2–3 ГБ, фактический расход зависит от текста.</Text>
-        <Switch label="Автоматически обновлять порядок задач" checked={jev.enabled} onChange={toggle(setJev, 'enabled')} />
-        <Text size="xs" c="dimmed">Сначала Luna проверяет контекст. Затем Jev сравнивает задачи попарно и расставляет по важности, без баллов из 100. При неуверенном сравнении сохраняются ручной приоритет и дедлайн. Просроченные задачи остаются выше остальных. Задачи без готового контекста ожидают уточнений.</Text>
+        <Title order={3}>Приоритеты · Jeba</Title>
+        <Text size="sm">Jeba использует локальную модель Laya Multilingual: 322M параметров, CPU, поддержка русского. Ключи и оплата Cloudflare не нужны. При первой проверке скачивается модель; первый запрос может занять несколько минут. Ориентир памяти сервиса — 2–3 ГБ, фактический расход зависит от текста.</Text>
+        <Switch label="Автоматически обновлять порядок задач" checked={jev.enabled} onChange={toggle(setJeba, 'enabled')} />
+        <Text size="xs" c="dimmed">Сначала Lucheba проверяет контекст. Затем Jeba сравнивает задачи попарно и расставляет по важности, без баллов из 100. При неуверенном сравнении сохраняются ручной приоритет и дедлайн. Просроченные задачи остаются выше остальных. Задачи без готового контекста ожидают уточнений.</Text>
         <Group><Button loading={saving('jev')} disabled={mutation.isPending} onClick={() => save('jev', jev)}>Сохранить</Button><Button variant="default" disabled={mutation.isPending} onClick={() => run('jev/check')}>Проверить модель</Button></Group>
-        <JevProgress active={mutation.isPending && mutation.variables?.path === 'jev/check'} />
+        <JebaProgress active={mutation.isPending && mutation.variables?.path === 'jev/check'} />
         <ConnectionInfo value={data.jev} />
       </Stack></Paper>}
       {features.collector !== false && <Paper withBorder p="lg"><BotSettings name="collector" data={data.collector} /></Paper>}
