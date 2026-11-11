@@ -18,7 +18,7 @@ async def check_bot(name):
         return {'ok': True, 'username': me.username}
 
 
-async def poll(name, dispatcher_factory, maintenance):
+async def poll(name, dispatcher_factory, maintenance=None):
     while True:
         config, private = read_settings(name)
         token = private.get('bot_token')
@@ -34,8 +34,8 @@ async def poll(name, dispatcher_factory, maintenance):
             dispatcher = dispatcher_factory()
             polling = asyncio.create_task(dispatcher.start_polling(bot, handle_signals=False,
                 close_bot_session=False, handle_as_tasks=False, allowed_updates=dispatcher.resolve_used_update_types()))
-            upkeep = asyncio.create_task(maintenance(bot))
-            while not polling.done() and not upkeep.done():
+            upkeep = asyncio.create_task(maintenance(bot)) if maintenance else None
+            while not polling.done() and (upkeep is None or not upkeep.done()):
                 await asyncio.sleep(5)
                 updated, secret = read_settings(name)
                 if not updated['enabled'] or secret.get('bot_token') != token:

@@ -20,7 +20,7 @@ export default function AgentSettings({ name, title, data }) {
     onSuccess: async (_, remove) => {
       setKey(''); if (remove) setEnabled(false);
       await client.invalidateQueries({ queryKey: ['integrations'], exact: true });
-      await client.invalidateQueries({ queryKey: ['jev-ranking'] });
+      await client.invalidateQueries({ queryKey: ['ameba-ranking'] });
     },
   });
   return <Paper withBorder p="md" radius="md"><Stack gap="sm">

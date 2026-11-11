@@ -13,7 +13,7 @@ waiting = []
 running = []
 planned = {}
 active_users = set()
-jeba_users = set()
+ameba_users = set()
 ranking_requests = {}
 
 
@@ -67,7 +67,7 @@ async def slot(provider, task_id=0):
             await interrupt_ranking()
         async with condition:
             def available():
-                if owner in jeba_users or owner in active_users:
+                if owner in ameba_users or owner in active_users:
                     return False
                 browser_waiting = [item for item in waiting if item['owner'] == owner and item['provider'] == 'context']
                 if provider == 'context':
@@ -82,7 +82,7 @@ async def slot(provider, task_id=0):
                 if owner in planned:
                     planned[owner] = [value for value in planned[owner] if value != task_id]
             else:
-                jeba_users.add(owner)
+                ameba_users.add(owner)
             running.append(entry)
     except BaseException:
         async with condition:
@@ -97,7 +97,7 @@ async def slot(provider, task_id=0):
             if provider == 'context':
                 active_users.discard(owner)
             else:
-                jeba_users.discard(owner)
+                ameba_users.discard(owner)
             condition.notify_all()
 
 
@@ -122,7 +122,7 @@ def queue_state():
                    for task_id in planned.get(owner, []) if task_id not in visible)
     return {'active': active, 'waiting': pending,
             'browser_busy': bool(owner in active_users or any(item['provider'] == 'context' for item in pending) or planned.get(owner)),
-            'ameba_running': any(item['provider'] == 'jev' for item in active),
+            'ameba_running': any(item['provider'] == 'ameba' for item in active),
             'busy': bool(active or pending)}
 
 

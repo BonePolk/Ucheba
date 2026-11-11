@@ -2,7 +2,7 @@ from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from common import calendar
 from common.database import get_engine
@@ -29,6 +29,26 @@ async def update_calendar(body: calendar.CalendarConfig):
         if any(event.task_id is not None and not session.get(Task, event.task_id) for event in body.events):
             raise HTTPException(404, 'Задача календаря не найдена')
     return calendar.save_config(body)
+
+
+class TimezoneInput(BaseModel):
+    timezone: str = Field(min_length=1, max_length=100)
+
+
+@router.get('/timezone')
+def get_timezone():
+    return {'timezone': calendar.read_config()['timezone']}
+
+
+@router.patch('/timezone')
+async def update_timezone(body: TimezoneInput):
+    # Меняем только пояс, не отправляя из профиля старую копию событий.
+    try:
+        config = calendar.CalendarConfig.model_validate(calendar.read_config() | {'timezone': body.timezone.strip()})
+    except ValidationError:
+        raise HTTPException(422, 'Укажите существующий часовой пояс') from None
+    saved = calendar.save_config(config)
+    return {'timezone': saved['timezone']}
 
 
 class CalendarCommand(BaseModel):

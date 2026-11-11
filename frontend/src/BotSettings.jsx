@@ -44,7 +44,7 @@ export default function BotSettings({ name, data }) {
     {collector && <>
       <Button size="sm" variant="subtle" loading={available.isFetching} onClick={() => available.refetch()}>Загрузить группы бота</Button>
       <MultiSelect label="Разрешённые чаты бота" searchable value={chats} onChange={setChats} data={(available.data ?? (data.chat_ids ?? []).map((id) => ({ id, title: String(id) }))).map((chat) => ({ value: String(chat.id), label: chat.title }))} />
-      <Group><Button size="sm" variant="light" disabled={!available.data || action.isPending} onClick={() => action.mutate({ path: 'bots/collector/chats', body: { chat_ids: chats.map(Number) } })}>Сохранить чаты</Button><Button size="sm" variant="light" disabled={action.isPending} onClick={() => action.mutate({ path: 'bots/collector/analyze' })}>Обработать собранные сообщения</Button></Group>
+      <Group><Button size="sm" variant="light" disabled={!available.data || action.isPending} onClick={() => action.mutate({ path: 'bots/collector/chats', body: { chat_ids: chats.map(Number) } })}>Сохранить чаты</Button></Group>
     </>}
     {(action.error || available.error) && <Alert color="red">{(action.error || available.error).message}</Alert>}
     {notice && <Text size="sm" c="purple">{notice}</Text>}

@@ -16,7 +16,7 @@ import bot
 
 @asynccontextmanager
 async def lifespan(app):
-    background = asyncio.create_task(for_users(lambda: poll('collector', bot.dispatcher, bot.maintain)))
+    background = asyncio.create_task(for_users(lambda: poll('collector', bot.dispatcher)))
     try:
         yield
     finally:
@@ -54,8 +54,3 @@ async def select_chats(body: Selection):
             session.commit()
         save_settings('collector', config={'chat_ids': list(set(body.chat_ids))})
     return {'ok': True}
-
-
-@app.post('/analyze')
-async def analyze():
-    return await bot.analyze()

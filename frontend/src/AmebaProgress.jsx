@@ -4,11 +4,11 @@ import { request } from './api';
 import AgentProgress from './AgentProgress';
 import AgentTimeline from './AgentTimeline';
 
-export default function JebaProgress({ taskId = 0, active = false }) {
-  const ranking = useQuery({ queryKey: ['jev-ranking'], queryFn: () => request('/integrations/jev/ranking'), refetchInterval: 5000 });
-  return <AgentProgress taskId={taskId} providers={['context', 'jev']} active={active}>
+export default function AmebaProgress({ taskId = 0, active = false }) {
+  const ranking = useQuery({ queryKey: ['ameba-ranking'], queryFn: () => request('/integrations/ameba/ranking'), refetchInterval: 5000 });
+  return <AgentProgress taskId={taskId} providers={['context', 'ameba']} active={active}>
     {(entries, current) => {
-      const entry = entries.find((item) => item.provider === 'jev');
+      const entry = entries.find((item) => item.provider === 'ameba');
       const run = entry?.run;
       const running = run?.status === 'running';
       const queued = entry?.queued && !running;
@@ -18,7 +18,7 @@ export default function JebaProgress({ taskId = 0, active = false }) {
       const schedule = plan ?? ranking.data?.calendar_schedule;
       const calendarOnly = !plan;
       const percent = run?.total ? Math.floor(run.completed / run.total * 100) : 0;
-      if (current && current.provider !== 'jev') return <AgentTimeline schedule={ranking.data?.calendar_schedule} calendarOnly finished />;
+      if (current && current.provider !== 'ameba') return <AgentTimeline schedule={ranking.data?.calendar_schedule} calendarOnly finished />;
       return <Stack gap={8} mt="xs">
         {(running || queued) && <>
           <Group gap={6}><Badge size="xs" variant="light">Ameba</Badge><Text size="xs" c="dimmed">{queued ? 'В очереди' : run.stage === 'planning' ? 'Планирует' : 'Сортирует'}</Text></Group>

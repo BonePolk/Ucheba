@@ -43,7 +43,6 @@ export default function Calendar({ features = {} }) {
   const [editor, setEditor] = useState(null);
   const [error, setError] = useState('');
   const [command, setCommand] = useState('');
-  const [timezoneDraft, setTimezoneDraft] = useState(null);
   const viewport = useRef(null);
   const addedTask = useRef(false);
   const start = view === 'week' ? monday(date) : monday(monthStart(date));
@@ -53,10 +52,10 @@ export default function Calendar({ features = {} }) {
   const status = useQuery({ queryKey: ['straus-status'], queryFn: () => request('/integrations/context/schedule/import/status'), enabled: features.straus !== false, refetchInterval: 1000 });
   const refresh = () => Promise.all([
     client.invalidateQueries({ queryKey: ['calendar'] }),
-    client.invalidateQueries({ queryKey: ['jev-ranking'] }),
+    client.invalidateQueries({ queryKey: ['ameba-ranking'] }),
     client.invalidateQueries({ queryKey: ['straus-status'] }),
   ]);
-  const save = useMutation({ mutationFn: (config) => request('/calendar', { method: 'PUT', body: JSON.stringify(config) }), onSuccess: async () => { setEditor(null); setError(''); setTimezoneDraft(null); await refresh(); } });
+  const save = useMutation({ mutationFn: (config) => request('/calendar', { method: 'PUT', body: JSON.stringify(config) }), onSuccess: async () => { setEditor(null); setError(''); await refresh(); } });
   const editAgent = useMutation({ mutationFn: () => agentRequest('/calendar/agent', { method: 'POST', body: JSON.stringify({ instruction: command }) }), onSettled: refresh });
   const stop = useMutation({ mutationFn: () => request('/integrations/context/schedule/import/stop', { method: 'POST' }), onSuccess: async () => { editAgent.reset(); await refresh(); } });
   const busy = Boolean(status.data?.running || editAgent.isPending || stop.isPending);
@@ -122,7 +121,7 @@ export default function Calendar({ features = {} }) {
 
   return <Paper withBorder p="md" radius="md"><Stack gap="sm">
     <Group justify="space-between">
-      <Group gap="xs"><Title order={3}>Календарь</Title><Badge variant="light">{calendar.data?.timezone ?? '…'}</Badge></Group>
+      <Group gap="xs"><Title order={3}>Календарь</Title></Group>
       <Group gap="xs"><Button size="xs" variant="default" disabled={!config} onClick={() => create(date)}>Добавить событие</Button><Button size="xs" variant="light" onClick={() => setDate(calendar.data?.today ?? dateKey(new Date()))}>Сегодня</Button><Button size="xs" variant="subtle" aria-label="Назад" onClick={() => shift(-1)}>‹</Button><Button size="xs" variant="subtle" aria-label="Вперёд" onClick={() => shift(1)}>›</Button><Select size="xs" w={110} value={view} onChange={setView} allowDeselect={false} data={[{ value: 'week', label: 'Неделя' }, { value: 'month', label: 'Месяц' }]} /></Group>
     </Group>
     <Text fw={500}>{asDate(view === 'month' ? monthStart(date) : start).toLocaleDateString('ru-RU', view === 'month' ? { month: 'long', year: 'numeric' } : { day: 'numeric', month: 'long' })}{view === 'week' && ` — ${asDate(end).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' })}`}</Text>
@@ -151,7 +150,6 @@ export default function Calendar({ features = {} }) {
       </div>;
     })}</div>}
     <Group gap="xs">{['task', 'busy', 'sleep', 'meal', 'break', 'work'].map((kind) => <Badge key={kind} size="xs" color={colors[kind]} variant="light">{names[kind]}</Badge>)}</Group>
-    {config && <Group align="end"><TextInput label="Часовой пояс" placeholder="Europe/Moscow" value={timezoneDraft ?? config.timezone} onChange={(change) => setTimezoneDraft(change.currentTarget.value)} /><Button size="xs" variant="light" disabled={timezoneDraft === null || save.isPending} onClick={() => save.mutate({ ...config, timezone: timezoneDraft })}>Сохранить часовой пояс</Button></Group>}
     {config && features.straus !== false && <>
       <Textarea label="Поручение Straus" placeholder="Например: найди расписание моей группы в ЛК и добавь пары на следующие две недели" value={command} onChange={(change) => setCommand(change.currentTarget.value)} autosize minRows={2} maxLength={12000} disabled={busy} />
       <Group><Button variant="light" size="xs" disabled={!command.trim() || busy || status.isPending || status.isError} onClick={() => { stop.reset(); editAgent.mutate(); }}>Изменить календарь</Button>{status.data?.running && <Button size="xs" color="red" variant="light" loading={stop.isPending} onClick={() => stop.mutate()}>Остановить Straus</Button>}<Anchor size="xs" href="/profile">Личные кабинеты и настройки агента</Anchor></Group>

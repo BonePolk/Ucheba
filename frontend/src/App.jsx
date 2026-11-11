@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from 'react';
+import { Component, lazy, Suspense, useEffect, useState } from 'react';
 import { Alert, Button, Container, Loader, Paper, PasswordInput, Stack, Text, TextInput, Title } from '@mantine/core';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { request } from './api';
@@ -8,9 +8,26 @@ const TaskBoard = lazy(() => import('./TaskBoard'));
 const Calendar = lazy(() => import('./Calendar'));
 const Account = lazy(() => import('./Account'));
 const Files = lazy(() => import('./Files'));
-const Admin = lazy(() => import('./Admin'));
 const Inbox = lazy(() => import('./Inbox'));
 const TaskAutomation = lazy(() => import('./TaskAutomation'));
+
+class PageError extends Component {
+  state = { error: null };
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    return <Container py="lg"><Alert color="red" title="Не удалось открыть страницу">
+      <Stack gap="sm">
+        <Text size="sm">{this.state.error.message || 'Ошибка интерфейса'}</Text>
+        <Button variant="default" onClick={() => window.location.reload()}>Перезагрузить страницу</Button>
+      </Stack>
+    </Alert></Container>;
+  }
+}
 
 function Login() {
   const [register, setRegister] = useState(false);
@@ -68,7 +85,7 @@ export default function App() {
     <AppNavigation user={user} path={path} collapsed={menuCollapsed} onToggle={() => setMenuCollapsed(!menuCollapsed)} onLogout={() => logout.mutate()} leaving={logout.isPending} />
     <main className="app-content">
       {logout.error && <Container py="sm"><Alert color="red">{logout.error.message}</Alert></Container>}
-    <Suspense fallback={<Container py="xl"><Loader /></Container>}>{board ? <TaskBoard features={user.features} /> : <Container size="xl" w="100%" py="lg">{task ? <TaskPanel id={task} features={user.features} /> : path === '/calendar' ? <Calendar features={user.features} /> : path === '/files' ? user.features.context !== false ? <Files /> : <Alert>Функция отключена</Alert> : path.startsWith('/profile') ? <Account user={user} /> : path.startsWith('/admin') ? user.is_admin ? <Admin /> : <Alert color="red">Требуется доступ администратора</Alert> : path.startsWith('/inbox') ? user.features.gemini !== false ? <Inbox /> : <Alert>Функция отключена</Alert> : <Alert>Страница не найдена</Alert>}</Container>}</Suspense>
+    <PageError key={location}><Suspense fallback={<Container py="xl"><Loader /></Container>}>{board ? <TaskBoard features={user.features} /> : <Container size="xl" w="100%" py="lg">{task ? <TaskPanel id={task} features={user.features} /> : path === '/calendar' ? <Calendar features={user.features} /> : path === '/files' ? user.features.context !== false ? <Files /> : <Alert>Функция отключена</Alert> : path.startsWith('/profile') ? <Account key="profile" user={user} /> : path.startsWith('/admin') ? user.is_admin ? <Account key="profile-admin" user={user} initialTab="admin" /> : <Alert color="red">Требуется доступ администратора</Alert> : path.startsWith('/inbox') ? <Inbox /> : <Alert>Страница не найдена</Alert>}</Container>}</Suspense></PageError>
     </main>
   </div>;
 }

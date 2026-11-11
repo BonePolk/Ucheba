@@ -8,7 +8,7 @@ import { agentRequest, deleteTask, getTasks, request, saveTask } from './api';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
 import TaskForm, { priorities, statuses } from './TaskForm';
-import JebaProgress from './JebaProgress';
+import AmebaProgress from './AmebaProgress';
 import AgentQueue from './AgentQueue';
 import AgentProgress from './AgentProgress';
 import RankingAssessment from './RankingAssessment';
@@ -26,7 +26,7 @@ const sorting = [
   { value: 'priority:desc', label: 'Приоритет: сначала низкий' },
   { value: 'created_at:desc', label: 'Создание: сначала новые' },
   { value: 'created_at:asc', label: 'Создание: сначала старые' },
-  { value: 'jev:asc', label: 'Порядок Ameba' },
+  { value: 'ameba:asc', label: 'Порядок Ameba' },
 ];
 
 export default function TaskBoard({ features = {} }) {
@@ -43,12 +43,12 @@ export default function TaskBoard({ features = {} }) {
   const [completing, setCompleting] = useState(null);
   const archived = view === 'archive';
   const [filters, setFilters] = useState({ status: null, priority: null, category: null });
-  const [sort, setSort] = useState(features.ameba !== false ? 'jev:asc' : 'deadline:asc');
+  const [sort, setSort] = useState(features.ameba !== false ? 'ameba:asc' : 'deadline:asc');
   const [editor, setEditor] = useState(null);
   const [planFeedback, setPlanFeedback] = useState(null);
   const taskView = view === 'active' || view === 'archive';
   const automationEnabled = features.codex !== false || features.ameba !== false || features.context !== false;
-  const currentSort = features.ameba === false && sort === 'jev:asc' ? 'deadline:asc' : sort;
+  const currentSort = features.ameba === false && sort === 'ameba:asc' ? 'deadline:asc' : sort;
   const [sortBy, order] = currentSort.split(':');
   const tasks = useQuery({
     queryKey: ['tasks', filters, currentSort, archived],
@@ -59,14 +59,14 @@ export default function TaskBoard({ features = {} }) {
   const categories = useQuery({ queryKey: ['tasks', 'categories', archived], queryFn: () => request(`/tasks/categories?archived=${archived}`), enabled: taskView });
   const refresh = () => Promise.all([
     queryClient.invalidateQueries({ queryKey: ['tasks'] }),
-    queryClient.invalidateQueries({ queryKey: ['jev-ranking'] }),
+    queryClient.invalidateQueries({ queryKey: ['ameba-ranking'] }),
   ]);
-  const ranking = useQuery({ queryKey: ['jev-ranking'], queryFn: () => request('/integrations/jev/ranking'),
+  const ranking = useQuery({ queryKey: ['ameba-ranking'], queryFn: () => request('/integrations/ameba/ranking'),
     enabled: features.ameba !== false && !archived, refetchInterval: 15000 });
   const queue = useQuery({ queryKey: ['agent-queue'], queryFn: () => request('/integrations/queue'),
     enabled: !archived && (features.context !== false || features.ameba !== false), refetchInterval: 1000 });
-  const rank = useMutation({ mutationFn: () => agentRequest('/integrations/jev/rank', { method: 'POST', body: JSON.stringify({ feedback: planFeedback ?? ranking.data?.feedback ?? '' }) }),
-    onSuccess: async () => { setSort('jev:asc'); await queryClient.invalidateQueries({ queryKey: ['jev-ranking'] }); await refresh(); } });
+  const rank = useMutation({ mutationFn: () => agentRequest('/integrations/ameba/rank', { method: 'POST', body: JSON.stringify({ feedback: planFeedback ?? ranking.data?.feedback ?? '' }) }),
+    onSuccess: async () => { setSort('ameba:asc'); await queryClient.invalidateQueries({ queryKey: ['ameba-ranking'] }); await refresh(); } });
   const rankingReasons = new Map((ranking.data?.reasons ?? []).map((item) => [item.task_id, item]));
   const positions = new Map((ranking.data?.task_ids ?? []).map((id, index) => [id, index + 1]));
   const save = useMutation({
@@ -127,7 +127,7 @@ export default function TaskBoard({ features = {} }) {
             <Select label="Статус" placeholder="Все статусы" data={statuses} clearable value={filters.status} onChange={(value) => changeFilter('status', value)} />
             <Select label="Приоритет" placeholder="Все приоритеты" data={[{ value: 'overdue', label: 'Просрочено' }, ...priorities]} clearable value={filters.priority} onChange={(value) => changeFilter('priority', value)} />
             <Select label="Категория" placeholder="Все категории" data={categories.data ?? []} clearable searchable value={filters.category} onChange={(value) => changeFilter('category', value)} />
-            <Select label="Сортировка" data={sorting.filter((item) => features.ameba !== false || item.value !== 'jev:asc')} value={currentSort} allowDeselect={false} onChange={setSort} />
+            <Select label="Сортировка" data={sorting.filter((item) => features.ameba !== false || item.value !== 'ameba:asc')} value={currentSort} allowDeselect={false} onChange={setSort} />
           </SimpleGrid>}
         </Paper>
         {!archived && features.context !== false && features.ameba === false && <AgentProgress providers={['context']} active={queue.data?.active?.some((item) => item.provider === 'context')} />}
@@ -141,7 +141,7 @@ export default function TaskBoard({ features = {} }) {
           </>}<Group>
           <Button variant="light" loading={rank.isPending && !queue.data?.ameba_running} disabled={queue.data?.browser_busy} onClick={() => rank.mutate()}>{queue.data?.ameba_running ? 'Применить изменения' : 'Обновить расписание'}</Button>
           <Text size="sm" c="dimmed">{ranking.data?.needs_refresh ? 'Порядок нужно обновить.' : `Сравнено задач: ${ranking.data?.ranked_count ?? 0}.`}{ranking.data?.pending_count > 0 && ` Ожидают контекста Monocle: ${ranking.data.pending_count}.`}{ranking.data?.uncertain_comparisons > 0 && ' При неуверенном сравнении сохранён ручной приоритет и дедлайн.'}</Text>
-        </Group>{rank.data?.unchanged && <Text size="xs" c="dimmed">{rank.data.status === 'running' ? 'Ameba уже работает с этими данными.' : 'Данные не изменились — сохранённый порядок остаётся.'}</Text>}{ranking.data?.explanation && <Tooltip multiline w={320} label={ranking.data.explanation} events={{ hover: true, focus: true, touch: true }}><Text component="button" type="button" size="xs" c="dimmed" style={{ cursor: 'help', background: 'none', border: 0, padding: 0, width: 'fit-content' }}>{ranking.data.needs_refresh ? 'О последней сортировке' : 'Почему такой порядок'}</Text></Tooltip>}<div className="planner-progress"><JebaProgress active={rank.isPending} /></div></Stack></Paper>}
+        </Group>{rank.data?.unchanged && <Text size="xs" c="dimmed">{rank.data.status === 'running' ? 'Ameba уже работает с этими данными.' : 'Данные не изменились — сохранённый порядок остаётся.'}</Text>}{ranking.data?.explanation && <Tooltip multiline w={320} label={ranking.data.explanation} events={{ hover: true, focus: true, touch: true }}><Text component="button" type="button" size="xs" c="dimmed" style={{ cursor: 'help', background: 'none', border: 0, padding: 0, width: 'fit-content' }}>{ranking.data.needs_refresh ? 'О последней сортировке' : 'Почему такой порядок'}</Text></Tooltip>}<div className="planner-progress"><AmebaProgress active={rank.isPending} /></div></Stack></Paper>}
         {error && <Alert color="red">{error.message}</Alert>}
         {tasks.isPending ? <Loader aria-label="Загрузка задач" /> : (
           compact ? <div className="task-card-grid">{rows.map((task) => <TaskCard key={task.id} task={task} archived={archived}

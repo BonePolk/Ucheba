@@ -187,6 +187,7 @@ def save_ameba_plan(run_id, result, revision):
             return  # Ответ отменённого запуска не возвращает старый план.
         row.config = json.dumps({'run_id': run_id, 'revision': revision,
             'schedule': result['schedule'], 'rest_patterns': result.get('rest_patterns', []),
+            'day_plans': result.get('day_plans', {}),
             'tasks': result.get('timeline', [])}, ensure_ascii=False)
         session.add(row)
         session.commit()
@@ -215,10 +216,19 @@ def ameba_events(start, end):
                     'kind': kind, 'title': title, 'task_id': task_id, 'source': 'ameba',
                     'summary': 'Временный план Ameba. Сбросится при следующем запуске.'})
             left, day = stop, day + timedelta(days=1)
-    for index, pattern in enumerate(saved.get('rest_patterns', [])):
+    day_plans = saved.get('day_plans', {})
+    patterns = list(saved.get('rest_patterns', []))
+    patterns += [slot | {'date': day} for day, slots in day_plans.items()
+                 for slot in slots if slot['kind'] in ('sleep', 'meal', 'break')]
+    for index, pattern in enumerate(patterns):
         for offset in range((end - start).days + 1):
             day = start + timedelta(days=offset)
-            if day < origin.astimezone(zone).date() or day.weekday() not in pattern['weekdays']:
+            if day < origin.astimezone(zone).date():
+                continue
+            if pattern.get('date'):
+                if day.isoformat() != pattern['date']:
+                    continue
+            elif day.isoformat() in day_plans or day.weekday() not in pattern['weekdays']:
                 continue
             left = datetime.combine(day, datetime.min.time(), zone)
             hour, minute = map(int, pattern['start'].split(':'))

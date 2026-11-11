@@ -9,6 +9,17 @@ import './styles.css';
 import 'dayjs/locale/ru';
 import App from './App';
 
+// После обновления сайта открытая вкладка может запрашивать старые JS-файлы.
+// Перезагружаем её один раз, чтобы получить ссылки на новую версию.
+window.addEventListener('vite:preloadError', (event) => {
+  const key = 'page-reloaded-after-update';
+  const previous = Number(sessionStorage.getItem(key) || 0);
+  if (Date.now() - previous < 60000) return;
+  sessionStorage.setItem(key, String(Date.now()));
+  event.preventDefault();
+  window.location.reload();
+});
+
 const queryClient = new QueryClient();
 
 ReactDOM.createRoot(document.getElementById('root')).render(

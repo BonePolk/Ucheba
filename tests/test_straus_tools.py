@@ -232,7 +232,7 @@ class ModelSilence(unittest.IsolatedAsyncioTestCase):
 
         token = current_user_id.set(900002)
         try:
-            with patch.object(agent_api, 'MODEL_IDLE_TIMEOUT', 0.06), Progress('Straus') as progress:
+            with patch.multiple(agent_api, MODEL_FIRST_DATA_TIMEOUT=0.06, MODEL_IDLE_TIMEOUT=0.06), Progress('Straus') as progress:
                 progress.begin_response()
                 try:
                     result = await agent_api.stream_model_response(SimpleNamespace(responses=SimpleNamespace(stream=stream)), progress,
@@ -249,7 +249,7 @@ class ModelSilence(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.calls), 2)
         self.assertEqual(self.calls[0], self.calls[1])
         self.assertTrue(self.streams[0].closed)
-        self.assertTrue(any('30 секунд' in event['message'] for event in self.events))
+        self.assertTrue(any('3 минуты' in event['message'] for event in self.events))
 
     async def test_opening_connection_has_deadline(self):
         await self.run_stream('opening')

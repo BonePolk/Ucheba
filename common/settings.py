@@ -13,18 +13,15 @@ DEFAULTS = {
     'notifications': {'enabled': False, 'owner_id': None, 'lead_minutes': 30},
     'collector': {'enabled': False, 'chat_ids': []},
     'telegram': {'enabled': False, 'chat_ids': []},
-    'gemini': {'enabled': False, 'base_url': 'https://generativelanguage.googleapis.com', 'model': 'gemini-3.8-flash', 'interval_seconds': 300,
-               'confidence_threshold': 0.9, 'timezone': 'UTC', 'owner_context': ''},
     'context': {'enabled': True, 'base_url': 'https://lenec.tech/v1', 'model': 'gpt-6-luna', 'rewrite_title': False},
     'ameba': {'enabled': False, 'base_url': 'https://lenec.tech/v1', 'model': 'gpt-6-luna'},
     'straus': {'enabled': True, 'base_url': 'https://lenec.tech/v1', 'model': 'gpt-6-luna'},
     'codex': {'enabled': False, 'auto_prepare': False},
-    'jev': {'enabled': False, 'account_id': '', 'model': 'typesafe/jev'},
 }
 SECRET_FIELDS = {
     'notifications': {'bot_token'}, 'collector': {'bot_token'},
     'telegram': {'api_id', 'api_hash', 'phone', 'session'},
-    'gemini': {'api_key'}, 'context': {'api_key'}, 'ameba': {'api_key'}, 'straus': {'api_key'}, 'codex': set(), 'jev': {'api_token'},
+    'context': {'api_key'}, 'ameba': {'api_key'}, 'straus': {'api_key'}, 'codex': set(),
 }
 
 
@@ -36,6 +33,7 @@ def inherit_agent_settings(name):
         if session.get(IntegrationSetting, name):
             return
         context = session.get(IntegrationSetting, 'context')
+        # Старые настройки только наследуются; удалённый сервис не вызывается.
         old = session.get(IntegrationSetting, 'jev') if name == 'ameba' else context
         config = json.loads(old.config) if old else {}
         inherited = dict(DEFAULTS[name], enabled=config.get('enabled', DEFAULTS[name]['enabled']))
@@ -54,7 +52,7 @@ def inherit_agent_settings(name):
                 raise
 
 
-def read_settings(name):
+def read_settings(name, *, apply_feature=True):
     if name not in DEFAULTS:
         raise HTTPException(404, 'Неизвестная интеграция')
     inherit_agent_settings(name)
@@ -64,13 +62,14 @@ def read_settings(name):
         config = {key: stored.get(key, default) for key, default in DEFAULTS[name].items()}
         secrets = json.loads(decrypt(row.secrets)) if row and row.secrets else {}
         from common.accounts import features
-        if not features()[name]:
+        if apply_feature and not features()[name]:
             config['enabled'] = False
         return config, secrets
 
 
 def save_settings(name, config=None, secrets=None):
-    current, private = read_settings(name)
+    # Общий запрет влияет на запуск, но не меняет личный переключатель.
+    current, private = read_settings(name, apply_feature=False)
     current.update(config or {})
     private.update(secrets or {})
     if name in ('collector', 'notifications') and secrets is not None and 'bot_token' in secrets:

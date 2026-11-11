@@ -11,15 +11,15 @@ export default function AgentMemory() {
   const memory = useQuery({ queryKey: ['agent-memory'], queryFn: () => request('/auth/agent-memory'), refetchInterval: 10000 });
   const save = useMutation({
     mutationFn: () => request('/auth/agent-memory', { method: 'PUT', body: JSON.stringify(editing) }),
-    onSuccess: () => { setEditing(null); client.invalidateQueries({ queryKey: ['agent-memory'] }); client.invalidateQueries({ queryKey: ['jev-ranking'] }); },
+    onSuccess: () => { setEditing(null); client.invalidateQueries({ queryKey: ['agent-memory'] }); client.invalidateQueries({ queryKey: ['ameba-ranking'] }); },
   });
   const create = useMutation({
     mutationFn: (fact) => request('/auth/agent-memory', { method: 'POST', body: JSON.stringify(fact) }),
-    onSuccess: () => { setNewFact(''); setAdding(false); client.invalidateQueries({ queryKey: ['agent-memory'] }); client.invalidateQueries({ queryKey: ['jev-ranking'] }); },
+    onSuccess: () => { setNewFact(''); setAdding(false); client.invalidateQueries({ queryKey: ['agent-memory'] }); client.invalidateQueries({ queryKey: ['ameba-ranking'] }); },
   });
   const remove = useMutation({
     mutationFn: (key) => request(`/auth/agent-memory/${encodeURIComponent(key)}`, { method: 'DELETE' }),
-    onSuccess: () => { client.invalidateQueries({ queryKey: ['agent-memory'] }); client.invalidateQueries({ queryKey: ['jev-ranking'] }); },
+    onSuccess: () => { client.invalidateQueries({ queryKey: ['agent-memory'] }); client.invalidateQueries({ queryKey: ['ameba-ranking'] }); },
   });
   return <Paper withBorder p="md"><Stack gap="xs">
     <Group justify="space-between"><Title order={4}>Память агентов</Title><Button size="compact-xs" variant="light" onClick={() => setAdding(!adding)}>Добавить факт</Button></Group>

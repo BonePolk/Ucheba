@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from threading import Lock
 from uuid import uuid4
 
+from fastapi import HTTPException
+
 from common.identity import user_id
 
 records = OrderedDict()
@@ -115,7 +117,7 @@ class Progress:
                 if records[key]['status'] != 'running':
                     del records[key]
         notify(self.key[0])
-        if self.record['agent'] not in ('Monocle', 'Jeba', 'Ameba'):
+        if self.record['agent'] not in ('Monocle', 'Ameba'):
             self.add('Начало работы')
         return self
 
@@ -203,9 +205,14 @@ class Progress:
     def __exit__(self, kind, error, traceback):
         status = self.record.get('outcome', 'completed') if kind is None else 'failed' if isinstance(error, Exception) else 'interrupted'
         message = {'completed': 'Работа завершена', 'failed': 'Операция завершилась ошибкой', 'interrupted': 'Работа прервана', 'blocked': 'Нужны данные или доступ', 'unchanged': 'Календарь уже соответствует поручению'}[status]
-        if self.record['agent'] not in ('Monocle', 'Jeba', 'Ameba'):
+        detail = None
+        if status == 'failed':
+            detail = error.detail if isinstance(error, HTTPException) and isinstance(error.detail, str) else 'Сбой агента. Не удалось завершить поручение.'
+            self.add(detail, current=False)
+        elif self.record['agent'] not in ('Monocle', 'Ameba'):
             self.add(message)
         with records_lock:
+            self.record['error'] = detail
             self.record['model_waiting'] = False
             self.record['current_action'] = None
             self.record['status'] = status

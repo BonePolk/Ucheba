@@ -2,7 +2,7 @@ import { Alert, Button, Group, Loader, Paper, Stack, Switch, Text, Title } from 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { request } from './api';
 
-const labels = { telegram: 'Telegram-аккаунты', gemini: 'Анализ Gemini', codex: 'Выполнение Codex', jev: 'Jeba (резерв)', context: 'Monocle', ameba: 'Ameba', straus: 'Straus', collector: 'Боты сбора задач', notifications: 'Боты уведомлений', registration: 'Регистрация новых пользователей' };
+const labels = { telegram: 'Telegram-аккаунты', codex: 'Выполнение Codex', context: 'Monocle', ameba: 'Ameba', straus: 'Straus', collector: 'Боты сбора задач', notifications: 'Боты уведомлений', registration: 'Регистрация новых пользователей' };
 
 export default function Admin() {
   const client = useQueryClient();

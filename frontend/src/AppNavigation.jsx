@@ -20,8 +20,7 @@ export default function AppNavigation({ user, path, onLogout, leaving, collapsed
     ...(user.features.context !== false ? [{ href: '/files', label: 'Файлы', icon: 'files' }] : []),
     { href: '/profile', label: 'Профиль', icon: 'profile' }];
   const extra = <>
-    {user.features.gemini !== false && <a href="/inbox" onClick={() => setMore(false)}>Входящие</a>}
-    {user.is_admin && <a href="/admin" onClick={() => setMore(false)}>Управление</a>}
+    <a href="/inbox" onClick={() => setMore(false)}>Входящие</a>
     <Button variant="subtle" color="gray" loading={leaving} onClick={onLogout}>Выйти из аккаунта</Button>
   </>;
   return <>

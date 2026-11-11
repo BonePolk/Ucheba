@@ -1,10 +1,9 @@
 import { useState } from 'react';
-import { Alert, Anchor, Badge, Button, Group, Loader, MultiSelect, NumberInput, Paper, PasswordInput, Select, SimpleGrid, Stack, Switch, Text, Textarea, TextInput, Title } from '@mantine/core';
+import { Alert, Anchor, Badge, Button, Group, Loader, MultiSelect, Paper, PasswordInput, SimpleGrid, Stack, Switch, Text, Title } from '@mantine/core';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { agentRequest, request } from './api';
+import { request } from './api';
 import BotSettings from './BotSettings';
 import AgentSettings from './AgentSettings';
-import ModelPicker from './ModelPicker';
 
 function ConnectionInfo({ value }) {
   return <>
@@ -26,7 +25,6 @@ export default function Integrations({ features = {} }) {
 function IntegrationForms({ data, features }) {
   const client = useQueryClient();
   const [telegram, setTelegram] = useState({ enabled: data.telegram.enabled, api_id: '', api_hash: '', phone: '' });
-  const [gemini, setGemini] = useState({ enabled: data.gemini.enabled, base_url: data.gemini.base_url || 'https://generativelanguage.googleapis.com', model: data.gemini.model, interval_seconds: data.gemini.interval_seconds, confidence_threshold: data.gemini.confidence_threshold, timezone: data.gemini.timezone, owner_context: data.gemini.owner_context, api_key: '' });
   const [codex, setCodex] = useState({ enabled: data.codex.enabled, auto_prepare: data.codex.auto_prepare });
   const [code, setCode] = useState('');
   const [password, setPassword] = useState('');
@@ -37,10 +35,10 @@ function IntegrationForms({ data, features }) {
   const [codexOpened, setCodexOpened] = useState(data.codex.enabled);
   const codexState = useQuery({ queryKey: ['integrations', 'codex'], enabled: features.codex !== false && codexOpened, queryFn: () => request('/integrations/codex/status'), refetchInterval: 10000, retry: false });
   const mutation = useMutation({
-    mutationFn: ({ path, body, method = 'POST' }) => (path === 'jev/check' ? agentRequest : request)(`/integrations/${path}`, { method, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) }),
+    mutationFn: ({ path, body, method = 'POST' }) => request(`/integrations/${path}`, { method, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) }),
     onSuccess: async (result, variables) => {
       if (variables.method === 'PATCH') {
-        const setter = { telegram: setTelegram, gemini: setGemini, codex: setCodex }[variables.path];
+        const setter = { telegram: setTelegram, codex: setCodex }[variables.path];
         if (setter) setter((current) => Object.fromEntries(Object.entries(current).map(([key, value]) => [
           key, ['api_id', 'api_hash', 'phone', 'api_key', 'api_token'].includes(key) ? '' : variables.body[key] ?? value,
         ])));
@@ -78,29 +76,14 @@ function IntegrationForms({ data, features }) {
         <PasswordInput label="API ID" placeholder={data.telegram.configured.api_id ? 'Сохранён' : ''} value={telegram.api_id} onChange={field(setTelegram, 'api_id')} />
         <PasswordInput label="API Hash" placeholder={data.telegram.configured.api_hash ? 'Сохранён' : ''} value={telegram.api_hash} onChange={field(setTelegram, 'api_hash')} />
         <PasswordInput label="Телефон" placeholder={data.telegram.configured.phone ? 'Сохранён' : '+7…'} value={telegram.phone} onChange={field(setTelegram, 'phone')} />
-        <Switch label="Автоматический анализ выбранных чатов" checked={telegram.enabled} onChange={toggle(setTelegram, 'enabled')} />
         <Group><Button loading={saving('telegram')} disabled={mutation.isPending} onClick={() => save('telegram', telegram)}>Сохранить</Button><Button variant="default" disabled={mutation.isPending || data.telegram_connected} onClick={() => run('telegram/code')}>Подключить аккаунт</Button></Group>
         {step === 'code' && <Group align="end"><PasswordInput label="Код Telegram" value={code} onChange={(event) => setCode(event.currentTarget.value)} /><Button disabled={mutation.isPending || !code} onClick={() => run('telegram/login', { code })}>Подтвердить</Button></Group>}
         {step === 'password' && <Group align="end"><PasswordInput label="Пароль двухфакторной авторизации" value={password} onChange={(event) => setPassword(event.currentTarget.value)} /><Button disabled={mutation.isPending || !password} onClick={() => run('telegram/login', { password })}>Войти</Button></Group>}
         <Button variant="default" loading={chats.isFetching} onClick={() => chats.refetch()}>Загрузить чаты</Button>
-        <MultiSelect label="Разрешённые чаты" description="До 30 чатов. Новые сообщения отслеживаются с момента выбора." searchable value={chatIds} onChange={setChatIds} data={(chats.data ?? data.telegram.chat_ids.map((id) => ({ id, title: String(id) }))).map((chat) => ({ value: String(chat.id), label: chat.title }))} />
-        <Group><Button variant="light" disabled={mutation.isPending || !chats.data} onClick={() => run('telegram/chats', { chat_ids: chatIds.map(Number) })}>Сохранить выбор</Button><Button variant="light" loading={mutation.isPending || data.analyzing} onClick={() => run('telegram/analyze')}>Проанализировать последние сообщения</Button></Group>
-        <Text size="xs" c="dimmed">Ручной анализ: до 50 последних сообщений за 7 дней в каждом выбранном чате. Повторно обработанные сообщения пропускаются.</Text>
+        <MultiSelect label="Разрешённые чаты" searchable value={chatIds} onChange={setChatIds} data={(chats.data ?? data.telegram.chat_ids.map((id) => ({ id, title: String(id) }))).map((chat) => ({ value: String(chat.id), label: chat.title }))} />
+        <Group><Button variant="light" disabled={mutation.isPending || !chats.data} onClick={() => run('telegram/chats', { chat_ids: chatIds.map(Number) })}>Сохранить выбор</Button></Group>
         <Button color="red" variant="subtle" disabled={mutation.isPending} onClick={() => { if (window.confirm('Отключить Telegram?')) run('telegram/disconnect'); }}>Отключить аккаунт</Button>
         <ConnectionInfo value={data.telegram} />
-      </Stack></Paper>}
-      {features.gemini !== false && <Paper withBorder p="md"><Stack gap="sm">
-        <Title order={3}>Gemini</Title>
-        <TextInput label="Адрес Gemini API" value={gemini.base_url} onChange={field(setGemini, 'base_url')} />
-        <PasswordInput label="API-ключ" placeholder={data.gemini.configured.api_key ? 'Сохранён' : ''} value={gemini.api_key} onChange={field(setGemini, 'api_key')} />
-        <ModelPicker path="/integrations/gemini/models" endpoint={gemini.base_url} apiKey={gemini.api_key} configured={data.gemini.configured.api_key} value={gemini.model} onChange={(model) => setGemini((current) => ({ ...current, model }))} />
-        <TextInput label="Часовой пояс" placeholder="Europe/Moscow" value={gemini.timezone} onChange={field(setGemini, 'timezone')} />
-        <Textarea label="Обо мне" placeholder="Имя, группа, мои поручения" value={gemini.owner_context} onChange={field(setGemini, 'owner_context')} />
-        <NumberInput label="Интервал обработки, секунд" min={30} max={86400} value={gemini.interval_seconds} onChange={(value) => setGemini({ ...gemini, interval_seconds: value })} />
-        <NumberInput label="Порог уверенности автосоздания" min={0.5} max={1} step={0.05} decimalScale={2} value={gemini.confidence_threshold} onChange={(value) => setGemini({ ...gemini, confidence_threshold: value })} />
-        <Switch label="Разрешить анализ сообщений" checked={gemini.enabled} onChange={toggle(setGemini, 'enabled')} />
-        <Group><Button loading={saving('gemini')} disabled={mutation.isPending} onClick={() => save('gemini', gemini)}>Сохранить</Button><Button variant="default" disabled={mutation.isPending} onClick={() => run('gemini/check')}>Проверить подключение</Button><Button variant="subtle" color="red" disabled={mutation.isPending} onClick={() => run('gemini', { api_key: null, enabled: false }, 'PATCH')}>Удалить ключ</Button></Group>
-        <ConnectionInfo value={data.gemini} />
       </Stack></Paper>}
       {features.codex !== false && <Paper withBorder p="md"><Stack gap="sm">
         <Group justify="space-between"><Title order={3}>Codex</Title><Badge color={codexState.data?.authorized ? 'green' : 'gray'}>{codexState.data?.authorized ? 'Вход выполнен' : 'Нет авторизации'}</Badge></Group>

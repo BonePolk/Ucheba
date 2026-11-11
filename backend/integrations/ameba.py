@@ -62,7 +62,7 @@ def task_state(session):
                                  task['deadline'].isoformat() if task['deadline'] else '9999', task['id']))
     from agent_memory import read as read_facts
     calendar = read_calendar()
-    signature = json.dumps({'version': 28, 'tasks': state, 'calendar': {'events': sorted(calendar['events'], key=lambda event: event['id']), 'timezone': calendar['timezone']},
+    signature = json.dumps({'version': 29, 'tasks': state, 'calendar': {'events': sorted(calendar['events'], key=lambda event: event['id']), 'timezone': calendar['timezone']},
         'facts': sorted(({'key': fact['key'], 'text': fact['text']} for fact in read_facts() if fact['agent'] in ('Владелец', 'user')), key=lambda fact: fact['key']),
         'feedback': plan_feedback(),
         'provider': {key: read_config('ameba')[key] for key in ('model', 'base_url')}}, sort_keys=True)
@@ -126,13 +126,6 @@ def ranking_status():
 
 
 async def request_ranking(tasks, task_id=0, checked_contexts=()):
-    # Старый вариант через локальную Jeba сохранён для возврата к нему.
-    # Чтобы включить его, раскомментируй этот return и отключи код Monocle ниже.
-    # return await call('jev', '/rank', {
-    #     'tasks': [{key: task[key] for key in ('id', 'ranking_summary', 'deadline', 'priority')}
-    #               for task in tasks],
-    #     'now': datetime.now(timezone.utc).isoformat(), 'task_id': task_id,
-    # }, timeout=None)
     config, secrets = read_settings('ameba')
     if not config['enabled'] or not secrets.get('api_key'):
         raise HTTPException(400, 'Включите Ameba и сохраните её API-ключ в профиле')
@@ -175,7 +168,7 @@ async def rank_all(force=False, task_id=0):
                 return json.loads(saved.result)
         checked_contexts = set()
         while ready:
-            async with scheduler.slot('jev', task_id):
+            async with scheduler.slot('ameba', task_id):
                 # Пока ждали браузер, задачи и контекст могли измениться.
                 with Session(get_engine()) as session:
                     signature, ready, waiting = task_state(session)
@@ -210,7 +203,7 @@ async def rank_all(force=False, task_id=0):
             session.add(saved)
             for task_id in ids:
                 task = session.get(Task, task_id)
-                task.ai_details = json.dumps({'version': 28, 'status': 'ranked'})
+                task.ai_details = json.dumps({'version': 29, 'status': 'ranked'})
                 task.ai_scored_at = datetime.now(timezone.utc)
                 session.add(task)
             session.commit()
@@ -222,7 +215,7 @@ async def rank_all(force=False, task_id=0):
 
 async def evaluate(task_id=None):
     if task_id is None:
-        async with scheduler.slot('jev'):
+        async with scheduler.slot('ameba'):
             return await check_model()
     return await evaluate_task(task_id)
 
@@ -255,7 +248,7 @@ async def evaluate_task(task_id):
     # Monocle мог уточнить поля задачи. Дальше сравниваем уже с её результатом.
     original = context['task_snapshot']
     if context['status'] != 'ready':
-        metrics = {'version': 28, 'status': 'needs_context', 'reason': ' '.join(context['questions'])}
+        metrics = {'version': 29, 'status': 'needs_context', 'reason': ' '.join(context['questions'])}
         with Session(get_engine()) as session:
             task = session.get(Task, task_id)
             if not task:
@@ -270,4 +263,4 @@ async def evaluate_task(task_id):
     result = await rank_all(task_id=task_id)
     ids = result['task_ids']
     return result | {'rank': ids.index(task_id) + 1 if task_id in ids else None,
-                     'metrics': {'status': 'ranked', 'version': 28}}
+                     'metrics': {'status': 'ranked', 'version': 29}}

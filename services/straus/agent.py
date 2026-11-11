@@ -1,3 +1,4 @@
+from common.agent_questions import QUESTION_TOOL, QUESTION_INSTRUCTION, ask_user
 from common.agent_api import stream_model_response
 from common.browser_tools import BROWSER_TOOLS, BROWSER_NAMES, VISUAL_ACTIONS, run_browser_tool
 from common.agent_issues import ISSUE_TOOL, ISSUE_INSTRUCTION, report_problem
@@ -50,7 +51,7 @@ def tool(name, description, properties, required=None):
                            'additionalProperties': False}}
 
 
-TOOLS = [
+TOOLS = [QUESTION_TOOL,
     NOTE_TOOL, ISSUE_TOOL, *MEMORY_TOOLS, *FILE_TOOLS, *BROWSER_TOOLS,
     tool('calendar_finish', 'Завершить поручение. changed — только если рабочая копия реально изменена; unchanged — уже всё соответствует просьбе; blocked — не хватает данных или доступа. Обязательно объясни причину. При blocked черновик не сохраняется.',
          {'status': {'type': 'string', 'enum': ['changed', 'unchanged', 'blocked']},
@@ -65,7 +66,7 @@ TOOLS = [
          {'timezone': {'type': 'string'}}, ['timezone']),
 ]
 
-INSTRUCTIONS = ISSUE_INSTRUCTION + MEMORY_INSTRUCTION + FILE_INSTRUCTION + NOTE_INSTRUCTION + """
+INSTRUCTIONS = QUESTION_INSTRUCTION + ISSUE_INSTRUCTION + MEMORY_INSTRUCTION + FILE_INSTRUCTION + NOTE_INSTRUCTION + """
 Ты Straus, агент редактирования календаря по поручению владельца. Отвечай по-русски.
 Измени только то, что попросил владелец. Самостоятельно составлять план дня, сортировать
 или распределять все задачи не нужно. Для чтения и изменений используй инструменты,
@@ -195,7 +196,9 @@ async def run(body):
                     extra_content = []
                     try:
                         args = json.loads(call.arguments)
-                        if call.name == 'calendar_finish':
+                        if call.name == 'ask_user':
+                            output = await ask_user(call.arguments, progress)
+                        elif call.name == 'calendar_finish':
                             status = args.get('status')
                             reason = args.get('reason')
                             if status not in ('changed', 'unchanged', 'blocked') or not isinstance(reason, str) or not reason.strip() or len(reason) > 1000:

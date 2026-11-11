@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from openai import AsyncOpenAI, APIConnectionError, APIStatusError
 
 
+MODEL_FIRST_DATA_TIMEOUT = 180
 MODEL_IDLE_TIMEOUT = 30
 
 
@@ -39,13 +40,14 @@ def agent_routes(app, label):
 
 
 async def stream_model_response(client, progress, **arguments):
-    """Один повтор при сетевом сбое или 30 сек без данных. Tools — после полного ответа."""
+    """Первые данные — до 3 минут, паузы потока — до 30с. Один повтор при сбое."""
     retryable = (APIConnectionError, httpx.TransportError, TimeoutError)
     for attempt in range(2):
+        received_data = False
         try:
             # Счётчик включает открытие соединения. Служебные created/in_progress
             # не продлевают ожидание: нужны новые данные ответа или вызова инструмента.
-            async with asyncio.timeout(MODEL_IDLE_TIMEOUT) as idle:
+            async with asyncio.timeout(MODEL_FIRST_DATA_TIMEOUT) as idle:
                 async with client.responses.stream(**arguments) as stream:
                     async for event in stream:
                         progress.model_event(event)
@@ -54,6 +56,7 @@ async def stream_model_response(client, progress, **arguments):
                             idle.reschedule(None)
                             break
                         if event.type.endswith('.delta') and getattr(event, 'delta', None):
+                            received_data = True
                             idle.reschedule(asyncio.get_running_loop().time() + MODEL_IDLE_TIMEOUT)
                     else:
                         response = await stream.get_final_response()
@@ -63,11 +66,15 @@ async def stream_model_response(client, progress, **arguments):
             transient = isinstance(exc, retryable) or getattr(exc, 'status_code', None) in (502, 503, 504)
             if not transient:
                 raise
+            timeout_reason = ('Модель не передавала новые данные 30 секунд' if received_data
+                              else 'Модель не начала ответ за 3 минуты')
             if attempt:
-                raise HTTPException(502, 'Соединение с моделью не восстановилось после повторной попытки. Поручение не завершено.') from None
+                detail = (timeout_reason + ' после повторной попытки. Поручение не завершено.'
+                          if isinstance(exc, TimeoutError) else 'Соединение с моделью не восстановилось после повторной попытки. Поручение не завершено.')
+                raise HTTPException(502, detail) from None
             logging.getLogger('uvicorn.error').warning('model stream retry: %s', type(exc).__name__)
             progress.update(model_waiting=False)
-            progress.add('Модель не передавала данные 30 секунд; повторяет текущий запрос'
+            progress.add(timeout_reason + '; повторяет текущий запрос'
                          if isinstance(exc, TimeoutError) else 'Соединение с моделью оборвалось; повторяет текущий запрос')
             await asyncio.sleep(0.5)
             progress.begin_response()

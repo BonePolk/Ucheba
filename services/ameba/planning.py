@@ -1,6 +1,6 @@
 """Инструмент Ameba: складывает оценки этапов, саму работу не выполняет."""
 from typing import Literal
-from datetime import datetime, timedelta, timezone, time
+from datetime import date as calendar_date, datetime, timedelta, timezone, time
 from zoneinfo import ZoneInfo
 from common.schedule import slots_for_date
 
@@ -104,6 +104,8 @@ def weekly_timeline(order, plans, week, now, previous=None):
                 target = origin + timedelta(minutes=block['start'])
                 if target >= start:
                     preferred.setdefault(block['task_id'], target)
+    reserved = {slot['task_id'] for slots in week.get('day_plans', {}).values() for slot in slots if slot.get('task_id') is not None}
+    last_reserved_date = {task_id: max(date for date, slots in week.get('day_plans', {}).items() if any(slot.get('task_id') == task_id for slot in slots)) for task_id in reserved}
     parts = {}
     streak = 0
 
@@ -122,7 +124,7 @@ def weekly_timeline(order, plans, week, now, previous=None):
     for offset in range(366):
         date = day + timedelta(days=offset)
         midnight = datetime.combine(date, time(), zone)
-        slots = slots_for_date(week, date)
+        slots = day_slots(week, date)
         slots = slots + [{'start': '24:00', 'end': '24:00', 'kind': 'personal', 'title': ''}]
         for slot in slots:
             def at(value):
@@ -143,8 +145,12 @@ def weekly_timeline(order, plans, week, now, previous=None):
                 if available <= 0:
                     cursor = right
                     break
-                task_id = todo[0]
-                target = preferred.pop(task_id, None)
+                task_id = slot.get('task_id')
+                if task_id is None:
+                    task_id = next((value for value in todo if value not in reserved), None)
+                if task_id not in todo:
+                    break  # Именное окно не заполняем другой задачей.
+                target = preferred.pop(task_id, None) if slot.get('task_id') is None else None
                 if target and target > cursor:
                     cursor = min(target, right)
                     streak = 0
@@ -170,10 +176,14 @@ def weekly_timeline(order, plans, week, now, previous=None):
                 streak += focus + amount
                 remaining[task_id] -= amount
                 if remaining[task_id] == 0:
-                    todo.pop(0)
+                    todo.remove(task_id)
         if not todo:
             return blocks
-    raise ValueError('В расписании недостаточно рабочего времени на ближайший год')
+        exhausted = {task_id: remaining[task_id] for task_id in todo
+                     if task_id in reserved and date.isoformat() >= last_reserved_date[task_id]}
+        if exhausted:
+            raise ValueError('В именных окнах не хватает полезных минут (ID: остаток): ' + str(exhausted) + '. Расширь/добавь окна через plan_day; концентрация и перерывы тоже занимают время')
+    raise ValueError('Не хватает рабочих окон. Осталось полезной работы (ID: минуты): ' + str({task_id: remaining[task_id] for task_id in todo}))
 
 
 def validate_blocks(blocks, week=None, now=None):
@@ -191,7 +201,7 @@ def validate_blocks(blocks, week=None, now=None):
         day = left.astimezone(zone).date()
         while day <= right.astimezone(zone).date():
             midnight = datetime.combine(day, time(), zone)
-            for slot in slots_for_date(week, day):
+            for slot in day_slots(week, day):
                 if slot['kind'] == 'work':
                     continue
                 hour, minute = map(int, slot['start'].split(':'))
@@ -346,13 +356,16 @@ def with_rest(week, now, arguments=None, timezone_name='UTC'):
     configured = deepcopy(week) if week else default_week()
     if not week:
         configured['timezone'] = timezone_name
+        for slots in configured['days']:
+            for slot in slots:
+                slot['temporary'] = True
     # Если владелец задал только занятия/занятость, рабочие окна — допущение плана.
     has_work = any(slot['kind'] == 'work' for day in configured['days'] for slot in day)
     has_work = has_work or any(event['kind'] == 'work' for event in configured.get('calendar_events', []))
     if not has_work:
         work = [slot for slot in default_week()['days'][0] if slot['kind'] == 'work']
         for day in configured['days']:
-            day.extend(deepcopy(work))
+            day.extend(dict(slot, temporary=True) for slot in work)
     if arguments is None:
         return configured
     body = RestPlan.model_validate_json(arguments)
@@ -372,9 +385,79 @@ def with_rest(week, now, arguments=None, timezone_name='UTC'):
     start = datetime.fromisoformat(now).astimezone(ZoneInfo(configured['timezone'])).date()
     for offset in range(366):
         date = start + timedelta(days=offset)
-        occupied = [slot for slot in slots_for_date(configured, date) if slot['kind'] != 'work']
+        occupied = [slot for slot in day_slots(configured, date) if slot['kind'] != 'work']
         for index, slot in enumerate(occupied):
             for other in occupied[:index]:
                 if slot['start'] < other['end'] and slot['end'] > other['start'] and (slot.get('temporary') or other.get('temporary')):
                     raise ValueError(f'Временный отдых пересекается с другим событием {date.isoformat()}. Постоянное событие нельзя менять')
     return configured
+
+
+class DaySlot(BaseModel):
+    model_config = {'extra': 'forbid'}
+    kind: Literal['work', 'task', 'sleep', 'meal', 'break']
+    title: str = Field(min_length=1, max_length=150)
+    start: str = Field(pattern=r'^(?:[01]\d|2[0-3]):[0-5]\d$')
+    end: str = Field(pattern=r'^(?:(?:[01]\d|2[0-3]):[0-5]\d|24:00)$')
+    task_id: int | None = Field(description='ID задачи только для kind=task; для остальных null')
+
+
+class DayPlan(BaseModel):
+    model_config = {'extra': 'forbid'}
+    date: str = Field(pattern=r'^\d{4}-\d{2}-\d{2}$')
+    slots: list[DaySlot] = Field(max_length=48, description='Полный временный план конкретной даты: работа, сон, еда, отдых и именные окна задач. Пустой список отменяет настройку этого дня.')
+    reason: str = Field(min_length=1, max_length=500)
+
+
+DAY_TOOL = {'type': 'function', 'name': 'plan_day', 'strict': True,
+    'description': 'Настроить или пересобрать одну конкретную дату. Можно задать свой сон/еду, расширить рабочие окна перед дедлайном и выделить разным задачам разные часы. task — именное рабочее окно с учётом концентрации; одна задача может иметь окна в разные дни. Постоянные события не меняются. После изменений вызови reorder_tasks.',
+    'parameters': DayPlan.model_json_schema()}
+
+
+def day_slots(week, day):
+    override = week.get('day_plans', {}).get(day.isoformat())
+    if override is None:
+        return slots_for_date(week, day)
+    # Постоянная занятость остаётся, а временные правила этого дня заменяются.
+    daily = dict(week, days=list(week['days']),
+                 calendar_events=[event for event in week.get('calendar_events', []) if event['kind'] != 'work'])
+    daily['days'][day.weekday()] = [slot for slot in week['days'][day.weekday()]
+                                  if not slot.get('temporary') and slot['kind'] != 'work'] + override
+    return slots_for_date(daily, day)
+
+
+def plan_day(arguments, week, expected, now):
+    from copy import deepcopy
+    body = DayPlan.model_validate_json(arguments)
+    day = calendar_date.fromisoformat(body.date)
+    today = datetime.fromisoformat(now).astimezone(ZoneInfo(week['timezone'])).date()
+    if not 0 <= (day - today).days <= 365:
+        raise ValueError('Выбери дату от сегодня до года вперёд')
+    configured = deepcopy(week)
+    overrides = configured.setdefault('day_plans', {})
+    if not body.slots:
+        overrides.pop(body.date, None)
+        return configured, {'date': body.date, 'status': 'reset'}
+    slots = []
+    for item in body.slots:
+        if item.end <= item.start:
+            raise ValueError('Нужен end > start; сон через полночь раздели на два дня')
+        if (item.kind == 'task' and item.task_id not in expected) or (item.kind != 'task' and item.task_id is not None):
+            raise ValueError('Для task укажи ID из задач, для остальных task_id=null')
+        if any(item.start < slot['end'] and item.end > slot['start'] for slot in slots):
+            raise ValueError('Интервалы временного дня не должны пересекаться')
+        slots.append(item.model_dump() | {'kind': 'work' if item.kind == 'task' else item.kind, 'temporary': True})
+    overrides[body.date] = slots
+    effective = day_slots(configured, day)
+    occupied = [slot for slot in effective if slot['kind'] != 'work']
+    for index, slot in enumerate(occupied):
+        for other in occupied[:index]:
+            if slot['start'] < other['end'] and slot['end'] > other['start'] and (slot.get('temporary') or other.get('temporary')):
+                raise ValueError('Сон/еда/отдых пересекаются с постоянной занятостью или друг с другом')
+    if not {'sleep', 'meal'} <= {slot['kind'] for slot in occupied}:
+        raise ValueError('В полном плане дня должны быть сон и еда с учётом постоянного календаря')
+    work = [slot for slot in effective if slot['kind'] == 'work']
+    work_minutes = sum((int(slot['end'][:2]) * 60 + int(slot['end'][3:]))
+                       - (int(slot['start'][:2]) * 60 + int(slot['start'][3:])) for slot in work)
+    return configured, {'date': body.date, 'work_minutes': work_minutes, 'work_windows': work,
+                        'notice': 'План дня сохранён временно. Теперь пересчитай reorder_tasks и проверь дедлайны.'}

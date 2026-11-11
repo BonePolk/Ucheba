@@ -10,7 +10,7 @@ from common.identity import current_user_id, user_id
 from common.models.user import Feature, User
 
 passwords = PasswordHash.recommended()
-FEATURES = {'telegram', 'gemini', 'codex', 'jev', 'context', 'ameba', 'straus', 'collector', 'notifications', 'registration'}
+FEATURES = {'telegram', 'codex', 'context', 'ameba', 'straus', 'collector', 'notifications', 'registration'}
 
 
 def bootstrap():
@@ -57,7 +57,8 @@ def public_user(row):
 def features():
     with Session(engine) as session:
         saved = {item.name: item.enabled for item in session.exec(select(Feature)).all()}
-    previous_names = {'ameba': 'jev', 'straus': 'context'}
+    # Отключённый старый Jev не должен отключать самостоятельную Ameba.
+    previous_names = {'straus': 'context'}
     return {name: saved.get(name, saved.get(previous_names.get(name, ''), True)) for name in sorted(FEATURES)}
 
 

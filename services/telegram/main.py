@@ -12,23 +12,19 @@ import pipeline
 
 
 async def monitor():
-    next_analysis = 0
+    next_connection = 0
     while True:
         try:
-            config, secret = read_settings('telegram')
-            gemini, _ = read_settings('gemini')
+            _, secret = read_settings('telegram')
             now = asyncio.get_running_loop().time()
-            if secret.get('session') and not client.state().connected and now >= next_analysis:
-                next_analysis = now + 60
+            if secret.get('session') and not client.state().connected and now >= next_connection:
+                next_connection = now + 60
                 await client.get_client()
                 if not client.state().connected:
                     report('telegram', error='Авторизация Telegram истекла. Подключите аккаунт заново.')
-            if config['enabled'] and gemini['enabled'] and client.state().connected and now >= next_analysis:
-                next_analysis = now + gemini['interval_seconds']
-                await pipeline.process_messages()
         except Exception:
-            next_analysis = asyncio.get_running_loop().time() + 60
-            report('telegram', error='Проверьте авторизацию Telegram, Gemini и соединение')
+            next_connection = asyncio.get_running_loop().time() + 60
+            report('telegram', error='Проверьте авторизацию Telegram и соединение')
         await asyncio.sleep(5)
 
 
@@ -103,8 +99,3 @@ async def chats():
 async def select_chats(body: dict):
     await pipeline.select_chats(body['chat_ids'])
     return {'ok': True}
-
-
-@app.post('/analyze')
-async def analyze():
-    return await pipeline.process_messages(manual=True)

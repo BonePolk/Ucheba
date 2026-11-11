@@ -85,33 +85,6 @@ services:
         - action: rebuild
           path: ./services/telegram/Dockerfile
 
-  gemini:
-    build:
-      context: .
-      dockerfile: services/gemini/Dockerfile
-    healthcheck: *health
-    environment:
-      INTERNAL_SECRET: ${INTEGRATION_ENCRYPTION_KEY:-}
-    depends_on:
-      backend:
-        condition: service_healthy
-    develop:
-      watch:
-        - action: sync+restart
-          path: ./services/gemini
-          target: /app
-          ignore: [Dockerfile, requirements.txt, __pycache__]
-        - action: sync+restart
-          path: ./common
-          target: /app/common
-          ignore: [requirements.txt, __pycache__]
-        - action: rebuild
-          path: ./services/gemini/requirements.txt
-        - action: rebuild
-          path: ./common/requirements.txt
-        - action: rebuild
-          path: ./services/gemini/Dockerfile
-
   codex:
     build:
       context: .
@@ -141,35 +114,6 @@ services:
           path: ./common/requirements.txt
         - action: rebuild
           path: ./services/codex/Dockerfile
-
-  jev:
-    build:
-      context: .
-      dockerfile: services/jev/Dockerfile
-    healthcheck: *health
-    environment:
-      INTERNAL_SECRET: ${INTEGRATION_ENCRYPTION_KEY:-}
-    volumes:
-      - jev-models:/models
-    depends_on:
-      backend:
-        condition: service_healthy
-    develop:
-      watch:
-        - action: sync+restart
-          path: ./services/jev
-          target: /app
-          ignore: [Dockerfile, requirements.txt, __pycache__]
-        - action: sync+restart
-          path: ./common
-          target: /app/common
-          ignore: [requirements.txt, __pycache__]
-        - action: rebuild
-          path: ./services/jev/requirements.txt
-        - action: rebuild
-          path: ./common/requirements.txt
-        - action: rebuild
-          path: ./services/jev/Dockerfile
 
   lucheba:
     build:

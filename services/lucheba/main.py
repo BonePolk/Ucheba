@@ -1,3 +1,4 @@
+from common.agent_questions import QUESTION_TOOL, QUESTION_INSTRUCTION, ask_user
 from common.agent_api import stream_model_response
 from common.browser_tools import BROWSER_TOOLS, BROWSER_NAMES, VISUAL_ACTIONS, run_browser_tool
 from common.agent_issues import ISSUE_TOOL, ISSUE_INSTRUCTION, report_problem
@@ -319,7 +320,7 @@ async def run_agent(client, memory, task_id, body, progress):
         progress.begin_response()
         response = await stream_model_response(client, progress,
             model=model, reasoning={'effort': 'medium', 'summary': 'auto'}, max_output_tokens=8000,
-            instructions=ISSUE_INSTRUCTION + MEMORY_INSTRUCTION + FILE_INSTRUCTION + NOTE_INSTRUCTION + (
+            instructions=QUESTION_INSTRUCTION + ISSUE_INSTRUCTION + MEMORY_INSTRUCTION + FILE_INSTRUCTION + NOTE_INSTRUCTION + (
                 'Если передан review_request, Ameba просит перепроверить конкретные факты для приоритизации. '
                 'Используй previous_context как прошлую оценку, проверь причину запроса и обнови полный контекст. '
                 'Текущая дата и состояние дедлайна переданы в current_clock: используй их, а не даты старых проверок. '
@@ -403,7 +404,7 @@ async def run_agent(client, memory, task_id, body, progress):
                 'При подтверждённой CAPTCHA/2FA используй browser_wait_for_user с понятной просьбой в message. '
                 'После возвращения управления прочитай страницу заново и продолжи работу. '
                 'Итог — только JSON с полями status, summary, time_estimate, effort, impact, full_markdown, questions и task_update. Не оборачивай JSON в Markdown; Markdown используй только внутри full_markdown.'),
-            input=messages, tools=TOOLS + BROWSER_TOOLS + FILE_TOOLS + MEMORY_TOOLS + [NOTE_TOOL, ISSUE_TOOL],
+            input=messages, tools=[QUESTION_TOOL] + TOOLS + BROWSER_TOOLS + FILE_TOOLS + MEMORY_TOOLS + [NOTE_TOOL, ISSUE_TOOL],
             text={'format': {
                 'type': 'json_schema', 'name': 'context_result', 'strict': True,
                 'schema': ContextResult.model_json_schema() | {'additionalProperties': False},
@@ -459,11 +460,13 @@ async def run_agent(client, memory, task_id, body, progress):
         messages.extend(response.output)
         extra_content = []
         for call in calls:
-            if call.name != 'agent_note' and call.name not in BROWSER_NAMES:
+            if call.name not in ('agent_note', 'ask_user') and call.name not in BROWSER_NAMES:
                 progress.add(TOOL_MESSAGES.get(call.name, 'Проверяет запрошенный инструмент'), description='Собирает сведения, влияющие на сроки, объём работы и последствия задачи.')
             try:
                 args = json.loads(call.arguments)
-                if call.name == 'agent_note':
+                if call.name == 'ask_user':
+                    output = await ask_user(call.arguments, progress)
+                elif call.name == 'agent_note':
                     output = progress.note(call.arguments)
                 elif call.name == 'report_tool_problem':
                     progress.add('Сообщает администратору о технической проблеме', description='Передаёт категорию сбоя для диагностики; само поручение этим не завершается.')

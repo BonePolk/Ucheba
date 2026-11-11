@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 from urllib.parse import quote
 from typing import Literal
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
@@ -19,7 +18,7 @@ from common.rpc import call, internal_token
 from common.security import require_user
 from common.identity import user_id
 from common.accounts import check_feature, features
-from integrations import codex, gemini, jev, telegram, context, jobs, scheduler
+from integrations import ameba, codex, telegram, context, jobs, scheduler
 from common import extraction as pipeline
 from common.settings import read_config, SECRET_FIELDS, public_settings, read_settings, report, save_settings
 from common.models.integration import CodexRun, Suggestion
@@ -80,6 +79,18 @@ async def agent_models(name: Literal['context', 'ameba', 'straus'], request: Req
     return await call(name, '/models', {'api_key': key, 'base_url': endpoint}, timeout=45)
 
 
+class AgentAnswer(BaseModel):
+    text: str = Field(min_length=1, max_length=12000)
+
+
+@router.post('/agents/{name}/questions/{question_id}/answer')
+async def answer_agent(name: Literal['context', 'ameba', 'straus'], question_id: str, body: AgentAnswer):
+    check_feature(name)
+    if len(question_id) != 32 or any(char not in '0123456789abcdef' for char in question_id):
+        raise HTTPException(422, 'Некорректный вопрос')
+    return await call(name, f'/questions/{question_id}/answer', body.model_dump(), timeout=15)
+
+
 @router.get('/queue')
 async def agent_queue():
     state = scheduler.queue_state()
@@ -88,7 +99,7 @@ async def agent_queue():
         for group in ('active', 'waiting'):
             entries = []
             for item in state[group]:
-                feature = 'ameba' if item['provider'] == 'jev' else 'straus' if item['provider'] == 'context' and not item['task_id'] else item['provider']
+                feature = 'ameba' if item['provider'] == 'ameba' else 'straus' if item['provider'] == 'context' and not item['task_id'] else item['provider']
                 if not enabled.get(feature, False):
                     continue
                 task = session.get(Task, item['task_id']) if item['task_id'] else None
@@ -107,7 +118,7 @@ async def agent_progress(task_id: int = 0, providers: str = 'context,codex'):
     enabled = features()
     allowed = {'context': enabled['context'] or (task_id == 0 and enabled['straus']),
                'monocle': enabled['context'], 'straus': task_id == 0 and enabled['straus'],
-               'jev': enabled['ameba'], 'codex': enabled['codex']}
+               'ameba': enabled['ameba'], 'codex': enabled['codex']}
     names = [name for name in allowed if name in providers.split(',') and allowed[name]]
 
     async def read(name):
@@ -129,8 +140,8 @@ async def agent_progress(task_id: int = 0, providers: str = 'context,codex'):
                 result = max(runs, key=lambda run: (run['status'] == 'running', run['started_at'])) if runs else None
                 available = any(not isinstance(run, Exception) for run in results)
             else:
-                service = 'ameba' if name == 'jev' else name
-                path = '/ranking/progress' if name == 'jev' else '/progress'
+                service = name
+                path = '/ranking/progress' if name == 'ameba' else '/progress'
                 result = await call(service, f'{path}?task_id={task_id}', method='GET', timeout=2)
                 available = True
             return {'provider': name, 'run': result, 'available': available, 'queued': queued}
@@ -158,8 +169,8 @@ async def agent_progress_stream(task_id: int = 0, providers: str = 'context,code
             sources.append(('context', 'context', 'agent', task_id == 0))
         if task_id == 0 and enabled['straus']:
             sources.append(('context', 'straus', 'agent', False))
-    if 'jev' in requested and enabled['ameba']:
-        sources.append(('jev', 'ameba', 'ranking', task_id == 0))
+    if 'ameba' in requested and enabled['ameba']:
+        sources.append(('ameba', 'ameba', 'ranking', task_id == 0))
     if 'codex' in requested and enabled['codex']:
         sources.append(('codex', 'codex', 'agent', False))
 
@@ -226,24 +237,9 @@ class ProviderConfig(BaseModel):
         return provider_url(value)
 
 
-class GeminiConfig(ProviderConfig):
-    base_url: str = 'https://generativelanguage.googleapis.com'
-    enabled: bool = False
-    model: str = Field(default='gemini-3.8-flash', min_length=1, max_length=100)
-    interval_seconds: int = Field(default=300, ge=30, le=86400)
-    confidence_threshold: float = Field(default=0.9, ge=0.5, le=1)
-    timezone: str = 'UTC'
-    owner_context: str = Field(default='', max_length=2000)
-
-
 class CodexConfig(BaseModel):
     enabled: bool = False
     auto_prepare: bool = False
-
-
-class JebaConfig(BaseModel):
-    enabled: bool = False
-    account_id: str = Field(default='', pattern=r'^(|[a-fA-F0-9]{32})$')
 
 
 class NotificationsConfig(BaseModel):
@@ -267,7 +263,7 @@ class AgentConfig(ProviderConfig):
     model: str = Field(default='gpt-6-luna', min_length=1, max_length=200)
 
 
-CONFIG_MODELS = {'context': ContextConfig, 'ameba': AgentConfig, 'straus': AgentConfig, 'notifications': NotificationsConfig, 'collector': CollectorConfig, 'telegram': TelegramConfig, 'gemini': GeminiConfig, 'codex': CodexConfig, 'jev': JebaConfig}
+CONFIG_MODELS = {'context': ContextConfig, 'ameba': AgentConfig, 'straus': AgentConfig, 'notifications': NotificationsConfig, 'collector': CollectorConfig, 'telegram': TelegramConfig, 'codex': CodexConfig}
 
 
 @router.get('')
@@ -280,23 +276,21 @@ async def settings():
 
 
 @router.patch('/{name}')
-async def configure(name: Literal['telegram', 'gemini', 'codex', 'jev', 'collector', 'notifications', 'context', 'ameba', 'straus'], body: dict):
+async def configure(name: Literal['telegram', 'codex', 'collector', 'notifications', 'context', 'ameba', 'straus'], body: dict):
     if body.get('enabled'):
         check_feature(name)
     allowed = set(CONFIG_MODELS[name].model_fields) | (SECRET_FIELDS[name] - {'session'})
     if set(body) - allowed:
         raise HTTPException(422, 'Неизвестное поле настроек')
-    current, _ = read_settings(name)
+    current, _ = read_settings(name, apply_feature=False)
     try:
         fields = {key: value for key, value in body.items() if key in CONFIG_MODELS[name].model_fields}
         config = CONFIG_MODELS[name].model_validate({**current, **fields}).model_dump()
         if name == 'notifications' and config['enabled'] and not config['owner_id']:
             raise ValueError('owner_id')
-        if name == 'gemini':
-            ZoneInfo(config['timezone'])
         if name == 'telegram' and body.get('api_id') and (not str(body['api_id']).isdecimal() or not 0 < int(body['api_id']) < 2**31):
             raise ValueError('api_id')
-    except (ValidationError, ZoneInfoNotFoundError, ValueError):
+    except (ValidationError, ValueError):
         raise HTTPException(422, 'Проверьте настройки, часовой пояс и числовые значения') from None
     if name in ('collector', 'notifications') and body.get('bot_token'):
         other = 'collector' if name == 'notifications' else 'notifications'
@@ -353,31 +347,6 @@ async def telegram_select(body: ChatSelection):
     return {'ok': True}
 
 
-@router.post('/telegram/analyze')
-async def telegram_analyze():
-    return await provider_call('gemini', call('telegram', '/analyze', timeout=300))
-
-
-@router.api_route('/gemini/models', methods=['GET', 'POST'])
-async def gemini_models(request: Request):
-    config, secrets = read_settings('gemini')
-    body = await request.json() if request.method == 'POST' else {}
-    try:
-        config['base_url'] = provider_url(body.get('base_url') or config['base_url'])
-    except ValueError:
-        raise HTTPException(422, 'Проверьте endpoint Gemini') from None
-    if body.get('api_key'):
-        secrets['api_key'] = body['api_key']
-    return await call('gemini', '/models', {'config': config, 'secrets': secrets}, timeout=45)
-
-
-@router.post('/gemini/check')
-async def gemini_check():
-    await provider_call('gemini', gemini.analyze([{'id': 1, 'text': 'Проверка связи, задач нет'}], [], [], 'Проверка', {}))
-    report('gemini', success=True)
-    return {'ok': True}
-
-
 @router.get('/codex/status')
 async def codex_status():
     return await provider_call('codex', codex.status())
@@ -399,36 +368,36 @@ async def codex_check():
     return await provider_call('codex', codex.check())
 
 
-@router.post('/jev/check')
-async def jev_check(background: bool = False):
+@router.post('/ameba/check')
+async def ameba_check(background: bool = False):
     if background:
-        return jobs.start(lambda: provider_call('ameba', jev.evaluate()))
-    return await provider_call('ameba', jev.evaluate())
+        return jobs.start(lambda: provider_call('ameba', ameba.evaluate()))
+    return await provider_call('ameba', ameba.evaluate())
 
 
-@router.get('/jev/ranking')
-def jev_ranking():
+@router.get('/ameba/ranking')
+def ameba_ranking():
     check_feature('ameba')
-    return jev.ranking_status()
+    return ameba.ranking_status()
 
 
 class RankingRequest(BaseModel):
     feedback: str | None = Field(default=None, max_length=4000)
 
 
-@router.post('/jev/rank')
-async def jev_rank(background: bool = False, body: RankingRequest | None = None):
+@router.post('/ameba/rank')
+async def ameba_rank(background: bool = False, body: RankingRequest | None = None):
     check_feature('ameba')
     if not read_config('ameba')['enabled']:
         raise HTTPException(400, 'Включите Ameba в настройках')
     if body is not None and body.feedback is not None:
-        jev.save_plan_feedback(body.feedback)
+        ameba.save_plan_feedback(body.feedback)
     with Session(get_engine()) as session:
-        signature = jev.task_state(session)[0]
+        signature = ameba.task_state(session)[0]
     current = scheduler.ranking_requests.get(user_id())
     if current and current.get('signature') == signature:
         return {'status': 'running', 'unchanged': True}
-    status = jev.ranking_status()
+    status = ameba.ranking_status()
     if not status['needs_refresh']:
         return status | {'unchanged': True}
     await scheduler.interrupt_ranking(own_only=True)
@@ -436,18 +405,18 @@ async def jev_rank(background: bool = False, body: RankingRequest | None = None)
     from uuid import uuid4
     reset_ameba_plan(uuid4().hex)
     if background:
-        return jobs.start(lambda: provider_call('ameba', jev.rank_all()))
-    return await provider_call('ameba', jev.rank_all())
+        return jobs.start(lambda: provider_call('ameba', ameba.rank_all()))
+    return await provider_call('ameba', ameba.rank_all())
 
 
-@router.post('/tasks/{task_id}/jev')
-async def jev_score(task_id: int, background: bool = False):
+@router.post('/tasks/{task_id}/ameba')
+async def ameba_score(task_id: int, background: bool = False):
     config, _ = read_settings('ameba')
     if not config['enabled']:
         raise HTTPException(400, 'Включите Ameba в настройках')
     if background:
-        return jobs.start(lambda: provider_call('ameba', jev.evaluate(task_id)))
-    return await provider_call('ameba', jev.evaluate(task_id))
+        return jobs.start(lambda: provider_call('ameba', ameba.evaluate(task_id)))
+    return await provider_call('ameba', ameba.evaluate(task_id))
 
 
 @router.post('/tasks/{task_id}/codex', status_code=202)
@@ -542,14 +511,9 @@ async def collector_select(body: ChatSelection):
     return await provider_call('collector', call('collector', '/chats', body.model_dump()))
 
 
-@router.post('/bots/collector/analyze')
-async def collector_analyze():
-    return await provider_call('collector', call('collector', '/analyze', timeout=300))
-
-
 @router.api_route('/services/{name}/{path:path}', methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'])
 async def service_access(
-    name: Literal['telegram', 'gemini', 'codex', 'jev', 'collector', 'notifications', 'context', 'ameba', 'straus'],
+    name: Literal['telegram', 'codex', 'collector', 'notifications', 'context', 'ameba', 'straus'],
     path: str,
     request: Request,
 ):
@@ -593,8 +557,8 @@ async def answer_context(task_id: int, body: ContextAnswer, background: bool = F
             return jobs.start(lambda: provider_call('context', context.prepare(task_id, force=True)))
         return await provider_call('context', context.prepare(task_id, force=True))
     if background:
-        return jobs.start(lambda: provider_call('ameba', jev.evaluate(task_id)))
-    return await provider_call('ameba', jev.evaluate(task_id))
+        return jobs.start(lambda: provider_call('ameba', ameba.evaluate(task_id)))
+    return await provider_call('ameba', ameba.evaluate(task_id))
 
 
 class ContextFile(BaseModel):

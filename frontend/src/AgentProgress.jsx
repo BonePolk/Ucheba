@@ -1,10 +1,11 @@
 import AgentExplanation from './AgentExplanation';
+import AgentQuestion from './AgentQuestion';
 import { useEffect, useRef, useState } from 'react';
 import { useMediaQuery } from '@mantine/hooks';
 import { Alert, Badge, Button, Collapse, Group, Loader, Paper, Stack, Text } from '@mantine/core';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 
-const names = { monocle: 'Monocle', straus: 'Straus', context: 'Monocle', jev: 'Ameba', codex: 'Codex' };
+const names = { monocle: 'Monocle', straus: 'Straus', context: 'Monocle', ameba: 'Ameba', codex: 'Codex' };
 const statuses = { running: 'Работает', completed: 'Завершено', failed: 'Ошибка', interrupted: 'Прервано', blocked: 'Нужны данные или доступ', unchanged: 'Без изменений' };
 
 export default function AgentProgress({ taskId = 0, providers, active = false, children }) {
@@ -96,24 +97,26 @@ export default function AgentProgress({ taskId = 0, providers, active = false, c
   if (!providers.length) return null;
   return <Paper withBorder p="sm" radius="md">
     {queued && <Text size="xs" c="dimmed">Следующий запрос ожидает в очереди</Text>}
-    <Button variant="subtle" size="xs" leftSection={running ? <Loader size="xs" /> : null} onClick={toggle}>
+    <Button variant="subtle" size="xs" leftSection={running && !run?.pending_question ? <Loader size="xs" /> : null} onClick={toggle}>
       Работа агента
     </Button>
     {run?.status === 'running' && <Group gap="xs" align="start" role="status" aria-live="polite">
-      {run.model_waiting ? <Text component="span" className="agent-thinking">Думает</Text> : <>
+      {run.pending_question ? <Text size="sm" fw={500}>Ждёт вашего ответа</Text> : run.model_waiting ? <Text component="span" className="agent-thinking">Думает</Text> : <>
         <Loader size={12} mt={3} />
         <Stack gap={2} style={{ flex: 1, minWidth: 0 }}>
           <Text size="sm" fw={500} style={{ overflowWrap: 'anywhere' }}><AgentExplanation text={run.current_action ?? 'Выполняет текущий шаг'} initialText={seenExplanations.current.get(`${run.id}:action`) ?? (receivedLog.current ? '' : run.current_action)} /></Text>
         </Stack>
       </>}
     </Group>}
+    {run?.status === 'failed' && <Alert color="red">{run.error || 'Агент завершился с ошибкой. Повторите поручение.'}</Alert>}
+    {run?.pending_question && <AgentQuestion key={run.pending_question.id} question={run.pending_question} agent={run.agent} />}
     {run?.agent_comment && <Text size="xs" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>Пояснение агента: <AgentExplanation text={run.agent_comment} initialText={seenExplanations.current.get(`${run.id}:comment`) ?? (receivedLog.current ? '' : run.agent_comment)} /></Text>}
 
     {typeof children === 'function' ? children(query.data ?? [], current) : children}
     <Collapse in={opened}><Stack gap="xs" mt="xs">
-      <Group gap="xs">{(current ? [current] : []).map(({ provider, run }) => <Badge key={provider} color={run.status === 'failed' ? 'red' : run.status === 'blocked' ? 'yellow' : run.status === 'running' ? 'purple' : 'gray'} variant="light">{(run.agent === 'Lucheba' ? 'Monocle' : run.agent) ?? names[provider]} · {statuses[run.status]}</Badge>)}</Group>
+      <Group gap="xs">{(current ? [current] : []).map(({ provider, run }) => <Badge key={provider} color={run.status === 'failed' ? 'red' : run.status === 'blocked' ? 'yellow' : run.status === 'running' ? 'purple' : 'gray'} variant="light">{(run.agent === 'Lucheba' ? 'Monocle' : run.agent) ?? names[provider]} · {run.pending_question ? 'Ждёт ответа' : statuses[run.status]}</Badge>)}</Group>
       <Text size="xs" c="dimmed">{run?.token_usage ? `Подтверждённые токены: вход ${run.token_usage.input_tokens ?? 'нет данных'} · выход ${run.token_usage.output_tokens ?? 'нет данных'}` : 'Токены: нет данных'}{run?.model_waiting && !run.current_usage_known && run.token_usage ? ' · текущий запрос: нет данных' : ''}</Text>
-      {run?.status === 'running' && quietMinutes >= 2 && <Text size="xs" c="yellow">Новых данных нет {quietMinutes} мин. Операция ещё не завершена.</Text>}
+      {run?.status === 'running' && !run.pending_question && quietMinutes >= 2 && <Text size="xs" c="yellow">Новых данных нет {quietMinutes} мин. Операция ещё не завершена.</Text>}
       {events.length === 0 && <Text size="xs" c="dimmed">{running ? 'Ожидаем события агента…' : 'Журналов пока нет'}</Text>}
       <div ref={viewport} onScroll={(event) => {
         const element = event.currentTarget;

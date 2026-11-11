@@ -23,7 +23,7 @@ function ContextForm({ taskId, context }) {
     onSuccess: async () => {
       await client.invalidateQueries({ queryKey: ['context', taskId] });
       await client.invalidateQueries({ queryKey: ['tasks'] });
-      await client.invalidateQueries({ queryKey: ['jev-ranking'] });
+      await client.invalidateQueries({ queryKey: ['ameba-ranking'] });
     },
     onSettled: () => client.invalidateQueries({ queryKey: ['context-files', taskId] }),
   });
@@ -32,7 +32,7 @@ function ContextForm({ taskId, context }) {
     onSuccess: async () => {
       await client.invalidateQueries({ queryKey: ['context', taskId] });
       await client.invalidateQueries({ queryKey: ['tasks'] });
-      await client.invalidateQueries({ queryKey: ['jev-ranking'] });
+      await client.invalidateQueries({ queryKey: ['ameba-ranking'] });
     },
     onSettled: () => client.invalidateQueries({ queryKey: ['context-files', taskId] }),
   });
@@ -69,12 +69,12 @@ export default function TaskAutomation({ task, features = {} }) {
   const context = useQuery({ queryKey: ['context', task.id], queryFn: () => request(`/integrations/tasks/${task.id}/context`), refetchInterval: 5000, enabled: features.context !== false });
   const runs = useQuery({ queryKey: ['integrations', 'runs', task.id], queryFn: () => request(`/integrations/tasks/${task.id}/runs`), refetchInterval: 5000, retry: false, enabled: features.codex !== false });
   const action = useMutation({
-    mutationFn: (provider) => (provider === 'jev' ? agentRequest : request)(
-      provider === 'jev' && queue.data?.ameba_running ? '/integrations/jev/rank' : `/integrations/tasks/${task.id}/${provider}`,
+    mutationFn: (provider) => (provider === 'ameba' ? agentRequest : request)(
+      provider === 'ameba' && queue.data?.ameba_running ? '/integrations/ameba/rank' : `/integrations/tasks/${task.id}/${provider}`,
       { method: 'POST' }),
     onSuccess: async (data, provider) => {
       setNotice(provider === 'codex' ? 'Задача передана Codex' : data.unchanged ? data.status === 'running' ? 'Ameba уже работает с этими данными.' : 'Данные не изменились — порядок сохранён.' : data.metrics?.status === 'needs_context' ? `Monocle: недостаточно контекста. ${data.metrics.reason}` : data.rank != null ? `Порядок Ameba: ${data.rank} из ${data.ranked_count}` : 'Порядок Ameba обновлён');
-      await client.invalidateQueries({ queryKey: ['jev-ranking'] });
+      await client.invalidateQueries({ queryKey: ['ameba-ranking'] });
       await client.invalidateQueries({ queryKey: ['tasks'] });
       await client.invalidateQueries({ queryKey: ['context', task.id] });
       await client.invalidateQueries({ queryKey: ['context-files', task.id] });
@@ -90,7 +90,7 @@ export default function TaskAutomation({ task, features = {} }) {
       {context.data.status === 'new' && <Text size="sm" c="yellow">Контекст изменился. Полную версию нужно обновить через Monocle.</Text>}
       <TaskMarkdown>{context.data.full_markdown || context.data.summary}</TaskMarkdown>
     </Stack></Paper>}
-    <Group>{features.codex !== false && <Button disabled={action.isPending} onClick={() => action.mutate('codex')}>Поручить Codex</Button>}{features.ameba !== false && <Button variant="light" disabled={(action.isPending && !queue.data?.ameba_running) || queue.data?.browser_busy} onClick={() => action.mutate('jev')}>{queue.data?.ameba_running ? 'Обновить при изменениях' : 'Обновить порядок Ameba'}</Button>}</Group>
+    <Group>{features.codex !== false && <Button disabled={action.isPending} onClick={() => action.mutate('codex')}>Поручить Codex</Button>}{features.ameba !== false && <Button variant="light" disabled={(action.isPending && !queue.data?.ameba_running) || queue.data?.browser_busy} onClick={() => action.mutate('ameba')}>{queue.data?.ameba_running ? 'Обновить при изменениях' : 'Обновить порядок Ameba'}</Button>}</Group>
     {features.codex !== false && <AgentProgress taskId={task.id} providers={['codex']} active={(action.isPending && action.variables === 'codex') || runs.data?.some((run) => ['queued', 'running'].includes(run.status))} />}
     {features.context !== false && <ContextForm key={task.id} taskId={task.id} context={context} />}
     {notice && <Alert color="purple">{notice}</Alert>}

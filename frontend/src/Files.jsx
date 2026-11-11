@@ -103,7 +103,7 @@ export default function Files() {
       setEditor((current) => current?.path === file.path ? { ...current, version: data.version, original: file.content, url: current.url ?? `/api/integrations/context/workspace/download?path=${encodeURIComponent(file.path)}` } : current);
       setNotice('Файл сохранён в Silo');
       refresh();
-      for (const key of ['context-file-library', 'context-files', 'context', 'tasks', 'jev-ranking']) client.invalidateQueries({ queryKey: [key] });
+      for (const key of ['context-file-library', 'context-files', 'context', 'tasks', 'ameba-ranking']) client.invalidateQueries({ queryKey: [key] });
     },
   });
   const createFolder = useMutation({

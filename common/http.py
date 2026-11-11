@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from common.rpc import require_service
 from common.identity import current_user_id
 from common.progress import get_progress, stream_progress
+from common.agent_questions import Answer, answer_question
 
 
 class HealthLogFilter(logging.Filter):
@@ -50,6 +51,10 @@ def private_app(name, lifespan=None):
     @app.exception_handler(RequestValidationError)
     async def validation_error(request, exc):
         return JSONResponse(status_code=422, content={'detail': 'Некорректный внутренний запрос'})
+
+    @app.post('/questions/{question_id}/answer')
+    async def question_answer(question_id: str, body: Answer):
+        return answer_question(question_id, body.text)
 
     @app.get('/health')
     def health():
