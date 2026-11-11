@@ -13,6 +13,7 @@ def visual_tool(name, description, properties):
 
 
 BROWSER_TOOLS = [
+    visual_tool('browser_wait_for_user', 'Попросить владельца пройти CAPTCHA/2FA и передать ему браузер. message — понятная просьба: что мешает, что нужно сделать в увеличенном браузере и нажать «Готово — продолжить работу агента». Просьба попадёт в журнал. Вызов ждёт владельца без таймера; после возврата перечитай страницу. Не обходи капчу сам.', {'message': {'type': 'string', 'minLength': 1, 'maxLength': 500}}),
     visual_tool('browser_screenshot', 'Получить снимок текущего браузера. full_page=true показывает всю страницу, false — видимую область 1100×750.',
                 {'full_page': {'type': 'boolean'}}),
     visual_tool('browser_click', 'Нажать элемент. Предпочитай target=element по id из последнего elements (id передай в name), либо role + точное name. text — точный текст. css — CSS-селектор HTML-элемента, например #submit, button.download или a[href$=".pdf"]. xpath — XPath, например //button[@type="submit"]. Выражение передай в selector. selector — прежний CSS/Playwright-вариант. coordinates — запасной вариант. Для неиспользуемых строк передай пустую строку, x/y=0.',
@@ -57,6 +58,14 @@ BROWSER_NAMES = {tool['name'] for tool in BROWSER_TOOLS}
 
 
 async def run_browser_tool(name, args, request, progress, known_elements):
+    if name == 'browser_wait_for_user':
+        import json
+        message = args.get('message')
+        if not isinstance(message, str) or not message.strip() or len(message) > 500:
+            raise ValueError('Укажите message: что нужно сделать владельцу, до 500 символов')
+        progress.note(json.dumps({'text': message}, ensure_ascii=False))
+        progress.add('Ждёт, пока владелец завершит CAPTCHA или вход в браузере')
+        return await request('/wait-user', {})
     if name == 'browser_sites':
         progress.add('Выбирает сохранённый вход')
         return await request('/sites', method='GET')

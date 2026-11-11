@@ -17,7 +17,7 @@ export default function AgentMemory() {
   });
   return <Paper withBorder p="md"><Stack gap="xs">
     <Title order={4}>Что агенты знают обо мне</Title>
-    <Text size="xs" c="dimmed">Общая память Straus, Monocle и Ameba. Сохранённые факты используются в следующих поручениях.</Text>
+    <Text size="xs" c="dimmed">Общая память Straus, Monocle и Ameba. Факты о вас и проверенные способы работы с сайтами используются в следующих поручениях.</Text>
     {(memory.error || save.error || remove.error) && <Alert color="red">{(memory.error || save.error || remove.error).message}</Alert>}
     {!memory.isPending && !memory.data?.length && <Text size="sm" c="dimmed">Сохранённых фактов пока нет.</Text>}
     {(memory.data ?? []).map((fact) => <Paper key={fact.key} withBorder p="xs">

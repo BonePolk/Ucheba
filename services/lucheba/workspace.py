@@ -1,6 +1,8 @@
 """Личные файлы и вложения задач внутри префикса текущего пользователя."""
 import hashlib
 import json
+from pathlib import Path
+from urllib.parse import quote
 import re
 from threading import Lock
 
@@ -46,7 +48,8 @@ def tree(memory, include_attachments=True):
         if not path:
             continue
         result.append({'path': path.rstrip('/'), 'name': path.rstrip('/').rsplit('/', 1)[-1],
-                       'folder': path.endswith('/'), 'editable': not path.endswith('/'), 'size': item.size})
+                       'folder': path.endswith('/'), 'editable': not path.endswith('/') and item.size <= MAX_TEXT and Path(path).suffix.lower() not in ('.pdf', '.xlsx', '.xls', '.docx', '.doc', '.pptx', '.zip', '.png', '.jpg', '.jpeg', '.gif', '.webp'), 'size': item.size,
+                       'url': '/api/integrations/context/workspace/download?path=' + quote(path, safe='')})
     if not include_attachments:
         return result
     # Показываем все вложения, включая убранные из задачи, без лимита поиска Monocle.
@@ -128,3 +131,30 @@ def save(memory, path, text, version):
             memory.put_bytes(materials.file_key(task_id, file_id) + '.json',
                              json.dumps(info, ensure_ascii=False).encode(), 'application/json')
     return {'version': hashlib.sha256(content).hexdigest(), 'task_id': task_id}
+
+
+def read_binary(memory, path):
+    path = personal_path(path)
+    content = optional_read(memory, 'files/' + path)
+    if content is None:
+        raise HTTPException(404, 'Файл в Silo не найден')
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(413, 'Файл больше 10 МБ')
+    return content, hashlib.sha256(content).hexdigest()
+
+
+def save_binary(memory, path, content, version=None):
+    path = personal_path(path)
+    if not content or len(content) > 10 * 1024 * 1024:
+        raise HTTPException(413, 'Размер файла должен быть от 1 байта до 10 МБ')
+    with write_lock:
+        check_parents(memory, path)
+        key = 'files/' + path
+        if next(memory.client.list_objects(memory.bucket, prefix=memory.prefix + key + '/', recursive=True), None):
+            raise HTTPException(409, 'Папка с таким именем уже существует')
+        previous = optional_read(memory, key)
+        current = hashlib.sha256(previous).hexdigest() if previous is not None else None
+        if current != (version or None):
+            raise HTTPException(409, 'Файл уже существует или изменился. Прочитайте его версию перед заменой')
+        memory.put_bytes(key, content, 'application/octet-stream')
+    return {'path': path, 'size': len(content), 'version': hashlib.sha256(content).hexdigest(), 'status': 'saved'}

@@ -24,7 +24,7 @@ export default function Admin() {
       {issues.error && <Alert color="red">{issues.error.message}</Alert>}
       {!issues.isPending && !issues.data?.length && <Text size="sm" c="dimmed">Новых сообщений нет.</Text>}
       {(issues.data ?? []).map((issue) => <Group key={issue.id} justify="space-between">
-        <div><Text size="sm">{issue.agent} · {issue.tool_name} · {{ timeout: 'Таймаут', element_not_found: 'Элемент не найден', login_failed: 'Ошибка входа', unsupported_file: 'Формат не поддерживается', invalid_format: 'Неверный формат', service_unavailable: 'Сервис недоступен', other: 'Другая ошибка' }[issue.category]}</Text><Text size="xs" c="dimmed">Пользователь №{issue.owner_id} · Повторений: {issue.occurrences} · {new Date(issue.updated_at).toLocaleString()}</Text></div>
+        <div><Text size="sm">{issue.agent} · {issue.tool_name} · {{ timeout: 'Таймаут', element_not_found: 'Элемент не найден', login_failed: 'Ошибка входа', unsupported_file: 'Формат не поддерживается', invalid_format: 'Неверный формат', service_unavailable: 'Сервис недоступен', missing_capability: 'Нужна новая возможность', other: 'Другая ошибка' }[issue.category]}</Text><Text size="xs" style={{ overflowWrap: 'anywhere' }}>{issue.description}</Text><Text size="xs" c="dimmed">Пользователь №{issue.owner_id} · Повторений: {issue.occurrences} · {new Date(issue.updated_at).toLocaleString()}</Text></div>
         <Button size="compact-xs" variant="subtle" disabled={resolve.isPending} onClick={() => resolve.mutate(issue.id)}>Закрыть</Button>
       </Group>)}
       {resolve.error && <Alert color="red">{resolve.error.message}</Alert>}

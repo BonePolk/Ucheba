@@ -140,6 +140,7 @@ class AgentIssue(SQLModel, table=True):
     agent: str
     tool_name: str
     category: str
+    description: str = ''
     occurrences: int = 1
     resolved: bool = False
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

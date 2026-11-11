@@ -1,4 +1,3 @@
-import { latestAgentEvents } from './agentLog';
 import AgentExplanation from './AgentExplanation';
 import { useEffect, useRef, useState } from 'react';
 import { Alert, Badge, Button, Collapse, Group, Loader, Paper, Stack, Text } from '@mantine/core';
@@ -15,6 +14,8 @@ export default function AgentProgress({ taskId = 0, providers, active = false, c
   const viewport = useRef(null);
   const logContent = useRef(null);
   const followLog = useRef(true);
+  const seenExplanations = useRef(new Map());
+  const receivedLog = useRef(false);
   function toggle() {
     client.setQueryData(openKey, !opened);
     setOpened(!opened);
@@ -77,9 +78,19 @@ export default function AgentProgress({ taskId = 0, providers, active = false, c
   const lastActivity = run?.last_activity_at ?? run?.events?.at(-1)?.at ?? run?.started_at;
   const quietMinutes = lastActivity ? Math.floor((Date.now() - Date.parse(lastActivity)) / 60000) : 0;
   const allEvents = current?.run.events ?? [];
-  const events = latestAgentEvents(allEvents).map((event) => ({
+  const events = allEvents.map((event) => ({
     ...event, provider: current.provider, key: `${current.run.id}:${event.id}`,
   }));
+  // Первый снимок показываем сразу. Запоминаем текст, чтобы не анимировать его повторно.
+  useEffect(() => {
+    if (!runs.length) return;
+    receivedLog.current = true;
+    seenExplanations.current = new Map([
+      ...events.map((event) => [event.key, event.message]),
+      [`${run?.id}:action`, run?.current_action ?? ''],
+      [`${run?.id}:comment`, run?.agent_comment ?? ''],
+    ]);
+  });
   if (!providers.length) return null;
   return <Paper withBorder p="sm" radius="md">
     {queued && <Text size="xs" c="dimmed">Следующий запрос ожидает в очереди</Text>}
@@ -90,11 +101,12 @@ export default function AgentProgress({ taskId = 0, providers, active = false, c
       {run.model_waiting ? <Text component="span" className="agent-thinking">Думает</Text> : <>
         <Loader size={12} mt={3} />
         <Stack gap={2} style={{ flex: 1, minWidth: 0 }}>
-          <Text size="sm" fw={500} style={{ overflowWrap: 'anywhere' }}>{run.current_action ?? 'Выполняет текущий шаг'}</Text>
-          {run.agent_comment && <Text size="xs" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>Пояснение агента: <AgentExplanation text={run.agent_comment} /></Text>}
+          <Text size="sm" fw={500} style={{ overflowWrap: 'anywhere' }}><AgentExplanation text={run.current_action ?? 'Выполняет текущий шаг'} initialText={seenExplanations.current.get(`${run.id}:action`) ?? (receivedLog.current ? '' : run.current_action)} /></Text>
         </Stack>
       </>}
     </Group>}
+    {run?.agent_comment && <Text size="xs" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>Пояснение агента: <AgentExplanation text={run.agent_comment} initialText={seenExplanations.current.get(`${run.id}:comment`) ?? (receivedLog.current ? '' : run.agent_comment)} /></Text>}
+
     {typeof children === 'function' ? children(query.data ?? []) : children}
     <Collapse in={opened}><Stack gap="xs" mt="xs">
       <Group gap="xs">{(current ? [current] : []).map(({ provider, run }) => <Badge key={provider} color={run.status === 'failed' ? 'red' : run.status === 'blocked' ? 'yellow' : run.status === 'running' ? 'purple' : 'gray'} variant="light">{(run.agent === 'Lucheba' ? 'Monocle' : run.agent) ?? names[provider]} · {statuses[run.status]}</Badge>)}</Group>
@@ -106,13 +118,12 @@ export default function AgentProgress({ taskId = 0, providers, active = false, c
         followLog.current = element.scrollHeight - element.scrollTop - element.clientHeight < 32;
       }} role="log" aria-live="polite" style={{ maxHeight: 280, overflowY: 'auto' }}>
         <div ref={logContent}>
-        {events.map((event) => {
-          const explanation = event.kind === 'note' || event.kind === 'summary';
-          const fresh = Date.now() - Date.parse(event.at) < 5000 || (run?.status === 'running' && event.kind === 'summary' && event.id > (run.response_event_start ?? Infinity));
+        {events.map((event, index) => {
+          const initialText = seenExplanations.current.get(event.key) ?? (receivedLog.current ? '' : event.message);
           return <div key={event.key} style={{ padding: '4px 0', overflowWrap: 'anywhere' }}>
             <Text size="xs" style={{ fontFamily: 'monospace', whiteSpace: 'pre-wrap' }}>
               <Text component="span" inherit c="dimmed">{new Date(event.at).toLocaleTimeString()} · {current?.run.agent === 'Lucheba' ? 'Monocle' : current?.run.agent ?? names[event.provider]}{event.task_id ? ` #${event.task_id}` : ''} · </Text>
-              {explanation ? <AgentExplanation text={event.message} animate={fresh} /> : event.message}
+              <AgentExplanation text={event.message} initialText={initialText} animate={index === events.length - 1} />
             </Text>
 
           </div>;

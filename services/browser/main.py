@@ -28,6 +28,7 @@ from common.identity import user_id, current_user_id
 
 contexts = {}
 locks = {}
+user_controls = {}
 screens = OrderedDict()
 schedule_pages = {}
 active_actions = {}
@@ -436,7 +437,7 @@ async def visual(body: VisualAction, request: Request):
 
 
 async def run_visual_action(body):
-    async with lock():
+    async with agent_browser_lock():
         state = screens.get(user_id())
         tab = state['tab'] if state else None
         if tab is None or tab.is_closed():
@@ -594,6 +595,53 @@ class SchedulePage(BaseModel):
     index: int | None = Field(default=None, ge=0, lt=100)
 
 
+def browser_ready():
+    owner = user_id()
+    if owner not in user_controls:
+        user_controls[owner] = asyncio.Event()
+        user_controls[owner].set()
+    return user_controls[owner]
+
+
+@asynccontextmanager
+async def agent_browser_lock():
+    # Ручной режим не держит lock: пользователь может нажимать, агент ждёт.
+    while True:
+        await browser_ready().wait()
+        async with lock():
+            if browser_ready().is_set():
+                yield
+                return
+
+
+@app.post('/handoff')
+async def browser_handoff(body: dict):
+    action = body.get('action', 'status')
+    if action == 'pause':
+        browser_ready().clear()
+        # Дождаться уже начатого действия, прежде чем отдать управление.
+        async with lock():
+            pass
+    elif action == 'resume':
+        browser_ready().set()
+    elif action != 'status':
+        if browser_ready().is_set():
+            raise HTTPException(409, 'Сначала возьмите управление браузером')
+        if action not in ('click', 'type', 'press', 'scroll', 'state'):
+            raise HTTPException(400, 'Недопустимое ручное действие')
+        return await manual(Action.model_validate({'site_id': '', **body}))
+    return {'paused': not browser_ready().is_set()}
+
+
+@app.post('/wait-user')
+async def wait_for_browser_user(request: Request):
+    async def wait():
+        browser_ready().clear()
+        await browser_ready().wait()
+        return {'status': 'resumed', 'notice': 'Пользователь вернул управление. Прочитай страницу заново и проверь результат входа/капчи.'}
+    return await tracked_action(request, wait)
+
+
 async def tracked_action(request, operation):
     run_id = request.headers.get('x-agent-run')
     if not run_id:
@@ -647,7 +695,7 @@ async def schedule_page(body: SchedulePage, request: Request):
 async def read_schedule_page(body):
     if body.site_id:
         get_site(body.site_id)
-    async with lock():
+    async with agent_browser_lock():
         tab = await page()
         watch_screen(tab)
         url = body.url
@@ -760,7 +808,7 @@ async def download_link(tab, site, url, image_mode=False):
                 # Cookie используются только здесь и только для подходящего домена.
                 cookies = await tab.context.cookies(url)
                 headers = {'Cookie': '; '.join(f"{item['name']}={item['value']}" for item in cookies)}
-                if origin(url) == origin(site['url']):
+                if site.get('url') and origin(url) == origin(site['url']):
                     headers['Referer'] = safe_url(tab.url)
                 async with client.stream('GET', url, headers=headers) as response:
                     if response.status_code in (301, 302, 303, 307, 308):
@@ -801,8 +849,9 @@ async def download_link(tab, site, url, image_mode=False):
 @app.post('/manual')
 async def manual(body: Action):
     async with lock():
-        site = get_site(body.site_id)
-        tab = await page()
+        site = get_site(body.site_id) if body.action in ('open', 'login') else None
+        state = screens.get(user_id())
+        tab = state['tab'] if state and not state['tab'].is_closed() else await page()
         watch_screen(tab)
         notice = None
         if body.action == 'open':
@@ -834,7 +883,7 @@ async def agent(body: Action, request: Request):
 
 
 async def run_browser_action(body):
-    async with lock():
+    async with agent_browser_lock():
         result = await agent_action(body)
         tab = await page()
         # Текст не должен ждать отрисовки снимка. Для картинки есть browser_screenshot.
@@ -882,7 +931,7 @@ async def web(body: WebAction, request: Request):
 
 
 async def run_web_action(body):
-    async with lock():
+    async with agent_browser_lock():
         result = await browse_web(body)
         tab = await public_page()
         return result | await action_frame(tab) | {'elements': await elements(tab)}
@@ -935,7 +984,7 @@ async def agent_files(body: dict, request: Request):
 
 async def run_file_action(body):
     import files
-    async with lock():
+    async with agent_browser_lock():
         try:
             action = body['action']
             if action in ('download_file', 'python_http_request'):
@@ -949,6 +998,20 @@ async def run_file_action(body):
                 result = {'downloads': download_status(), 'files': [json.loads(path.read_text()) for path in sorted(files.root().glob('*.json'), key=lambda path: path.stat().st_mtime, reverse=True)[:200]]}
             elif action == 'read_download':
                 result = files.read(body['file_id'], body['page'])
+            elif action in ('search_table', 'inspect_table', 'summarize_table', 'export_table'):
+                from common.office import search_table, inspect_table, summarize_table, export_table
+                info, content = files.load(body['file_id'])
+                if action == 'export_table':
+                    if not body['output_path'].lower().endswith('.csv'):
+                        raise ValueError('output_path должен оканчиваться .csv')
+                    data, count = await asyncio.to_thread(export_table, info['name'], content, body)
+                    result = {'content': base64.b64encode(data).decode(), 'rows': count}
+                else:
+                    operation = {'search_table': search_table, 'inspect_table': inspect_table, 'summarize_table': summarize_table}[action]
+                    result = await asyncio.to_thread(operation, info['name'], content, body)
+            elif action == 'export_download':
+                info, content = files.load(body['file_id'])
+                result = {'name': info['name'], 'content': base64.b64encode(content).decode()}
             elif action == 'python_binary':
                 result = files.binary(body)
             else:
@@ -961,6 +1024,9 @@ async def run_file_action(body):
             return result
         except HTTPException:
             raise
+        except ValueError as exc:
+            logging.getLogger('uvicorn.error').warning('browser files: %s', type(exc).__name__)
+            raise HTTPException(422, str(exc)[:500]) from None
         except Exception as exc:
             logging.getLogger('uvicorn.error').warning('browser files: %s', type(exc).__name__)
             raise HTTPException(422, 'Не удалось прочитать файл или выполнить запрос. Проверьте ID, формат, страницу и доступность URL.') from None

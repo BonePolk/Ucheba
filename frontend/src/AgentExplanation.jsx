@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 
 // Анимация уже полученного текста; не имитирует поток от модели.
-export default function AgentExplanation({ text = '', animate = true }) {
-  const [visible, setVisible] = useState(() => animate ? '' : text);
+export default function AgentExplanation({ text = '', animate = true, initialText = text }) {
+  const [visible, setVisible] = useState(() => animate ? initialText : text);
   const current = useRef(visible);
   useEffect(() => {
     if (!animate || window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
@@ -25,5 +25,5 @@ export default function AgentExplanation({ text = '', animate = true }) {
     frame = requestAnimationFrame(reveal);
     return () => cancelAnimationFrame(frame);
   }, [text, animate]);
-  return <span style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{visible}</span>;
+  return <span style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{animate ? visible : text}</span>;
 }

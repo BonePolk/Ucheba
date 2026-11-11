@@ -560,6 +560,18 @@ async def workspace_tree():
     return await call('context', '/workspace', method='GET')
 
 
+@router.get('/context/workspace/download')
+async def download_workspace_file(path: str):
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            result = await client.get('http://lucheba:8000/workspace/download', params={'path': path},
+                headers={'X-Service-Token': internal_token('context'), 'X-User-ID': str(user_id())})
+    except httpx.HTTPError:
+        raise HTTPException(503, 'Silo недоступен') from None
+    return Response(result.content, status_code=result.status_code,
+                    headers={key: result.headers[key] for key in ('content-type', 'content-disposition') if key in result.headers})
+
+
 @router.get('/context/workspace/file')
 async def workspace_read(path: str):
     return await call('context', '/workspace/file?path=' + quote(path, safe=''), method='GET')
@@ -661,6 +673,12 @@ async def download_context_file(task_id: int, file_id: str):
 async def browser_sites(request: Request):
     body = await request.json() if request.method == 'POST' else None
     return await call('context', '/browser/sites', body, method=request.method)
+
+
+@router.post('/context/browser/handoff')
+async def browser_handoff(body: dict):
+    from common.browser_client import browser_request
+    return await browser_request('/handoff', body)
 
 
 @router.post('/context/browser/manual')
