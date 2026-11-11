@@ -1,4 +1,5 @@
 """Сохранённые загрузки пользователя. Python читает данные, но не исполняет их."""
+import asyncio
 import base64
 import io
 import json
@@ -16,9 +17,11 @@ from pypdf import PdfReader
 import pypdfium2 as pdfium
 
 from common.identity import user_id
-from common.office import spreadsheet_text
+from common.rpc import internal_token
+from common.office import spreadsheet_text, table_text
 
 LIMIT = 10 * 1024 * 1024
+migrated_files = set()
 
 
 def root():
@@ -27,23 +30,64 @@ def root():
     return path
 
 
-def save(name, content):
-    file_id = uuid4().hex
-    name = name.replace('\\', '/').split('/')[-1][:200] or 'document'
-    (root() / (file_id + '.bin')).write_bytes(content)
-    info = {'file_id': file_id, 'name': name, 'size': len(content)}
-    (root() / (file_id + '.json')).write_text(json.dumps(info, ensure_ascii=False))
-    return info
+def silo_request(name, arguments):
+    # Silo принадлежит сервису библиотеки; браузеру не нужны его ключи.
+    try:
+        with httpx.Client(timeout=60, transport=httpx.HTTPTransport(retries=1)) as client:
+            response = client.post('http://lucheba:8000/library/tool', json={'name': name, 'arguments': arguments},
+                headers={'X-Service-Token': internal_token('context'), 'X-User-ID': str(user_id())})
+    except httpx.HTTPError:
+        raise HTTPException(503, 'Не удалось подключиться к Silo. Загрузка не подтверждена как сохранённая') from None
+    if not response.is_success:
+        raise HTTPException(response.status_code, 'Не удалось прочитать или сохранить файл в Silo')
+    return response.json()['output']
+
+
+def save(name, content, file_id=None):
+    file_id = file_id or uuid4().hex
+    name = name.replace('\\', '/').split('/')[-1][:160] or 'document'
+    try:
+        return silo_request('save_browser_download', {'file_id': file_id, 'name': name, 'content': base64.b64encode(content).decode()})
+    except HTTPException:
+        # Временная страховочная копия до восстановления Silo; статус saved не выдаём.
+        (root() / (file_id + '.bin')).write_bytes(content)
+        (root() / (file_id + '.json')).write_text(json.dumps({'file_id': file_id, 'name': name, 'size': len(content)}))
+        raise
 
 
 def load(file_id):
     if not re.fullmatch('[a-f0-9]{32}', file_id):
         raise ValueError('Неверный ID файла')
     try:
-        info = json.loads((root() / (file_id + '.json')).read_text())
-        return info, (root() / (file_id + '.bin')).read_bytes()
-    except FileNotFoundError:
-        raise ValueError('Файл не найден') from None
+        result = silo_request('load_browser_download', {'file_id': file_id})
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
+        # Перенос старой загрузки при первом обращении; исходники не удаляем.
+        try:
+            info = json.loads((root() / (file_id + '.json')).read_text())
+            content = (root() / (file_id + '.bin')).read_bytes()
+        except FileNotFoundError:
+            raise ValueError('Файл не найден') from None
+        return save(info['name'], content, file_id), content
+    return result['info'], base64.b64decode(result['content'], validate=True)
+
+
+def migrate_legacy():
+    count = 0
+    for path in root().glob('*.json'):
+        file_id = path.stem
+        key = (user_id(), file_id)
+        if key not in migrated_files and re.fullmatch('[a-f0-9]{32}', file_id):
+            load(file_id)
+            migrated_files.add(key)
+            count += 1
+    return count
+
+
+def list_files():
+    migrate_legacy()
+    return silo_request('list_browser_downloads', {})
 
 
 def archive(content):
@@ -57,8 +101,14 @@ def archive(content):
 
 def read(file_id, page=1):
     info, content = load(file_id)
-    suffix = Path(info['name']).suffix.lower()
-    result = dict(info)
+    return read_content(info['name'], content, page, info)
+
+
+def read_content(name, content, page=1, info=None):
+    if len(content) > LIMIT:
+        raise ValueError('Файл больше 10 МБ')
+    suffix = Path(name).suffix.lower()
+    result = dict(info or {'name': name, 'size': len(content)})
     if suffix == '.pdf' or content.startswith(b'%PDF'):
         reader = PdfReader(io.BytesIO(content))
         if page < 1 or page > len(reader.pages):
@@ -88,10 +138,13 @@ def read(file_id, page=1):
             stream = io.BytesIO()
             image.convert('RGB').save(stream, format='JPEG')
             result.update(image=base64.b64encode(stream.getvalue()).decode(), mime='image/jpeg')
-    elif suffix in ('.docx', '.xlsx', '.pptx', '.zip') or content.startswith(b'PK\x03\x04'):
+    elif suffix in ('.docx', '.xlsx', '.ods', '.pptx', '.zip') or content.startswith(b'PK\x03\x04'):
         with archive(content) as zipped:
             result['members'] = zipped.namelist()[:200]
-            if suffix == '.xlsx' or 'xl/workbook.xml' in zipped.namelist():
+            if suffix == '.ods':
+                result['text'] = table_text(name, content)
+                result['notice'] = 'ODS: сохранённые значения; формулы не выполняются.'
+            elif suffix == '.xlsx' or 'xl/workbook.xml' in zipped.namelist():
                 result['text'] = spreadsheet_text(zipped)
                 result['notice'] = 'Формулы не выполняются; показаны сохранённые значения. Числа дат/времени могут быть в исходном представлении Excel.'
             else:
@@ -107,13 +160,14 @@ def read(file_id, page=1):
                             'Не пытайся разбирать его повторными hex/struct-вызовами: найди PDF/DOCX/XLSX '
                             'либо сообщи владельцу, что требуется преобразование файла.')
         result['format'] = 'ole_office'
+        result['status'] = 'unsupported_file'
     else:
         try:
             if b'\x00' in content[:4096]:
                 raise UnicodeDecodeError('utf-8', content, 0, 1, 'binary NUL')
             result['text'] = content.decode('utf-8-sig')[:40000]
         except UnicodeDecodeError:
-            result.update(hex=content[:512].hex(' '), notice='Бинарный формат: используй python_binary с известной схемой. Произвольные программы из файла не запускаются.')
+            result.update(status='unsupported_file', format='unknown_binary', hex=content[:512].hex(' '), notice='Бинарный формат: используй python_binary с известной схемой. Произвольные программы из файла не запускаются.')
     return result
 
 
@@ -161,8 +215,9 @@ async def request_file(args, tab, validate_url, safe_url):
                              'image/webp': '.webp', 'image/gif': '.gif', 'application/zip': '.zip',
                              'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
                              'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
+                             'application/vnd.oasis.opendocument.spreadsheet': '.ods',
                              'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx'}.get(kind, '')
-                info = save(name, content)
+                info = await asyncio.to_thread(save, name, bytes(content))
                 return info | {'http_status': response.status_code, 'url': safe_url(url), 'notice': 'Оригинал сохранён. Открой через read_download.'}
     raise ValueError('Слишком много перенаправлений')
 

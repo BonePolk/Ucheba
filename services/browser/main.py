@@ -196,7 +196,7 @@ def capture_downloads(context):
             if path is None or not 0 < Path(path).stat().st_size <= files.LIMIT:
                 record.update(status='failed', error='Файл пустой или больше 10 МБ')
                 return
-            info = files.save(download.suggested_filename, Path(path).read_bytes())
+            info = await asyncio.to_thread(files.save, download.suggested_filename, Path(path).read_bytes())
             record.update(info, status='saved')
         except asyncio.CancelledError:
             record.update(status='cancelled')
@@ -833,6 +833,7 @@ async def download_link(tab, site, url, image_mode=False):
                     if not Path(name).suffix:
                         name += {'application/pdf': '.pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
                                  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
+                                 'application/vnd.oasis.opendocument.spreadsheet': '.ods',
                                  'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx',
                                  'text/plain': '.txt', 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp'}.get(mime, '')
                     logging.getLogger('uvicorn.error').info('browser: file downloaded (%d bytes)', len(content))
@@ -977,6 +978,40 @@ async def browse_web(body):
     return {'status': 'search', 'results': results, 'text': text}
 
 
+@app.post('/downloads/migrate')
+async def migrate_old_downloads():
+    import files
+    return {'migrated': await asyncio.to_thread(files.migrate_legacy)}
+
+
+@app.post('/read-content')
+async def read_file_content(body: dict):
+    import files
+    try:
+        content = base64.b64decode(body['content'], validate=True)
+        return files.read_content(body['name'], content, body.get('page', 1))
+    except (ValueError, KeyError):
+        raise HTTPException(422, 'Не удалось прочитать файл. Проверьте формат и страницу') from None
+
+
+@app.post('/file-preview')
+async def preview_file(body: dict):
+    import files
+    try:
+        content = base64.b64decode(body['content'], validate=True)
+        result = {'name': body['name'], 'size': len(content)}
+        if Path(body['name']).suffix.lower() in ('.xlsx', '.ods', '.csv', '.tsv'):
+            from common.office import search_table, table_rows
+            selected_sheet = body.get('sheet') or next((row[0] for row in table_rows(body['name'], content)), '')
+            result['table'] = await asyncio.to_thread(search_table, body['name'], content,
+                {'sheet': selected_sheet, 'offset': body.get('offset', 0), 'limit': 40})
+        else:
+            result = files.read_content(body['name'], content, body.get('page', 1))
+        return result
+    except (ValueError, KeyError):
+        raise HTTPException(422, 'Не удалось открыть файл. Проверьте формат и номер страницы') from None
+
+
 @app.post('/files')
 async def agent_files(body: dict, request: Request):
     return await tracked_action(request, lambda: run_file_action(body))
@@ -993,14 +1028,15 @@ async def run_file_action(body):
                 content = base64.b64decode(body['content'], validate=True)
                 if not content or len(content) > files.LIMIT:
                     raise ValueError('Размер файла должен быть от 1 байта до 10 МБ')
-                result = files.save(body['name'], content)
+                result = await asyncio.to_thread(files.save, body['name'], content)
             elif action == 'list_downloads':
-                result = {'downloads': download_status(), 'files': [json.loads(path.read_text()) for path in sorted(files.root().glob('*.json'), key=lambda path: path.stat().st_mtime, reverse=True)[:200]]}
+                result = {'downloads': download_status(), 'files': await asyncio.to_thread(files.list_files)}
             elif action == 'read_download':
-                result = files.read(body['file_id'], body['page'])
+                info, content = await asyncio.to_thread(files.load, body['file_id'])
+                result = files.read_content(info['name'], content, body['page'], info)
             elif action in ('search_table', 'inspect_table', 'summarize_table', 'export_table'):
                 from common.office import search_table, inspect_table, summarize_table, export_table
-                info, content = files.load(body['file_id'])
+                info, content = await asyncio.to_thread(files.load, body['file_id'])
                 if action == 'export_table':
                     if not body['output_path'].lower().endswith('.csv'):
                         raise ValueError('output_path должен оканчиваться .csv')
@@ -1010,10 +1046,10 @@ async def run_file_action(body):
                     operation = {'search_table': search_table, 'inspect_table': inspect_table, 'summarize_table': summarize_table}[action]
                     result = await asyncio.to_thread(operation, info['name'], content, body)
             elif action == 'export_download':
-                info, content = files.load(body['file_id'])
+                info, content = await asyncio.to_thread(files.load, body['file_id'])
                 result = {'name': info['name'], 'content': base64.b64encode(content).decode()}
             elif action == 'python_binary':
-                result = files.binary(body)
+                result = await asyncio.to_thread(files.binary, body)
             else:
                 raise ValueError('Неизвестное действие с файлом')
             # Редактируем известные пароли в тексте/результатах, но не в изображении.

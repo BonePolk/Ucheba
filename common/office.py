@@ -77,11 +77,11 @@ def table_rows(name, content):
     if len(content) > 10 * 1024 * 1024:
         raise ValueError('Таблица больше 10 МБ')
     suffix = Path(name).suffix.lower()
-    if suffix == '.xlsx':
+    if suffix in ('.xlsx', '.ods'):
         with ZipFile(io.BytesIO(content)) as zipped:
             if len(zipped.infolist()) > 2000 or sum(item.file_size for item in zipped.infolist()) > 20 * 1024 * 1024:
                 raise ValueError('Слишком большой распакованный XLSX')
-            yield from spreadsheet_rows(zipped)
+            yield from ods_rows(zipped) if suffix == '.ods' else spreadsheet_rows(zipped)
     elif suffix in ('.csv', '.tsv'):
         try:
             text = content.decode('utf-8-sig')
@@ -94,7 +94,7 @@ def table_rows(name, content):
         for number, row in enumerate(csv.reader(io.StringIO(text), dialect), 1):
             yield 'CSV', number, {column_name(index): value for index, value in enumerate(row, 1)}
     else:
-        raise ValueError('Поиск поддерживает XLSX, CSV и TSV. Для XLS нужен экспорт в XLSX/CSV')
+        raise ValueError('Поиск поддерживает XLSX, ODS, CSV и TSV. Для XLS нужен экспорт в XLSX/CSV')
 
 
 def matches(value, operator, expected):
@@ -239,3 +239,68 @@ def export_table(name, content, args):
     if len(data) > 10 * 1024 * 1024:
         raise ValueError('Результат больше 10 МБ')
     return data, len(rows)
+
+
+def ods_paragraph(node):
+    text = node.text or ''
+    namespace = 'urn:oasis:names:tc:opendocument:xmlns:text:1.0'
+    for child in node:
+        if child.tag == '{' + namespace + '}s':
+            text += ' ' * min(int(child.get('{' + namespace + '}c', '1')), 1000)
+        elif child.tag == '{' + namespace + '}tab':
+            text += '\t'
+        elif child.tag == '{' + namespace + '}line-break':
+            text += '\n'
+        else:
+            text += ods_paragraph(child)
+        text += child.tail or ''
+    return text
+
+
+def ods_rows(zipped):
+    ns = {'t': 'urn:oasis:names:tc:opendocument:xmlns:table:1.0',
+          'o': 'urn:oasis:names:tc:opendocument:xmlns:office:1.0',
+          'text': 'urn:oasis:names:tc:opendocument:xmlns:text:1.0'}
+    document = ElementTree.fromstring(zipped.read('content.xml'))
+    for table in document.findall('.//t:table', ns):
+        name = table.get('{' + ns['t'] + '}name', 'Лист')
+        number = 1
+        for row in table.findall('.//t:table-row', ns):
+            repeated = int(row.get('{' + ns['t'] + '}number-rows-repeated', '1'))
+            cells, column = {}, 1
+            for cell in row:
+                if cell.tag not in ('{' + ns['t'] + '}table-cell', '{' + ns['t'] + '}covered-table-cell'):
+                    continue
+                count = int(cell.get('{' + ns['t'] + '}number-columns-repeated', '1'))
+                value = '\n'.join(ods_paragraph(p) for p in cell.findall('text:p', ns))
+                for attribute in ('date-value', 'time-value', 'value', 'boolean-value', 'string-value'):
+                    raw_value = cell.get('{' + ns['o'] + '}' + attribute)
+                    if raw_value is not None:
+                        value = raw_value
+                        break
+                if value:
+                    if column + count > 16385:
+                        raise ValueError('Слишком много непустых столбцов ODS')
+                    for index in range(column, column + count):
+                        cells[column_name(index)] = value
+                column += count
+            if cells:
+                if number + repeated > 1048577:
+                    raise ValueError('Слишком много непустых строк ODS')
+                for index in range(number, number + repeated):
+                    yield name, index, cells
+            number += repeated
+
+
+def table_text(name, content):
+    lines, size, previous = [], 0, None
+    for sheet, number, cells in table_rows(name, content):
+        if sheet != previous:
+            lines.append('Лист: ' + sheet)
+            previous = sheet
+        line = ' | '.join(f'{column}{number}: {value}' for column, value in cells.items())
+        lines.append(line)
+        size += len(line)
+        if size > 40000:
+            break
+    return '\n'.join(lines)[:40000]

@@ -557,7 +557,23 @@ class WorkspaceFile(BaseModel):
 
 @router.get('/context/workspace')
 async def workspace_tree():
-    return await call('context', '/workspace', method='GET')
+    from common.browser_client import browser_request
+    # Перенос прежних локальных загрузок выполняется перед чтением общего списка.
+    warning = None
+    try:
+        await browser_request('/downloads/migrate', {})
+    except HTTPException:
+        warning = 'Не удалось проверить старые загрузки браузера. Файлы Silo показаны ниже.'
+    return {'files': await call('context', '/workspace', method='GET'), 'warning': warning}
+
+
+@router.get('/context/workspace/preview')
+async def preview_workspace_file(path: str, page: int = 1, sheet: str = '', offset: int = 0):
+    if page < 1 or offset < 0:
+        raise HTTPException(422, 'Неверная страница')
+    from common.browser_client import browser_request
+    original = await call('context', '/workspace/preview?path=' + quote(path, safe=''), method='GET')
+    return await browser_request('/file-preview', original | {'page': page, 'sheet': sheet, 'offset': offset})
 
 
 @router.get('/context/workspace/download')

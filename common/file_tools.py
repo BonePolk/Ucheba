@@ -18,14 +18,16 @@ FILE_INSTRUCTION = ('Скачивание кнопкой/JavaScript перехв
     'Не пробуй HTTP наугад ради обхода сложной страницы. При сомнении используй браузер '
     'и скачивание кнопкой. После неудачного прямого запроса вернись к браузеру; '
     'не перебирай варианты URL/параметров без новых подтверждённых данных. '
-    'Вход и SSO выполняй через браузер. Файлы сохраняются и доступны обоим агентам через list_downloads/read_download. '
+    'Вход и SSO выполняй через браузер. Все новые загрузки автоматически сохраняются в Silo '
+    'в папке Загрузки, видны владельцу в проводнике и доступны обоим агентам через '
+    'list_downloads/read_download и silo_path. Не скачивай повторно уже сохранённый файл. '
     'Для поиска и фильтров таблицы используй search_table: source_task_id=0 для загрузок браузера, '
     'иначе номер задачи из list_saved_files. Сначала посмотри первые строки без фильтров, выбери лист '
     'и буквы нужных колонок. query ищет по всей строке; filters — условия по колонкам, объединяемые И. '
     'Например filters=[{column: B, operator: contains, value: нужная группа}]. '
     'Числовые сравнения gt/gte/lt/lte не подходят для нераспознанных дат Excel; '
     'страницы выбирай offset/limit, колонки — columns. Не переноси заголовки из одного листа на другой. '
-    'Ты умеешь читать таблицы XLSX/CSV/TSV: сначала найди файл через list_downloads или '
+    'Ты умеешь читать таблицы XLSX/ODS/CSV/TSV: сначала найди файл через list_downloads или '
     'list_user_files/list_saved_files, затем read_download(file_id,page=1), read_user_file или read_file '
     'с соответствующим ID. XLSX разбирается готовым Python-инструментом: листы, адреса ячеек, '
     'общие/встроенные строки, числа и сохранённые значения формул. Не пытайся читать XLSX как обычный текст '
@@ -36,7 +38,7 @@ FILE_INSTRUCTION = ('Скачивание кнопкой/JavaScript перехв
     'Формулы не пересчитываются, оформление и объединённые ячейки могут не сохраняться в тексте, '
     'даты Excel могут возвращаться числами: не угадывай даты без формата/подтверждения. '
     'Не утверждай, что прочитал весь большой файл, если результат усечён. Старый XLS не поддерживается: '
-    'попроси XLSX/CSV, сообщи об ограничении. Новые результаты можно сохранять как CSV в Silo '
+    'попроси XLSX/ODS/CSV, сообщи об ограничении. Новые результаты можно сохранять как CSV в Silo '
     'через export_table либо write_silo_file. Инструмента редактирования/создания XLSX сейчас нет: '
     'не обещай изменения файла, при необходимости сообщи missing_capability. '
     'Для больших таблиц не разбирай ZIP вручную: inspect_table показывает структуру всей таблицы, '
@@ -63,7 +65,7 @@ def tool(name, description, properties):
             'parameters': {'type': 'object', 'properties': properties, 'required': list(properties), 'additionalProperties': False}}
 
 
-TABLE_TOOL = tool('search_table', 'Искать и фильтровать XLSX/CSV/TSV. source_task_id=0 — загрузка браузера, иначе вложение задачи из list_saved_files. sheet пустой — все листы. query — поиск подстроки во всей строке без учёта регистра. filters объединены И; column — буквы Excel (A, B, AA), operator — сравнение; value пустой для empty/not_empty. columns=[] — первые 50 колонок. offset/limit — страницы совпадений. Для знакомства вызови без фильтров, limit=5: ответ содержит листы и первые строки с заголовками.', {
+TABLE_TOOL = tool('search_table', 'Искать и фильтровать XLSX/ODS/CSV/TSV. source_task_id=0 — загрузка браузера, иначе вложение задачи из list_saved_files. sheet пустой — все листы. query — поиск подстроки во всей строке без учёта регистра. filters объединены И; column — буквы Excel (A, B, AA), operator — сравнение; value пустой для empty/not_empty. columns=[] — первые 50 колонок. offset/limit — страницы совпадений. Для знакомства вызови без фильтров, limit=5: ответ содержит листы и первые строки с заголовками.', {
     'source_task_id': {'type': 'integer', 'minimum': 0}, 'file_id': {'type': 'string'},
     'sheet': {'type': 'string', 'maxLength': 200}, 'query': {'type': 'string', 'maxLength': 500},
     'filters': {'type': 'array', 'maxItems': 20, 'items': {'type': 'object', 'properties': {
@@ -162,9 +164,8 @@ async def run_file_tool(name, args, browser_request, progress):
         from common.library_client import library_request
         progress.add('Читает файл из Silo')
         result = await library_request(name, args)
-        saved = await browser_request('/files', {'action': 'save_download', **result['file']})
-        output, content = await run_file_tool('read_download', {'file_id': saved['file_id'], 'page': args['page']}, browser_request, progress)
-        return output | result['output'], content
+        output = await browser_request('/read-content', result['file'] | {'page': args['page']})
+        return await file_result(name, output | result['output'], progress)
     if name in LIBRARY_NAMES:
         from common.library_client import library_request
         progress.add({'write_silo_file': 'Сохраняет текстовый файл в Silo', 'list_user_files': 'Просматривает личные папки и файлы', 'read_user_file': 'Читает личный файл',
@@ -177,6 +178,23 @@ async def run_file_tool(name, args, browser_request, progress):
                   'read_download': 'Читает сохранённый файл', 'list_downloads': 'Просматривает сохранённые загрузки',
                   'python_binary': 'Разбирает бинарный файл через Python'}[name])
     output = await browser_request('/files', {'action': name, **args})
+    return await file_result(name, output, progress)
+
+
+async def file_result(name, output, progress):
+    if output.get('status') == 'unsupported_file':
+        from common.agent_issues import report_problem
+        reported = getattr(progress, 'unsupported_formats', set())
+        format_name = output.get('format', 'unknown_binary')
+        if format_name not in reported:
+            result = await report_problem({'tool_name': name, 'category': 'unsupported_file',
+                'description': 'Штатный читатель не поддерживает формат ' + format_name}, progress.record['agent'])
+            if result.get('reported'):
+                reported.add(format_name)
+                progress.unsupported_formats = reported
+                progress.add('Неподдерживаемый формат: сообщение передано администратору')
+            else:
+                progress.add('Не удалось сообщить администратору о неподдерживаемом формате')
     image = output.pop('image', None)
     content = [{'type': 'input_image', 'image_url': f"data:{output.get('mime', 'image/jpeg')};base64,{image}", 'detail': 'high'}] if image else []
     return output, content

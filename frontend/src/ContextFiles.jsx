@@ -50,7 +50,7 @@ export default function ContextFiles({ taskId, disabled }) {
       <Anchor href={`/api${path}/${file.id}`} download>{file.name}{file.pages ? ` · ${file.pages} стр.` : ''}</Anchor>
       <Button size="xs" variant="subtle" color="red" disabled={busy} onClick={() => remove.mutate(file.id)}>Убрать из задачи</Button>
     </Group>)}
-    <FileButton resetRef={reset} onChange={(file) => { if (file) upload.mutate(file); }} accept=".pdf,.docx,.xlsx,.pptx,.txt,.md,.csv,.json,.py,.js,.c,.cpp,.h,.java,.sql,.png,.jpg,.jpeg,.webp">
+    <FileButton resetRef={reset} onChange={(file) => { if (file) upload.mutate(file); }} accept=".pdf,.docx,.xlsx,.ods,.pptx,.txt,.md,.csv,.json,.py,.js,.c,.cpp,.h,.java,.sql,.png,.jpg,.jpeg,.webp">
       {(props) => <Button {...props} variant="default" loading={upload.isPending} disabled={busy || files.isPending || files.data?.length >= 5}>Прикрепить файл</Button>}
     </FileButton>
     <Select label="Из сохранённых файлов" placeholder="Найти файл по названию" searchable clearable value={saved} onChange={setSaved} disabled={busy || library.isPending} data={(library.data ?? []).filter((file) => file.task_id !== taskId || !files.data?.some((attached) => attached.id === file.id)).map((file) => ({ value: `${file.task_id}:${file.id}`, label: `${file.name} · задача #${file.task_id}` }))} />

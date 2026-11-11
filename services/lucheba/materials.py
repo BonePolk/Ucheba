@@ -9,7 +9,7 @@ from threading import Lock
 from uuid import uuid4
 from zipfile import ZipFile
 from xml.etree import ElementTree
-from common.office import spreadsheet_text
+from common.office import spreadsheet_text, table_text
 
 from docx import Document
 from fastapi import HTTPException
@@ -178,11 +178,14 @@ def extract(name, content):
             for table in document.tables:
                 parts.extend(' | '.join(cell.text for cell in row.cells) for row in table.rows)
             return 'text', '\n'.join(parts)[:TEXT_LIMIT], 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-        if suffix in ('.xlsx', '.pptx'):
+        if suffix in ('.xlsx', '.ods', '.pptx'):
             with ZipFile(stream) as archive:
                 if len(archive.infolist()) > 2000 or sum(item.file_size for item in archive.infolist()) > 20 * 1024 * 1024:
                     raise ValueError()
-                if suffix == '.xlsx':
+                if suffix == '.ods':
+                    text = table_text(name, content)
+                    mime = 'application/vnd.oasis.opendocument.spreadsheet'
+                elif suffix == '.xlsx':
                     text = spreadsheet_text(archive)
                     mime = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
                 else:

@@ -11,7 +11,15 @@ from memory import Memory
 async def run(name, args):
     memory = await asyncio.to_thread(Memory)
     content = []
-    if name in ('search_table', 'inspect_table', 'summarize_table', 'export_table'):
+    if name == 'save_browser_download':
+        original = base64.b64decode(args['content'], validate=True)
+        output = await asyncio.to_thread(workspace.save_browser_download, memory, args, original)
+    elif name == 'load_browser_download':
+        info, original = await asyncio.to_thread(workspace.load_browser_download, memory, args['file_id'])
+        output = {'info': info, 'content': base64.b64encode(original).decode()}
+    elif name == 'list_browser_downloads':
+        output = await asyncio.to_thread(workspace.browser_downloads, memory)
+    elif name in ('search_table', 'inspect_table', 'summarize_table', 'export_table'):
         from common.office import search_table, inspect_table, summarize_table, export_table
         if args.get('silo_path'):
             original, version = await asyncio.to_thread(workspace.read_binary, memory, args['silo_path'])

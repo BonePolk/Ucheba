@@ -5,6 +5,7 @@ from pathlib import Path
 from urllib.parse import quote
 import re
 from threading import Lock
+from datetime import datetime, timezone
 
 from fastapi import HTTPException
 from minio.error import S3Error
@@ -43,12 +44,15 @@ def optional_read(memory, key):
 
 def tree(memory, include_attachments=True):
     result = []
+    downloaded = {item['path']: item for item in browser_downloads(memory)}
     for item in memory.client.list_objects(memory.bucket, prefix=memory.prefix + 'files/', recursive=True):
         path = item.object_name[len(memory.prefix + 'files/'):]
         if not path:
             continue
-        result.append({'path': path.rstrip('/'), 'name': path.rstrip('/').rsplit('/', 1)[-1],
-                       'folder': path.endswith('/'), 'editable': not path.endswith('/') and item.size <= MAX_TEXT and Path(path).suffix.lower() not in ('.pdf', '.xlsx', '.xls', '.docx', '.doc', '.pptx', '.zip', '.png', '.jpg', '.jpeg', '.gif', '.webp'), 'size': item.size,
+        result.append({'path': path.rstrip('/'), 'name': downloaded.get(path, {}).get('name', path.rstrip('/').rsplit('/', 1)[-1]),
+                       'source': 'download' if path in downloaded else 'silo',
+                       'modified_at': item.last_modified.isoformat() if item.last_modified else None,
+                       'folder': path.endswith('/'), 'editable': not path.endswith('/') and item.size <= MAX_TEXT and Path(path).suffix.lower() not in ('.pdf', '.xlsx', '.ods', '.xls', '.docx', '.doc', '.pptx', '.zip', '.png', '.jpg', '.jpeg', '.gif', '.webp'), 'size': item.size,
                        'url': '/api/integrations/context/workspace/download?path=' + quote(path, safe='')})
     if not include_attachments:
         return result
@@ -158,3 +162,42 @@ def save_binary(memory, path, content, version=None):
             raise HTTPException(409, 'Файл уже существует или изменился. Прочитайте его версию перед заменой')
         memory.put_bytes(key, content, 'application/octet-stream')
     return {'path': path, 'size': len(content), 'version': hashlib.sha256(content).hexdigest(), 'status': 'saved'}
+
+
+
+def save_browser_download(memory, info, content):
+    file_id = info['file_id']
+    if not re.fullmatch('[a-f0-9]{32}', file_id):
+        raise HTTPException(422, 'Неверный ID загрузки')
+    name = info['name'].replace('\\', '/').split('/')[-1][:160] or 'document'
+    path = personal_path('Загрузки/' + file_id + '-' + name)
+    with write_lock:
+        previous = optional_read(memory, 'downloads/' + file_id + '.json')
+        if previous is not None:
+            return json.loads(previous)
+        if not content or len(content) > 10 * 1024 * 1024:
+            raise HTTPException(413, 'Размер загрузки должен быть от 1 байта до 10 МБ')
+        saved = {'file_id': file_id, 'name': name, 'size': len(content), 'path': path,
+                 'created_at': datetime.now(timezone.utc).isoformat()}
+        memory.put_bytes('files/' + path, content, 'application/octet-stream')
+        memory.put_bytes('downloads/' + file_id + '.json', json.dumps(saved, ensure_ascii=False).encode(), 'application/json')
+    return saved
+
+
+def browser_downloads(memory):
+    result = []
+    for item in memory.client.list_objects(memory.bucket, prefix=memory.prefix + 'downloads/', recursive=True):
+        if re.fullmatch(r'[a-f0-9]{32}\.json', item.object_name.rsplit('/', 1)[-1]):
+            result.append(json.loads(memory.read_bytes(item.object_name[len(memory.prefix):])))
+    return sorted(result, key=lambda item: item.get('created_at', ''), reverse=True)
+
+
+def load_browser_download(memory, file_id):
+    if not re.fullmatch('[a-f0-9]{32}', file_id):
+        raise HTTPException(422, 'Неверный ID загрузки')
+    saved = optional_read(memory, 'downloads/' + file_id + '.json')
+    if saved is None:
+        raise HTTPException(404, 'Загрузка не найдена')
+    info = json.loads(saved)
+    content, version = read_binary(memory, info['path'])
+    return info, content

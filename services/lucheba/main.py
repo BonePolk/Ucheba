@@ -50,6 +50,20 @@ def workspace_tree():
     return workspace.tree(Memory())
 
 
+@app.get('/workspace/preview')
+def workspace_preview(path: str):
+    memory = Memory()
+    if path.startswith('@tasks/'):
+        task_id, file_id = workspace.attachment(path)
+        info = materials.get_info(memory, task_id, file_id)
+        content = memory.read_bytes(materials.file_key(task_id, file_id) + '.bin')
+        name = info['name']
+    else:
+        content, version = workspace.read_binary(memory, path)
+        name = path.rsplit('/', 1)[-1]
+    return {'name': name, 'content': base64.b64encode(content).decode()}
+
+
 @app.get('/workspace/download')
 def download_workspace_file(path: str):
     content, version = workspace.read_binary(Memory(), path)
