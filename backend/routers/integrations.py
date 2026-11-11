@@ -10,9 +10,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 import httpx
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlmodel import Session, select
 
+from common.provider import provider_url
 from common.database import get_engine
 from common.rpc import call, internal_token
 from common.security import require_user
@@ -20,7 +21,7 @@ from common.identity import user_id
 from common.accounts import check_feature, features
 from integrations import codex, gemini, jev, telegram, context, jobs, scheduler
 from common import extraction as pipeline
-from common.settings import SECRET_FIELDS, public_settings, read_settings, report, save_settings
+from common.settings import read_config, SECRET_FIELDS, public_settings, read_settings, report, save_settings
 from common.models.integration import CodexRun, Suggestion
 from common.models.task import Task, TaskCreate
 
@@ -64,13 +65,19 @@ async def stop_schedule_import():
     return result
 
 
-@router.get('/agents/{name}/models')
-async def agent_models(name: Literal['context', 'ameba', 'straus']):
+@router.api_route('/agents/{name}/models', methods=['GET', 'POST'])
+async def agent_models(name: Literal['context', 'ameba', 'straus'], request: Request):
     config, secrets = read_settings(name)
     check_feature(name)
-    if not secrets.get('api_key'):
-        raise HTTPException(400, 'Сначала сохраните API-ключ этого агента')
-    return await call(name, '/models', {'api_key': secrets['api_key']}, timeout=45)
+    body = await request.json() if request.method == 'POST' else {}
+    key = body.get('api_key') or secrets.get('api_key')
+    if not key:
+        raise HTTPException(400, 'Введите API-ключ этого агента')
+    try:
+        endpoint = provider_url(body.get('base_url') or config['base_url'])
+    except ValueError:
+        raise HTTPException(422, 'Проверьте endpoint провайдера') from None
+    return await call(name, '/models', {'api_key': key, 'base_url': endpoint}, timeout=45)
 
 
 @router.get('/queue')
@@ -99,13 +106,19 @@ async def agent_progress(task_id: int = 0, providers: str = 'context,codex'):
         context.get_context(task_id)
     enabled = features()
     allowed = {'context': enabled['context'] or (task_id == 0 and enabled['straus']),
+               'monocle': enabled['context'], 'straus': task_id == 0 and enabled['straus'],
                'jev': enabled['ameba'], 'codex': enabled['codex']}
     names = [name for name in allowed if name in providers.split(',') and allowed[name]]
 
     async def read(name):
-        queued = scheduler.queued(name, task_id)
+        queued = scheduler.queued('context' if name in ('monocle', 'straus') else name, task_id)
         try:
-            if name == 'context' and task_id == 0:
+            if name in ('monocle', 'straus'):
+                service = 'context' if name == 'monocle' else 'straus'
+                path = '/work/progress' if name == 'monocle' and task_id == 0 else f'/progress?task_id={task_id}'
+                result = await call(service, path, method='GET', timeout=2)
+                available = True
+            elif name == 'context' and task_id == 0:
                 operations = []
                 if enabled['context']:
                     operations.append(call('context', '/work/progress', method='GET', timeout=2))
@@ -136,13 +149,17 @@ async def agent_progress_stream(task_id: int = 0, providers: str = 'context,code
     enabled = features()
     sources = []
     requested = providers.split(',')
+    if 'monocle' in requested and enabled['context']:
+        sources.append(('monocle', 'context', 'agent', task_id == 0))
+    if 'straus' in requested and task_id == 0 and enabled['straus']:
+        sources.append(('straus', 'straus', 'agent', False))
     if 'context' in requested:
         if enabled['context']:
             sources.append(('context', 'context', 'agent', task_id == 0))
         if task_id == 0 and enabled['straus']:
             sources.append(('context', 'straus', 'agent', False))
     if 'jev' in requested and enabled['ameba']:
-        sources.append(('jev', 'ameba', 'ranking', False))
+        sources.append(('jev', 'ameba', 'ranking', task_id == 0))
     if 'codex' in requested and enabled['codex']:
         sources.append(('codex', 'codex', 'agent', False))
 
@@ -182,7 +199,7 @@ async def agent_progress_stream(task_id: int = 0, providers: str = 'context,code
                         current = max(runs, key=lambda item: (item['status'] == 'running', item['started_at'])) if runs else None
                         entries.append({'provider': name, 'run': current,
                                         'available': any(value['available'] for value in values),
-                                        'queued': scheduler.queued(name, task_id)})
+                                        'queued': scheduler.queued('context' if name in ('monocle', 'straus') else name, task_id)})
                     yield 'data: ' + json.dumps(entries, ensure_ascii=False) + '\n\n'
                 except TimeoutError:
                     yield ': keepalive\n\n'
@@ -200,7 +217,17 @@ class TelegramConfig(BaseModel):
     enabled: bool = False
 
 
-class GeminiConfig(BaseModel):
+class ProviderConfig(BaseModel):
+    base_url: str = Field(default='https://lenec.tech/v1', max_length=2000)
+
+    @field_validator('base_url')
+    @classmethod
+    def valid_endpoint(cls, value):
+        return provider_url(value)
+
+
+class GeminiConfig(ProviderConfig):
+    base_url: str = 'https://generativelanguage.googleapis.com'
     enabled: bool = False
     model: str = Field(default='gemini-3.8-flash', min_length=1, max_length=100)
     interval_seconds: int = Field(default=300, ge=30, le=86400)
@@ -229,14 +256,13 @@ class CollectorConfig(BaseModel):
     enabled: bool = False
 
 
-class ContextConfig(BaseModel):
+class ContextConfig(ProviderConfig):
     enabled: bool = True
     rewrite_title: bool = False
-    base_url: Literal['https://lenec.tech/v1'] = 'https://lenec.tech/v1'
     model: str = Field(default='gpt-6-luna', min_length=1, max_length=200)
 
 
-class AgentConfig(BaseModel):
+class AgentConfig(ProviderConfig):
     enabled: bool = True
     model: str = Field(default='gpt-6-luna', min_length=1, max_length=200)
 
@@ -332,9 +358,17 @@ async def telegram_analyze():
     return await provider_call('gemini', call('telegram', '/analyze', timeout=300))
 
 
-@router.get('/gemini/models')
-async def gemini_models():
-    return await provider_call('gemini', gemini.models())
+@router.api_route('/gemini/models', methods=['GET', 'POST'])
+async def gemini_models(request: Request):
+    config, secrets = read_settings('gemini')
+    body = await request.json() if request.method == 'POST' else {}
+    try:
+        config['base_url'] = provider_url(body.get('base_url') or config['base_url'])
+    except ValueError:
+        raise HTTPException(422, 'Проверьте endpoint Gemini') from None
+    if body.get('api_key'):
+        secrets['api_key'] = body['api_key']
+    return await call('gemini', '/models', {'config': config, 'secrets': secrets}, timeout=45)
 
 
 @router.post('/gemini/check')
@@ -378,13 +412,32 @@ def jev_ranking():
     return jev.ranking_status()
 
 
+class RankingRequest(BaseModel):
+    feedback: str | None = Field(default=None, max_length=4000)
+
+
 @router.post('/jev/rank')
-async def jev_rank(background: bool = False):
+async def jev_rank(background: bool = False, body: RankingRequest | None = None):
     check_feature('ameba')
+    if not read_config('ameba')['enabled']:
+        raise HTTPException(400, 'Включите Ameba в настройках')
+    if body is not None and body.feedback is not None:
+        jev.save_plan_feedback(body.feedback)
+    with Session(get_engine()) as session:
+        signature = jev.task_state(session)[0]
+    current = scheduler.ranking_requests.get(user_id())
+    if current and current.get('signature') == signature:
+        return {'status': 'running', 'unchanged': True}
+    status = jev.ranking_status()
+    if not status['needs_refresh']:
+        return status | {'unchanged': True}
     await scheduler.interrupt_ranking(own_only=True)
+    from common.calendar import reset_ameba_plan
+    from uuid import uuid4
+    reset_ameba_plan(uuid4().hex)
     if background:
-        return jobs.start(lambda: provider_call('ameba', jev.rank_all(force=True)))
-    return await provider_call('ameba', jev.rank_all(force=True))
+        return jobs.start(lambda: provider_call('ameba', jev.rank_all()))
+    return await provider_call('ameba', jev.rank_all())
 
 
 @router.post('/tasks/{task_id}/jev')
@@ -565,6 +618,16 @@ async def workspace_tree():
     except HTTPException:
         warning = 'Не удалось проверить старые загрузки браузера. Файлы Silo показаны ниже.'
     return {'files': await call('context', '/workspace', method='GET'), 'warning': warning}
+
+
+class WorkspaceUpload(BaseModel):
+    path: str = Field(min_length=1, max_length=500)
+    content: str = Field(max_length=14 * 1024 * 1024)
+
+
+@router.post('/context/workspace/upload')
+async def upload_workspace_file(body: WorkspaceUpload):
+    return await call('context', '/workspace/upload', body.model_dump())
 
 
 @router.get('/context/workspace/preview')

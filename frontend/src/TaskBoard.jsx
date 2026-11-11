@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Alert, Badge, Button, Checkbox, Container, Group, Loader, Paper, SegmentedControl, Select, SimpleGrid, Stack, Table, Text, Title, Tooltip } from '@mantine/core';
+import { Alert, Badge, Button, Checkbox, Container, Group, Loader, Paper, SegmentedControl, Select, SimpleGrid, Stack, Table, Text, Textarea, Title, Tooltip } from '@mantine/core';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { uploadTaskFiles } from './fileUpload';
 import { agentRequest, deleteTask, getTasks, request, saveTask } from './api';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
@@ -39,6 +40,7 @@ export default function TaskBoard({ features = {} }) {
   const [filters, setFilters] = useState({ status: null, priority: null, category: null });
   const [sort, setSort] = useState(features.ameba !== false ? 'jev:asc' : 'deadline:asc');
   const [editor, setEditor] = useState(null);
+  const [planFeedback, setPlanFeedback] = useState(null);
   const taskView = view === 'active' || view === 'archive';
   const automationEnabled = features.codex !== false || features.ameba !== false || features.context !== false;
   const currentSort = features.ameba === false && sort === 'jev:asc' ? 'deadline:asc' : sort;
@@ -58,12 +60,23 @@ export default function TaskBoard({ features = {} }) {
     enabled: features.ameba !== false && !archived, refetchInterval: 15000 });
   const queue = useQuery({ queryKey: ['agent-queue'], queryFn: () => request('/integrations/queue'),
     enabled: !archived && (features.context !== false || features.ameba !== false), refetchInterval: 1000 });
-  const rank = useMutation({ mutationFn: () => agentRequest('/integrations/jev/rank', { method: 'POST' }),
+  const rank = useMutation({ mutationFn: () => agentRequest('/integrations/jev/rank', { method: 'POST', body: JSON.stringify({ feedback: planFeedback ?? ranking.data?.feedback ?? '' }) }),
     onSuccess: async () => { setSort('jev:asc'); await queryClient.invalidateQueries({ queryKey: ['jev-ranking'] }); await refresh(); } });
   const rankingReasons = new Map((ranking.data?.reasons ?? []).map((item) => [item.task_id, item]));
   const positions = new Map((ranking.data?.task_ids ?? []).map((id, index) => [id, index + 1]));
   const save = useMutation({
-    mutationFn: saveTask,
+    mutationFn: async (variables) => {
+      const task = await saveTask(variables);
+      try {
+        await uploadTaskFiles(task.id, variables.files ?? []);
+      } catch (error) {
+        error.savedTask = task;
+        error.message = `Задача сохранена, но не все файлы прикреплены: ${error.message}`;
+        throw error;
+      }
+      return task;
+    },
+    onError: (error) => { if (error.savedTask) refresh(); },
     onSuccess: (task, variables) => {
       setEditor(null);
       if (variables.openAutomation) window.location.assign(`/?task=${task.id}`);
@@ -113,10 +126,14 @@ export default function TaskBoard({ features = {} }) {
         </Paper>
         {!archived && features.context !== false && features.ameba === false && <AgentProgress providers={['context']} active={queue.data?.active?.some((item) => item.provider === 'context')} />}
         {!archived && (features.context !== false || features.ameba !== false) && <AgentQueue queue={queue.data} error={queue.error} />}
-        {features.ameba !== false && !archived && <Stack gap="xs"><Group>
-          <Button variant="light" loading={rank.isPending && !queue.data?.ameba_running} disabled={queue.data?.browser_busy} onClick={() => rank.mutate()}>{queue.data?.ameba_running ? 'Перезапустить Ameba' : 'Обновить порядок Ameba'}</Button>
+        {features.ameba !== false && !archived && <Stack gap="xs">
+          <Textarea label="Что изменить в расписании?" placeholder="Например: оставь утро свободным, а лабораторную перенеси на вечер"
+            autosize minRows={1} maxRows={4} maxLength={4000} value={planFeedback ?? ranking.data?.feedback ?? ''}
+            onChange={(event) => setPlanFeedback(event.currentTarget.value)} description="Замечания сохранятся при обновлении порядка. Подходящие части прошлого плана Амёба постарается оставить." />
+          <Group>
+          <Button variant="light" loading={rank.isPending && !queue.data?.ameba_running} disabled={queue.data?.browser_busy} onClick={() => rank.mutate()}>{queue.data?.ameba_running ? 'Обновить при изменениях' : 'Обновить порядок Ameba'}</Button>
           <Text size="sm" c="dimmed">{ranking.data?.needs_refresh ? 'Порядок нужно обновить.' : `Сравнено задач: ${ranking.data?.ranked_count ?? 0}.`}{ranking.data?.pending_count > 0 && ` Ожидают контекста Monocle: ${ranking.data.pending_count}.`}{ranking.data?.uncertain_comparisons > 0 && ' При неуверенном сравнении сохранён ручной приоритет и дедлайн.'}</Text>
-        </Group>{ranking.data?.explanation && <Tooltip multiline w={320} label={ranking.data.explanation} events={{ hover: true, focus: true, touch: true }}><Text component="button" type="button" size="xs" c="dimmed" style={{ cursor: 'help', background: 'none', border: 0, padding: 0, width: 'fit-content' }}>{ranking.data.needs_refresh ? 'О последней сортировке' : 'Почему такой порядок'}</Text></Tooltip>}<JebaProgress active={rank.isPending} /></Stack>}
+        </Group>{rank.data?.unchanged && <Text size="xs" c="dimmed">{rank.data.status === 'running' ? 'Ameba уже работает с этими данными.' : 'Данные не изменились — сохранённый порядок остаётся.'}</Text>}{ranking.data?.explanation && <Tooltip multiline w={320} label={ranking.data.explanation} events={{ hover: true, focus: true, touch: true }}><Text component="button" type="button" size="xs" c="dimmed" style={{ cursor: 'help', background: 'none', border: 0, padding: 0, width: 'fit-content' }}>{ranking.data.needs_refresh ? 'О последней сортировке' : 'Почему такой порядок'}</Text></Tooltip>}<JebaProgress active={rank.isPending} /></Stack>}
         {error && <Alert color="red">{error.message}</Alert>}
         {tasks.isPending ? <Loader aria-label="Загрузка задач" /> : (
           <Paper withBorder radius="md" p="sm">
@@ -168,7 +185,7 @@ export default function TaskBoard({ features = {} }) {
         )}
         </>}
       </Stack>
-      {editor && <TaskForm task={editor.task} onClose={() => setEditor(null)} allowAutomation={automationEnabled} allowContext={features.context !== false} onSubmit={(data, options) => save.mutate({ id: editor.task?.id, data, ...options })} pending={save.isPending} error={save.error} />}
+      {editor && <TaskForm task={editor.task} onClose={() => setEditor(null)} allowAutomation={automationEnabled} allowContext={features.context !== false} onSubmit={(data, options) => save.mutate({ id: editor.task?.id ?? options.taskId, data, ...options })} pending={save.isPending} error={save.error} />}
     </Container>
   );
 }

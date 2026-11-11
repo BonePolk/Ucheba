@@ -187,3 +187,96 @@ class ModelReconnectLimit(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(client.attempts, 2)
         finally:
             current_user_id.reset(token)
+
+
+class ModelSilence(unittest.IsolatedAsyncioTestCase):
+    async def run_stream(self, behavior, retry='completed'):
+        from common import agent_api
+        from common.progress import Progress
+        response = SimpleNamespace(status='completed', usage=None)
+        streams = []
+        arguments = []
+
+        class FixtureStream:
+            closed = False
+            def __init__(self, mode): self.mode = mode
+            async def __aenter__(self):
+                if self.mode == 'opening':
+                    await asyncio.sleep(10)
+                return self
+            async def __aexit__(self, *args): self.closed = True
+            def __aiter__(self): return self.events()
+            async def events(self):
+                if self.mode in ('silent', 'opening'):
+                    await asyncio.sleep(10)
+                elif self.mode == 'created':
+                    for _ in range(100):
+                        yield SimpleNamespace(type='response.created')
+                        await asyncio.sleep(0.01)
+                elif self.mode == 'partial':
+                    yield SimpleNamespace(type='response.output_text.delta', delta='fixture')
+                    await asyncio.sleep(10)
+                elif self.mode == 'active':
+                    for _ in range(8):
+                        await asyncio.sleep(0.015)
+                        yield SimpleNamespace(type='response.function_call_arguments.delta', delta='fixture')
+                elif self.mode == 'cancelled':
+                    raise asyncio.CancelledError()
+                yield SimpleNamespace(type='response.completed', response=response)
+
+        def stream(**kwargs):
+            arguments.append(kwargs)
+            current = FixtureStream(behavior if not streams else retry)
+            streams.append(current)
+            return current
+
+        token = current_user_id.set(900002)
+        try:
+            with patch.object(agent_api, 'MODEL_IDLE_TIMEOUT', 0.06), Progress('Straus') as progress:
+                progress.begin_response()
+                try:
+                    result = await agent_api.stream_model_response(SimpleNamespace(responses=SimpleNamespace(stream=stream)), progress,
+                        input=[{'role': 'user', 'content': 'fixture'}], tools=[])
+                finally:
+                    self.calls, self.streams, self.events = arguments, streams, list(progress.record['events'])
+                return result
+        finally:
+            current_user_id.reset(token)
+
+    async def test_silence_retries_same_request(self):
+        result = await self.run_stream('silent')
+        self.assertEqual(result.status, 'completed')
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(self.calls[0], self.calls[1])
+        self.assertTrue(self.streams[0].closed)
+        self.assertTrue(any('30 секунд' in event['message'] for event in self.events))
+
+    async def test_opening_connection_has_deadline(self):
+        await self.run_stream('opening')
+        self.assertEqual(len(self.calls), 2)
+
+    async def test_created_events_do_not_hide_silence(self):
+        await self.run_stream('created')
+        self.assertEqual(len(self.calls), 2)
+
+    async def test_pause_after_partial_text_retries(self):
+        await self.run_stream('partial')
+        self.assertEqual(len(self.calls), 2)
+        self.assertTrue(self.streams[0].closed)
+
+    async def test_active_stream_can_take_longer_than_deadline(self):
+        result = await self.run_stream('active')
+        self.assertEqual(result.status, 'completed')
+        self.assertEqual(len(self.calls), 1)
+
+    async def test_second_silence_is_reported(self):
+        from fastapi import HTTPException
+        with self.assertRaises(HTTPException) as error:
+            await self.run_stream('silent', 'silent')
+        self.assertEqual(error.exception.status_code, 502)
+        self.assertEqual(len(self.calls), 2)
+
+    async def test_user_cancellation_is_not_retried(self):
+        with self.assertRaises(asyncio.CancelledError):
+            await self.run_stream('cancelled')
+        self.assertEqual(len(self.calls), 1)

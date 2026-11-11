@@ -162,3 +162,80 @@ def view_events(start, end):
     return [event | {'date': (start + timedelta(days=offset)).isoformat(), 'source': 'calendar'}
             for offset in range((end - start).days + 1)
             for event in config['events'] if occurs(event, start + timedelta(days=offset))]
+
+
+def reset_ameba_plan(run_id):
+    with Session(get_engine()) as session:
+        row = session.get(IntegrationSetting, 'ameba_plan') or IntegrationSetting(name='ameba_plan')
+        row.config = json.dumps({'run_id': run_id})
+        session.add(row)
+        session.commit()
+
+
+def read_ameba_plan():
+    with Session(get_engine()) as session:
+        row = session.get(IntegrationSetting, 'ameba_plan')
+        return json.loads(row.config) if row else {}
+
+
+def save_ameba_plan(run_id, result, revision):
+    if not result.get('schedule'):
+        return
+    with Session(get_engine()) as session:
+        row = session.get(IntegrationSetting, 'ameba_plan')
+        if not row or json.loads(row.config).get('run_id') != run_id:
+            return  # Ответ отменённого запуска не возвращает старый план.
+        row.config = json.dumps({'run_id': run_id, 'revision': revision,
+            'schedule': result['schedule'], 'rest_patterns': result.get('rest_patterns', []),
+            'tasks': result.get('timeline', [])}, ensure_ascii=False)
+        session.add(row)
+        session.commit()
+
+
+def ameba_events(start, end):
+    saved = read_ameba_plan()
+    schedule = saved.get('schedule', {})
+    config = read_config()
+    if not schedule.get('start_at') or saved.get('revision') != config['revision']:
+        return []
+    zone = ZoneInfo(config['timezone'])
+    origin = datetime.fromisoformat(schedule['start_at'])
+    titles = {task['id']: task['title'] for task in saved.get('tasks', [])}
+    names = {'sleep': 'Сон', 'meal': 'Еда', 'break': 'Отдых', 'personal': 'Личное время'}
+    result = []
+    def add(key, left, right, kind, title, task_id=None):
+        day = left.astimezone(zone).date()
+        while left < right:
+            midnight = datetime.combine(day + timedelta(days=1), datetime.min.time(), zone)
+            stop = min(right, midnight)
+            if start <= day <= end:
+                result.append({'id': f'ameba-{saved["run_id"]}-{key}-{day}', 'date': day.isoformat(),
+                    'start': left.astimezone(zone).strftime('%H:%M'),
+                    'end': '24:00' if stop == midnight else stop.astimezone(zone).strftime('%H:%M'),
+                    'kind': kind, 'title': title, 'task_id': task_id, 'source': 'ameba',
+                    'summary': 'Временный план Ameba. Сбросится при следующем запуске.'})
+            left, day = stop, day + timedelta(days=1)
+    for index, pattern in enumerate(saved.get('rest_patterns', [])):
+        for offset in range((end - start).days + 1):
+            day = start + timedelta(days=offset)
+            if day < origin.astimezone(zone).date() or day.weekday() not in pattern['weekdays']:
+                continue
+            left = datetime.combine(day, datetime.min.time(), zone)
+            hour, minute = map(int, pattern['start'].split(':'))
+            right_hour, right_minute = map(int, pattern['end'].split(':'))
+            begin = left + timedelta(hours=hour, minutes=minute)
+            finish = left + timedelta(hours=right_hour, minutes=right_minute)
+            if finish > origin:
+                add(f'rest-{index}', max(begin, origin), finish, pattern['kind'], pattern['title'])
+    for block in schedule.get('blocks', []):
+        if block.get('permanent'):
+            continue
+        left = (origin + timedelta(minutes=block['start'])).astimezone(zone)
+        right = (origin + timedelta(minutes=block['start'] + block['minutes'])).astimezone(zone)
+        if any(event['kind'] == block['kind'] and event['date'] == left.date().isoformat()
+               and event['start'] <= left.strftime('%H:%M')
+               and event['end'] >= ('24:00' if right.date() != left.date() else right.strftime('%H:%M'))
+               and (left.date() == right.date() or (right.hour == 0 and right.minute == 0)) for event in result):
+            continue
+        add(block['id'], left, right, block['kind'], titles.get(block.get('task_id')) or block.get('title') or names.get(block['kind'], 'Занято'), block.get('task_id'))
+    return result

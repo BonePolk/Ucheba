@@ -25,7 +25,7 @@ export default function Integrations({ features = {} }) {
 function IntegrationForms({ data, features }) {
   const client = useQueryClient();
   const [telegram, setTelegram] = useState({ enabled: data.telegram.enabled, api_id: '', api_hash: '', phone: '' });
-  const [gemini, setGemini] = useState({ enabled: data.gemini.enabled, model: data.gemini.model, interval_seconds: data.gemini.interval_seconds, confidence_threshold: data.gemini.confidence_threshold, timezone: data.gemini.timezone, owner_context: data.gemini.owner_context, api_key: '' });
+  const [gemini, setGemini] = useState({ enabled: data.gemini.enabled, base_url: data.gemini.base_url || 'https://generativelanguage.googleapis.com', model: data.gemini.model, interval_seconds: data.gemini.interval_seconds, confidence_threshold: data.gemini.confidence_threshold, timezone: data.gemini.timezone, owner_context: data.gemini.owner_context, api_key: '' });
   const [codex, setCodex] = useState({ enabled: data.codex.enabled, auto_prepare: data.codex.auto_prepare });
   const [code, setCode] = useState('');
   const [password, setPassword] = useState('');
@@ -33,7 +33,7 @@ function IntegrationForms({ data, features }) {
   const [chatIds, setChatIds] = useState(data.telegram.chat_ids.map(String));
   const [notice, setNotice] = useState('');
   const chats = useQuery({ queryKey: ['integrations', 'chats'], queryFn: () => request('/integrations/telegram/chats'), enabled: false, retry: false });
-  const models = useQuery({ queryKey: ['integrations', 'models'], queryFn: () => request('/integrations/gemini/models'), enabled: false, retry: false });
+  const models = useQuery({ queryKey: ['integrations', 'models', gemini.base_url], queryFn: () => request('/integrations/gemini/models', { method: 'POST', body: JSON.stringify({ base_url: gemini.base_url, api_key: gemini.api_key }) }), enabled: false, retry: false });
   const [codexOpened, setCodexOpened] = useState(data.codex.enabled);
   const codexState = useQuery({ queryKey: ['integrations', 'codex'], enabled: features.codex !== false && codexOpened, queryFn: () => request('/integrations/codex/status'), refetchInterval: 10000, retry: false });
   const mutation = useMutation({
@@ -92,6 +92,7 @@ function IntegrationForms({ data, features }) {
       </Stack></Paper>}
       {features.gemini !== false && <Paper withBorder p="lg"><Stack>
         <Title order={3}>Gemini</Title>
+        <TextInput label="Endpoint Gemini API" description="Адрес провайдера с нативным Gemini API" value={gemini.base_url} onChange={field(setGemini, 'base_url')} />
         <PasswordInput label="API-ключ" placeholder={data.gemini.configured.api_key ? 'Сохранён' : ''} value={gemini.api_key} onChange={field(setGemini, 'api_key')} />
         <Select label="Модель" searchable data={[...new Set([gemini.model, ...(models.data ?? [])])]} value={gemini.model} allowDeselect={false} onChange={(model) => setGemini({ ...gemini, model })} />
         <Button variant="subtle" loading={models.isFetching} onClick={() => models.refetch()}>Загрузить доступные модели</Button>

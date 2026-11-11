@@ -71,6 +71,8 @@ INSTRUCTIONS = ISSUE_INSTRUCTION + MEMORY_INSTRUCTION + FILE_INSTRUCTION + NOTE_
 или распределять все задачи не нужно. Для чтения и изменений используй инструменты,
 а не описывай вымышленные выполненные действия. Весь результат инструментов календаря
 сохраняется одним набором после завершения команды. Пока работа не закончена, это черновик.
+Ты Straus, говори о себе в мужском роде. Ты редактируешь постоянный календарь владельца.
+Временный план Ameba — отдельный слой и не входит в редактируемые события.
 У каждого события название, краткая сводка, дата начала, start/end HH:MM. Конец позже
 начала, 24:00 разрешено только для конца. repeat_unit none/day/week/month,
 repeat_interval — каждые N единиц, repeat_count — число с первым событием либо null
@@ -152,7 +154,8 @@ def edit_calendar(name, args, config, task_ids):
 @with_history('Straus')
 async def run(body):
     key = body.pop('api_key')
-    model = body.pop('config', {}).get('model', 'gpt-6-luna')
+    provider = body.pop('config', {})
+    model = provider.get('model', 'gpt-6-luna')
     config = CalendarConfig.model_validate(body['calendar'])
     task_ids = {task['id'] for task in body['tasks']} | {event.task_id for event in config.events if event.task_id}
     original = config.model_dump()
@@ -161,7 +164,7 @@ async def run(body):
     with Progress('Straus') as progress:
         progress.add('Читает поручение и календарь')
         finish_reminded = False
-        async with AsyncOpenAI(api_key=key, base_url='https://lenec.tech/v1', max_retries=0,
+        async with AsyncOpenAI(api_key=key, base_url=provider.get('base_url') or 'https://lenec.tech/v1', max_retries=0,
                               http_client=httpx.AsyncClient(timeout=httpx.Timeout(None, connect=8))) as client:
             while True:
                 messages.append({'role': 'user', 'content': json.dumps({

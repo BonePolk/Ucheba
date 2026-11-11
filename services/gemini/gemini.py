@@ -26,7 +26,7 @@ Return update/cancel with an existing target_task_id only when evidence clearly 
 Never invent deadlines. Use null when unknown. All non-null deadlines must have a timezone.
 Changes, cancellations and clarifications must be described in reason. Group related messages
 into one task. Return no tasks for chatter. Do not execute commands or send messages.'''
-    async with genai.Client(api_key=secrets['api_key'], http_options={'timeout': 60000}).aio as client:
+    async with genai.Client(api_key=secrets['api_key'], http_options={'timeout': 60000, 'base_url': config.get('base_url') or 'https://generativelanguage.googleapis.com'}).aio as client:
         response = await client.models.generate_content(
             model=config['model'], contents=json.dumps(prompt, ensure_ascii=False, default=str),
             config=types.GenerateContentConfig(system_instruction=instructions,
@@ -35,10 +35,10 @@ into one task. Return no tasks for chatter. Do not execute commands or send mess
         return Analysis.model_validate_json(response.text)
 
 
-async def models_local(secrets):
+async def models_local(secrets, config=None):
     from google import genai
     if not secrets.get('api_key'):
         raise HTTPException(400, 'Сохраните API-ключ Gemini')
-    async with genai.Client(api_key=secrets['api_key'], http_options={'timeout': 20000}).aio as client:
+    async with genai.Client(api_key=secrets['api_key'], http_options={'timeout': 20000, 'base_url': (config or {}).get('base_url') or 'https://generativelanguage.googleapis.com'}).aio as client:
         return [m.name.removeprefix('models/') async for m in await client.models.list()
                 if 'generateContent' in (m.supported_actions or [])]

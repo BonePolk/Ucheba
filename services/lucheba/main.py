@@ -50,6 +50,20 @@ def workspace_tree():
     return workspace.tree(Memory())
 
 
+class WorkspaceUpload(BaseModel):
+    path: str = Field(min_length=1, max_length=500)
+    content: str = Field(max_length=14 * 1024 * 1024)
+
+
+@app.post('/workspace/upload')
+def upload_workspace_file(body: WorkspaceUpload):
+    try:
+        content = base64.b64decode(body.content, validate=True)
+    except ValueError:
+        raise HTTPException(422, 'Некорректный файл') from None
+    return workspace.save_binary(Memory(), body.path, content)
+
+
 @app.get('/workspace/preview')
 def workspace_preview(path: str):
     memory = Memory()
@@ -232,7 +246,7 @@ async def provider_error(request: Request, exc):
     if isinstance(exc, APITimeoutError):
         detail = 'Monocle: превышено время ожидания соединения или ответа шлюза.'
     elif isinstance(exc, APIConnectionError):
-        detail = 'Monocle: не удалось подключиться к шлюзу. Проверьте доступ к lenec.tech из контейнера context.'
+        detail = 'Monocle: не удалось подключиться к шлюзу. Проверьте endpoint провайдера и доступ к нему из контейнера.'
     elif isinstance(exc, ValidationError):
         # Не выводим str(exc): Pydantic включает туда содержимое ответа модели.
         errors = []
@@ -268,7 +282,9 @@ class ContextResult(BaseModel):
 @with_history('Monocle')
 async def analyze(body: dict):
     key = body.pop('api_key', None)
-    body['_model'] = body.pop('config', {}).get('model', 'gpt-6-luna')
+    config = body.pop('config', {})
+    body['_model'] = config.get('model', 'gpt-6-luna')
+    body['_base_url'] = config.get('base_url') or 'https://lenec.tech/v1'
     if not key:
         raise HTTPException(503, 'Сохраните личный API-ключ Monocle в профиле')
     task_id = body.get('task_id')
@@ -281,7 +297,7 @@ async def analyze(body: dict):
 async def analyze_task(key, task_id, body, progress):
     memory = await asyncio.to_thread(Memory)
     http = httpx.AsyncClient(timeout=httpx.Timeout(None, connect=8))
-    async with AsyncOpenAI(api_key=key, base_url='https://lenec.tech/v1',
+    async with AsyncOpenAI(api_key=key, base_url=body.pop('_base_url', 'https://lenec.tech/v1'),
                           http_client=http, max_retries=0) as client:
         return await run_agent(client, memory, task_id, body, progress)
 
@@ -405,9 +421,9 @@ async def run_agent(client, memory, task_id, body, progress):
             raise HTTPException(502, 'Monocle: ответ не завершён. Возможно, исчерпан лимит токенов.')
         if not calls:
             if any(part.type == 'refusal' for item in response.output if item.type == 'message' for part in item.content):
-                raise HTTPException(502, 'Monocle отказалась обрабатывать этот запрос.')
+                raise HTTPException(502, 'Monocle отказался обрабатывать этот запрос.')
             if not response.output_text:
-                raise HTTPException(502, 'Monocle не вернула структурированный контекст')
+                raise HTTPException(502, 'Monocle не вернул структурированный контекст')
             # Промежуточный текст рядом с вызовом инструмента не является итогом.
             text = response.output_text.strip().lstrip('\ufeff')
             if text.startswith('```') and text.endswith('```'):

@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Alert, Badge, Button, Collapse, Group, Loader, Paper, Stack, Text } from '@mantine/core';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 
-const names = { context: 'Monocle', jev: 'Ameba', codex: 'Codex' };
+const names = { monocle: 'Monocle', straus: 'Straus', context: 'Monocle', jev: 'Ameba', codex: 'Codex' };
 const statuses = { running: 'Работает', completed: 'Завершено', failed: 'Ошибка', interrupted: 'Прервано', blocked: 'Нужны данные или доступ', unchanged: 'Без изменений' };
 
 export default function AgentProgress({ taskId = 0, providers, active = false, children }) {
@@ -107,7 +107,7 @@ export default function AgentProgress({ taskId = 0, providers, active = false, c
     </Group>}
     {run?.agent_comment && <Text size="xs" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>Пояснение агента: <AgentExplanation text={run.agent_comment} initialText={seenExplanations.current.get(`${run.id}:comment`) ?? (receivedLog.current ? '' : run.agent_comment)} /></Text>}
 
-    {typeof children === 'function' ? children(query.data ?? []) : children}
+    {typeof children === 'function' ? children(query.data ?? [], current) : children}
     <Collapse in={opened}><Stack gap="xs" mt="xs">
       <Group gap="xs">{(current ? [current] : []).map(({ provider, run }) => <Badge key={provider} color={run.status === 'failed' ? 'red' : run.status === 'blocked' ? 'yellow' : run.status === 'running' ? 'purple' : 'gray'} variant="light">{(run.agent === 'Lucheba' ? 'Monocle' : run.agent) ?? names[provider]} · {statuses[run.status]}</Badge>)}</Group>
       <Text size="xs" c="dimmed">{run?.token_usage ? `Подтверждённые токены: вход ${run.token_usage.input_tokens ?? 'нет данных'} · выход ${run.token_usage.output_tokens ?? 'нет данных'}` : 'Токены: нет данных'}{run?.model_waiting && !run.current_usage_known && run.token_usage ? ' · текущий запрос: нет данных' : ''}</Text>

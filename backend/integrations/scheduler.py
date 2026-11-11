@@ -28,21 +28,25 @@ async def interrupt_ranking(own_only=False):
 
 
 async def run_ranking(body):
+    from common import calendar
     run_id = uuid4().hex
+    calendar.reset_ameba_plan(run_id)
+    revision = calendar.read_config()['revision']
 
     async def request():
         try:
-            return await call('ameba', '/rank', body | {'run_id': run_id}, timeout=None)
+            return await call('ameba', '/rank', {key: value for key, value in body.items() if key != 'input_signature'} | {'run_id': run_id}, timeout=None)
         except asyncio.CancelledError:
             # Сначала останавливаем модель в отдельном сервисе, затем отдаём очередь.
             await call('ameba', '/cancel', {'run_id': run_id}, timeout=None)
             raise
 
     task = asyncio.create_task(request())
-    entry = {'owner': user_id(), 'task': task}
+    entry = {'owner': user_id(), 'task': task, 'signature': body.get('input_signature')}
     ranking_requests[user_id()] = entry
     try:
-        return await task
+        result = await task
+        return result | {'plan_run_id': run_id, 'calendar_revision': revision}
     except asyncio.CancelledError:
         if asyncio.current_task().cancelling():
             raise

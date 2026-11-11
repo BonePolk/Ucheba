@@ -15,13 +15,22 @@ async def run():
     from routers.integrations import provider_call
     codex.recover_runs()
     next_score = next_prepare = 0
+    # Запуск сервера сам по себе не повод заново строить расписание.
+    previous_inputs = jev.automatic_inputs()
     while True:
         now = time.monotonic()
         try:
             config = read_config('ameba')
             if config['enabled'] and now >= next_score:
                 next_score = now + 60
-                await provider_call('ameba', jev.rank_all())
+                inputs = jev.automatic_inputs()
+                if inputs != previous_inputs:
+                    # Не повторяем один и тот же запрос каждую минуту при ошибке модели.
+                    previous_inputs = inputs
+                    await provider_call('ameba', jev.rank_all())
+                    # После успешного расчёта учитываем уточнения Monocle.
+                    # При ошибке новые изменения пользователя не теряются.
+                    previous_inputs = jev.automatic_inputs()
             agent, _ = read_settings('codex')
             if agent['enabled'] and agent['auto_prepare'] and now >= next_prepare and not (codex.job_task and not codex.job_task.done()):
                 next_prepare = now + 60

@@ -20,6 +20,8 @@ NOTE_TOOL = {
                    'required': ['text'], 'additionalProperties': False},
 }
 NOTE_INSTRUCTION = (
+    'Ameba — женский род (я проверила/запланировала), Monocle и Straus — мужской '
+    '(я проверил/нашёл/запланировал). Используй род текущего агента в публичных пояснениях. '
     'Регулярно поясняй работу через agent_note, чтобы владелец понимал цель текущего этапа. '
     'Это свободный выбор, а не обязательный вызов перед каждым инструментом. '
     'Хорошие моменты: начало работы, переход к другой проверке или источнику, '
@@ -76,7 +78,7 @@ async def stream_progress(task_id=0, namespace='agent', work=False):
         subscribers.setdefault(owner, set()).add(listener)
     try:
         while True:
-            record = get_work_progress() if work else get_progress(task_id, namespace)
+            record = get_work_progress(namespace) if work else get_progress(task_id, namespace)
             yield 'data: ' + json.dumps(record, ensure_ascii=False) + '\n\n'
             try:
                 await asyncio.wait_for(queue.get(), timeout=15)
@@ -217,11 +219,11 @@ def get_progress(task_id=0, namespace='agent'):
         return dict(record, events=list(record['events'])) if record else None
 
 
-def get_work_progress():
+def get_work_progress(namespace='agent'):
     owner = user_id()
     with records_lock:
-        runs = [record for (account, task, namespace), record in records.items()
-                if account == owner and namespace == 'agent']
+        runs = [record for (account, task, record_namespace), record in records.items()
+                if account == owner and record_namespace == namespace]
         if not runs:
             return None
         latest = max(runs, key=lambda run: (run['status'] == 'running', run['started_at']))

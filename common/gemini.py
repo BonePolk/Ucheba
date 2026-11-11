@@ -12,7 +12,7 @@ async def analyze(messages, context, existing, chat_title, owner):
 
 
 async def models():
-    _, secrets = read_settings('gemini')
-    return await call('gemini', '/models', {'secrets': secrets})
+    config, secrets = read_settings('gemini')
+    return await call('gemini', '/models', {'config': config, 'secrets': secrets})
 
 

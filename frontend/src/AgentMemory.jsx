@@ -6,19 +6,26 @@ import { request } from './api';
 export default function AgentMemory() {
   const client = useQueryClient();
   const [editing, setEditing] = useState(null);
+  const [adding, setAdding] = useState(false);
+  const [newFact, setNewFact] = useState('');
   const memory = useQuery({ queryKey: ['agent-memory'], queryFn: () => request('/auth/agent-memory'), refetchInterval: 10000 });
   const save = useMutation({
     mutationFn: () => request('/auth/agent-memory', { method: 'PUT', body: JSON.stringify(editing) }),
-    onSuccess: () => { setEditing(null); client.invalidateQueries({ queryKey: ['agent-memory'] }); },
+    onSuccess: () => { setEditing(null); client.invalidateQueries({ queryKey: ['agent-memory'] }); client.invalidateQueries({ queryKey: ['jev-ranking'] }); },
+  });
+  const create = useMutation({
+    mutationFn: (fact) => request('/auth/agent-memory', { method: 'PUT', body: JSON.stringify(fact) }),
+    onSuccess: () => { setNewFact(''); setAdding(false); client.invalidateQueries({ queryKey: ['agent-memory'] }); client.invalidateQueries({ queryKey: ['jev-ranking'] }); },
   });
   const remove = useMutation({
     mutationFn: (key) => request(`/auth/agent-memory/${encodeURIComponent(key)}`, { method: 'DELETE' }),
-    onSuccess: () => client.invalidateQueries({ queryKey: ['agent-memory'] }),
+    onSuccess: () => { client.invalidateQueries({ queryKey: ['agent-memory'] }); client.invalidateQueries({ queryKey: ['jev-ranking'] }); },
   });
   return <Paper withBorder p="md"><Stack gap="xs">
-    <Title order={4}>Что агенты знают обо мне</Title>
+    <Group justify="space-between"><Title order={4}>Что агенты знают обо мне</Title><Button size="compact-xs" variant="light" onClick={() => setAdding(!adding)}>+ Факт</Button></Group>
     <Text size="xs" c="dimmed">Общая память Straus, Monocle и Ameba. Факты о вас и проверенные способы работы с сайтами используются в следующих поручениях.</Text>
-    {(memory.error || save.error || remove.error) && <Alert color="red">{(memory.error || save.error || remove.error).message}</Alert>}
+    {adding && <Stack gap="xs"><Textarea label="Что агентам нужно знать о вас" placeholder="Например: не хочу просыпаться рано, утром мне тяжело сосредоточиться" value={newFact} onChange={(event) => setNewFact(event.currentTarget.value)} autosize minRows={2} maxLength={1500} /><Group gap="xs"><Button size="compact-xs" loading={create.isPending} disabled={!newFact.trim()} onClick={() => create.mutate({ key: `user.${crypto.randomUUID()}`, text: newFact.trim() })}>Запомнить</Button><Button size="compact-xs" variant="subtle" onClick={() => setAdding(false)}>Отмена</Button></Group></Stack>}
+    {(memory.error || save.error || remove.error || create.error) && <Alert color="red">{(memory.error || save.error || remove.error || create.error).message}</Alert>}
     {!memory.isPending && !memory.data?.length && <Text size="sm" c="dimmed">Сохранённых фактов пока нет.</Text>}
     {(memory.data ?? []).map((fact) => <Paper key={fact.key} withBorder p="xs">
       {editing?.key === fact.key ? <Stack gap="xs">

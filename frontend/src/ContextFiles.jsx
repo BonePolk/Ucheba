@@ -2,15 +2,7 @@ import { useRef, useState } from 'react';
 import { Alert, Anchor, Button, FileButton, Group, Select, Stack, Text } from '@mantine/core';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { request } from './api';
-
-function readFile(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result.split(',')[1]);
-    reader.onerror = () => reject(new Error('Не удалось прочитать файл'));
-    reader.readAsDataURL(file);
-  });
-}
+import { fileContent } from './fileUpload';
 
 export default function ContextFiles({ taskId, disabled }) {
   const client = useQueryClient();
@@ -28,7 +20,7 @@ export default function ContextFiles({ taskId, disabled }) {
   const upload = useMutation({
     mutationFn: async (file) => {
       if (file.size > 10 * 1024 * 1024) throw new Error('Максимальный размер файла — 10 МБ');
-      return request(path, { method: 'POST', body: JSON.stringify({ name: file.name, content: await readFile(file) }) });
+      return request(path, { method: 'POST', body: JSON.stringify({ name: file.name, content: await fileContent(file) }) });
     },
     onSuccess: refresh,
     onSettled: () => reset.current?.(),
@@ -45,7 +37,7 @@ export default function ContextFiles({ taskId, disabled }) {
   const error = files.error || library.error || upload.error || remove.error || reuse.error;
   return <Stack gap="xs">
     <Text fw={500}>Файлы для оценки контекста</Text>
-    <Text size="xs" c="dimmed">До 5 вложений по 10 МБ: PDF, DOCX, XLSX, PPTX, текст и изображения. Monocle сама выбирает подходящие документы из вложений и сохранённой библиотеки, открывает их и нужные страницы PDF. Ручной выбор из библиотеки необязателен.</Text>
+    <Text size="xs" c="dimmed">До 5 вложений по 10 МБ: PDF, DOCX, XLSX, PPTX, текст и изображения. Monocle сам выбирает подходящие документы из вложений и сохранённой библиотеки, открывает их и нужные страницы PDF. Ручной выбор из библиотеки необязателен.</Text>
     {files.data?.map((file) => <Group key={file.id} justify="space-between">
       <Anchor href={`/api${path}/${file.id}`} download>{file.name}{file.pages ? ` · ${file.pages} стр.` : ''}</Anchor>
       <Button size="xs" variant="subtle" color="red" disabled={busy} onClick={() => remove.mutate(file.id)}>Убрать из задачи</Button>

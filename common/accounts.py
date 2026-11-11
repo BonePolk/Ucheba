@@ -3,6 +3,7 @@ import os
 from fastapi import HTTPException
 from pwdlib import PasswordHash
 from sqlmodel import Session, select
+from sqlalchemy import text
 
 from common.database import engine
 from common.identity import current_user_id, user_id
@@ -20,6 +21,9 @@ def bootstrap():
                 raise RuntimeError('Для первоначального аккаунта admin задайте ADMIN_PASSWORD не короче 16 символов')
             session.add(User(id=1, username='admin', password_hash=passwords.hash(password), is_admin=True))
             session.commit()
+            if engine.dialect.name == 'postgresql':
+                session.execute(text("SELECT setval(pg_get_serial_sequence('\"user\"', 'id'), (SELECT max(id) FROM \"user\"), true)"))
+                session.commit()
     # Перенос старого ключа Monocle только владельцу, с шифрованием в его настройках.
     from common.settings import save_settings
     from common.models.integration import IntegrationSetting

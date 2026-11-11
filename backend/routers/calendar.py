@@ -8,7 +8,7 @@ from common import calendar
 from common.database import get_engine
 from common.models.task import Task
 from common.security import require_user
-from common.accounts import check_feature
+from common.accounts import check_feature, features
 from integrations import straus
 
 router = APIRouter(prefix='/api/calendar', tags=['calendar'], dependencies=[Depends(require_user)])
@@ -20,7 +20,7 @@ def get_calendar(start: date, end: date):
         raise HTTPException(422, 'Выберите период не длиннее 63 дней')
     config = calendar.read_config()
     return {'config': config, 'timezone': config['timezone'],
-            'events': calendar.view_events(start, end), 'today': calendar.today().isoformat()}
+            'events': calendar.view_events(start, end) + (calendar.ameba_events(start, end) if features()['ameba'] else []), 'today': calendar.today().isoformat()}
 
 
 @router.put('')

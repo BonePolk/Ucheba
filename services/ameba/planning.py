@@ -18,6 +18,7 @@ class Step(BaseModel):
 class Plan(BaseModel):
     model_config = {'extra': 'forbid'}
     task_id: int
+    focus_minutes: int = Field(ge=10, le=30, description='Время на концентрацию при начале/возобновлении задачи. Этапы steps не включают это время.')
     steps: list[Step] = Field(min_length=1)
     assumptions: list[str]
     effort: Literal['low', 'medium', 'high', 'unknown']
@@ -41,6 +42,7 @@ TOOL = {
 class Order(BaseModel):
     model_config = {'extra': 'forbid'}
     task_ids: list[int]
+    keep_previous_times: bool = Field(description='Сохранять прежнее время начала задач, когда оно ещё подходит. false — если замечания владельца, сроки или новые приоритеты требуют перестановки.')
 
 
 ORDER_TOOL = {
@@ -83,20 +85,28 @@ def rest_timeline(order, plans):
     return blocks
 
 
-def weekly_timeline(order, plans, week, now):
+def weekly_timeline(order, plans, week, now, previous=None):
     zone = ZoneInfo(week['timezone'])
     start = datetime.fromisoformat(now).astimezone(timezone.utc)
     day = start.astimezone(zone).date()
-    remaining = {task_id: plans[task_id]['max_minutes'] for task_id in order}
+    remaining = {task_id: plans[task_id].get('work_max_minutes', plans[task_id]['max_minutes']) for task_id in order}
     todo = [task_id for task_id in order if remaining[task_id] > 0]
     if not todo:
         return []
     blocks = []
     cursor = start
+    preferred = {}
+    if previous and previous.get('start_at'):
+        origin = datetime.fromisoformat(previous['start_at']).astimezone(timezone.utc)
+        for block in previous.get('blocks', []):
+            if block['kind'] == 'task' and not block.get('permanent'):
+                target = origin + timedelta(minutes=block['start'])
+                if target >= start:
+                    preferred.setdefault(block['task_id'], target)
     parts = {}
     streak = 0
 
-    def add(kind, end, task_id=None, title=''):
+    def add(kind, end, task_id=None, title='', permanent=False, focus_minutes=0):
         nonlocal cursor
         length = int((end - cursor).total_seconds() / 60)
         if length <= 0:
@@ -105,7 +115,7 @@ def weekly_timeline(order, plans, week, now):
         part = parts.get(key, 0)
         parts[key] = part + 1
         blocks.append({'id': f'{key}-{part}', 'kind': kind, 'task_id': task_id,
-                       'title': title, 'start': int((cursor - start).total_seconds() / 60), 'minutes': length})
+                       'title': title, 'permanent': permanent, 'focus_minutes': focus_minutes, 'start': int((cursor - start).total_seconds() / 60), 'minutes': length})
         cursor = end
 
     for offset in range(366):
@@ -121,12 +131,10 @@ def weekly_timeline(order, plans, week, now):
             if right <= cursor:
                 continue
             if left > cursor:
-                add('personal', left)
+                cursor = left  # Свободное время не обязано становиться событием.
                 streak = 0
-            if not todo:
-                return blocks
             if slot['kind'] != 'work':
-                add(slot['kind'], right, slot.get('task_id'), title=slot['title'])
+                add(slot['kind'], right, slot.get('task_id'), title=slot.get('title', ''), permanent=bool(slot.get('id')))
                 streak = 0
                 continue
             while cursor < right and todo:
@@ -134,26 +142,73 @@ def weekly_timeline(order, plans, week, now):
                 if available <= 0:
                     cursor = right
                     break
-                if streak >= 90:
-                    add('break', cursor + timedelta(minutes=min(15, available)))
+                task_id = todo[0]
+                target = preferred.pop(task_id, None)
+                if target and target > cursor:
+                    cursor = min(target, right)
+                    streak = 0
+                    if cursor == right:
+                        preferred[task_id] = target
+                        break
+                    available = int((right - cursor).total_seconds() / 60)
+                focus = plans[task_id].get('focus_minutes', 20)
+                minimum_work = min(30, remaining[task_id])
+                if available < focus + minimum_work:
+                    cursor = right  # Не начинаем большую задачу ради десяти минут работы.
+                    streak = 0
+                    break
+                if 90 - streak < focus + minimum_work:
+                    add('break', cursor + timedelta(minutes=min(15, available)), title='Перерыв для восстановления внимания')
                     streak = 0
                     continue
-                task_id = todo[0]
-                amount = min(available, 90 - streak, remaining[task_id])
-                add('task', cursor + timedelta(minutes=amount), task_id)
-                streak += amount
+                capacity = min(available - focus, 90 - streak - focus)
+                amount = min(capacity, remaining[task_id])
+                if remaining[task_id] > capacity and remaining[task_id] - capacity < 30:
+                    amount = min(capacity, (remaining[task_id] + 1) // 2)
+                add('task', cursor + timedelta(minutes=focus + amount), task_id, focus_minutes=focus)
+                streak += focus + amount
                 remaining[task_id] -= amount
                 if remaining[task_id] == 0:
                     todo.pop(0)
-                    if not todo:
-                        return blocks
         if not todo:
             return blocks
     raise ValueError('В расписании недостаточно рабочего времени на ближайший год')
 
 
-def reorder(arguments, plans, expected, week=None, now=None):
-    order = Order.model_validate_json(arguments).task_ids
+def validate_blocks(blocks, week=None, now=None):
+    previous_end = 0
+    for block in sorted(blocks, key=lambda item: item['start']):
+        if block['minutes'] <= 0 or block['start'] < previous_end:
+            raise ValueError('Блоки плана пересекаются; некорректный план не показан')
+        previous_end = block['start'] + block['minutes']
+        if block['kind'] != 'task' or block.get('permanent') or not week or not now:
+            continue
+        origin = datetime.fromisoformat(now).astimezone(timezone.utc)
+        left = origin + timedelta(minutes=block['start'])
+        right = left + timedelta(minutes=block['minutes'])
+        zone = ZoneInfo(week['timezone'])
+        day = left.astimezone(zone).date()
+        while day <= right.astimezone(zone).date():
+            midnight = datetime.combine(day, time(), zone)
+            for slot in slots_for_date(week, day):
+                if slot['kind'] == 'work':
+                    continue
+                hour, minute = map(int, slot['start'].split(':'))
+                end_hour, end_minute = map(int, slot['end'].split(':'))
+                occupied_start = (midnight + timedelta(hours=hour, minutes=minute)).astimezone(timezone.utc)
+                occupied_end = (midnight + timedelta(hours=end_hour, minutes=end_minute)).astimezone(timezone.utc)
+                if left < occupied_end and right > occupied_start:
+                    raise ValueError(f'Задача {block["task_id"]} пересекает занятость {day.isoformat()}; некорректный план не показан')
+            day += timedelta(days=1)
+
+
+def reorder(arguments, plans, expected, week=None, now=None, previous=None):
+    if now:
+        clock = datetime.fromisoformat(now).astimezone(timezone.utc)
+        minute = clock.replace(second=0, microsecond=0)
+        now = (minute + timedelta(minutes=1) if minute < clock else minute).isoformat()
+    request = Order.model_validate_json(arguments)
+    order = request.task_ids
     missing_plans = [task_id for task_id in expected if task_id not in plans]
     if missing_plans:
         raise ValueError(f'Сначала вызови plan_tasks для задач: {missing_plans}')
@@ -178,12 +233,32 @@ def reorder(arguments, plans, expected, week=None, now=None):
                          'expected_result': plan['expected_result']})
     timeline_error = None
     try:
-        blocks = weekly_timeline(order, plans, week, now) if week and now else rest_timeline(order, plans)
+        blocks = weekly_timeline(order, plans, week, now, previous if request.keep_previous_times else None) if week and now else rest_timeline(order, plans)
+        validate_blocks(blocks, week, now)
     except ValueError as exc:
         # Недостаток рабочих окон не делает оценки задач или их порядок неверными.
         blocks = []
         timeline_error = str(exc)
-    return {'task_ids': order, 'min_minutes': low, 'max_minutes': high,
+    focus_total = sum(block.get('focus_minutes', 0) for block in blocks if block['kind'] == 'task' and not block.get('permanent'))
+    additional_focus = max(0, focus_total - sum(plans[task_id].get('focus_minutes', 0) for task_id in order if plans[task_id].get('work_max_minutes', plans[task_id]['max_minutes']) > 0))
+    low += additional_focus
+    high += additional_focus
+    for task_id in order:
+        repeated_focus = max(0, sum(block.get('focus_minutes', 0) for block in blocks if block.get('task_id') == task_id and not block.get('permanent')) - plans[task_id].get('focus_minutes', 0))
+        effort[plans[task_id]['effort']] += repeated_focus
+    if blocks:
+        active = 0
+        positions = {}
+        for block in blocks:
+            if block['kind'] != 'task' or block.get('permanent'):
+                continue
+            item = positions.setdefault(block['task_id'], {'start': active, 'end': active})
+            active += block['minutes']
+            item['end'] = active
+        timeline = [{'task_id': task_id, 'start_active_minutes': positions.get(task_id, {}).get('start', active),
+                     'end_active_minutes': positions.get(task_id, {}).get('end', active),
+                     'expected_result': plans[task_id]['expected_result']} for task_id in order]
+    return {'focus_minutes': focus_total, 'task_ids': order, 'min_minutes': low, 'max_minutes': high,
             'wait_minutes': wait, 'effort_minutes': effort, 'potential_rewards': rewards,
             'timeline': timeline,
             'blocks': blocks, 'timeline_error': timeline_error,
@@ -204,11 +279,74 @@ def calculate(arguments, expected):
             raise ValueError(f'Задача {plan.task_id}: min_minutes каждого этапа должен быть не больше max_minutes')
         if plan.reward is not None and not plan.reward_unit.strip():
             raise ValueError(f'Задача {plan.task_id}: укажи reward_unit для числового reward либо reward=null, если выгода неизвестна')
-        low = sum(step.min_minutes for step in plan.steps)
-        high = sum(step.max_minutes for step in plan.steps)
+        work_low = sum(step.min_minutes for step in plan.steps)
+        work_high = sum(step.max_minutes for step in plan.steps)
+        low = work_low + (plan.focus_minutes if work_high else 0)
+        high = work_high + (plan.focus_minutes if work_high else 0)
         wait = sum(step.wait_minutes for step in plan.steps)
         result[plan.task_id] = plan.model_dump() | {
+            'work_min_minutes': work_low, 'work_max_minutes': work_high,
             'min_minutes': low, 'max_minutes': high, 'wait_minutes': wait,
-            'time_estimate': f'Примерно {low}–{high} мин активной работы; внешнее ожидание: {wait} мин.',
+            'time_estimate': f'Примерно {low}–{high} мин с входом в задачу {plan.focus_minutes} мин; внешнее ожидание: {wait} мин.',
         }
     return result
+
+
+class RestPattern(BaseModel):
+    model_config = {'extra': 'forbid'}
+    kind: Literal['sleep', 'meal', 'break']
+    title: str = Field(min_length=1, max_length=150)
+    weekdays: list[int] = Field(min_length=1, max_length=7)
+    start: str = Field(pattern=r'^(?:[01]\d|2[0-3]):[0-5]\d$')
+    end: str = Field(pattern=r'^(?:(?:[01]\d|2[0-3]):[0-5]\d|24:00)$')
+
+
+class RestPlan(BaseModel):
+    model_config = {'extra': 'forbid'}
+    patterns: list[RestPattern] = Field(max_length=100)
+    assumption: str = Field(min_length=1, max_length=500)
+
+
+REST_TOOL = {'type': 'function', 'name': 'plan_rest', 'strict': True,
+    'description': 'Задать временные сон, еду и отдых для текущего плана Ameba. weekdays: 0=понедельник…6=воскресенье. Сон через полночь разделить на два блока. Повторный вызов заменяет только твои временные правила; после вызови reorder_tasks. Постоянный календарь не изменяется. assumption — основание выбора времени или явно обозначенное допущение.',
+    'parameters': RestPlan.model_json_schema()}
+
+
+def with_rest(week, now, arguments=None, timezone_name='UTC'):
+    from copy import deepcopy
+    from common.schedule import default_week
+    configured = deepcopy(week) if week else default_week()
+    if not week:
+        configured['timezone'] = timezone_name
+    # Если владелец задал только занятия/занятость, рабочие окна — допущение плана.
+    has_work = any(slot['kind'] == 'work' for day in configured['days'] for slot in day)
+    has_work = has_work or any(event['kind'] == 'work' for event in configured.get('calendar_events', []))
+    if not has_work:
+        work = [slot for slot in default_week()['days'][0] if slot['kind'] == 'work']
+        for day in configured['days']:
+            day.extend(deepcopy(work))
+    if arguments is None:
+        return configured
+    body = RestPlan.model_validate_json(arguments)
+    if not week:
+        configured['days'] = [[slot for slot in day if slot['kind'] == 'work'] for day in configured['days']]
+    for pattern in body.patterns:
+        if pattern.end <= pattern.start or len(set(pattern.weekdays)) != len(pattern.weekdays) or any(day < 0 or day > 6 for day in pattern.weekdays):
+            raise ValueError('Проверь weekdays=0..6 без повторов и end > start; сон через полночь раздели')
+        for day in pattern.weekdays:
+            configured['days'][day].append({'kind': pattern.kind, 'title': pattern.title,
+                'start': pattern.start, 'end': pattern.end, 'temporary': True})
+    kinds = {slot['kind'] for day in configured['days'] for slot in day}
+    kinds.update(event['kind'] for event in configured.get('calendar_events', []))
+    missing = {'sleep', 'meal'} - kinds
+    if missing:
+        raise ValueError('Добавь временные правила с собственными title для: ' + ', '.join(sorted(missing)))
+    start = datetime.fromisoformat(now).astimezone(ZoneInfo(configured['timezone'])).date()
+    for offset in range(366):
+        date = start + timedelta(days=offset)
+        occupied = [slot for slot in slots_for_date(configured, date) if slot['kind'] != 'work']
+        for index, slot in enumerate(occupied):
+            for other in occupied[:index]:
+                if slot['start'] < other['end'] and slot['end'] > other['start'] and (slot.get('temporary') or other.get('temporary')):
+                    raise ValueError(f'Временный отдых пересекается с другим событием {date.isoformat()}. Постоянное событие нельзя менять')
+    return configured

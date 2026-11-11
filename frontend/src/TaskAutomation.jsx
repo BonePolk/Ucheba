@@ -6,7 +6,6 @@ import ContextFiles from './ContextFiles';
 import AgentProblemReport from './AgentProblemReport';
 import ContextBrowser from './ContextBrowser';
 import AgentProgress from './AgentProgress';
-import JebaProgress from './JebaProgress';
 import RankingAssessment from './RankingAssessment';
 import TaskMarkdown from './TaskMarkdown';
 import MonocleBrowser from './LuchebaBrowser';
@@ -16,7 +15,7 @@ function RunFiles({ run }) {
   return <Stack gap="xs">{files.data?.map((name) => <Anchor key={name} href={`/api/integrations/codex/runs/${run.id}/files/${name.split('/').map(encodeURIComponent).join('/')}`} download>{name}</Anchor>)}{files.error && <Text c="red">{files.error.message}</Text>}</Stack>;
 }
 
-function ContextForm({ taskId, jevEnabled, jevBusy, context }) {
+function ContextForm({ taskId, context }) {
   const client = useQueryClient();
   const [answer, setAnswer] = useState(null);
   const analyze = useMutation({
@@ -44,16 +43,16 @@ function ContextForm({ taskId, jevEnabled, jevBusy, context }) {
       <Button size="xs" loading={save.isPending} disabled={analyze.isPending || !(answer ?? context.data?.owner_notes ?? '').trim()} onClick={() => save.mutate()}>Передать Monocle</Button>
       <Button size="xs" variant="subtle" loading={analyze.isPending} disabled={save.isPending} onClick={() => analyze.mutate()}>Обновить контекст</Button>
     </Group>
-    <MonocleBrowser active={analyze.isPending || save.isPending || jevBusy} />
+    <MonocleBrowser active={analyze.isPending || save.isPending} />
     <details><summary style={{ cursor: 'pointer', fontSize: 13 }}>Файлы и управление браузером</summary><Stack gap="xs" mt="xs">
       <ContextFiles taskId={taskId} disabled={analyze.isPending || save.isPending} />
       <ContextBrowser taskId={taskId} disabled={analyze.isPending || save.isPending} />
     </Stack></details>
-    {jevEnabled ? <JebaProgress taskId={taskId} active={analyze.isPending || save.isPending || jevBusy} /> : <AgentProgress taskId={taskId} providers={['context']} active={analyze.isPending || save.isPending} />}
-    {analyze.isSuccess && <Text size="sm">{analyze.data.status === 'ready' ? 'Контекста достаточно для оценки Ameba.' : 'Monocle запросила уточнения — ответь на вопросы ниже.'}</Text>}
+    <AgentProgress taskId={taskId} providers={['monocle']} active={analyze.isPending || save.isPending} />
+    {analyze.isSuccess && <Text size="sm">{analyze.data.status === 'ready' ? 'Контекста достаточно для оценки Ameba.' : 'Monocle запросил уточнения — ответь на вопросы ниже.'}</Text>}
     {context.data?.usage && <Text size="xs" c="dimmed">Последняя проверка: вход {context.data.usage.input_tokens ?? 'нет данных'}, выход {context.data.usage.output_tokens ?? 'нет данных'} токенов</Text>}
     {context.data?.questions?.length > 0 && <Alert color="yellow"><Stack gap="xs">{context.data.questions.map((question, i) => <Text key={i} size="sm">{question}</Text>)}</Stack></Alert>}
-    {context.data?.usage?.updated_fields?.length > 0 && <Text size="sm" c="dimmed">Monocle обновила: {context.data.usage.updated_fields.map((name) => ({ title: 'название', description: 'описание', category: 'категорию' })[name]).join(', ')}.</Text>}
+    {context.data?.usage?.updated_fields?.length > 0 && <Text size="sm" c="dimmed">Monocle обновил: {context.data.usage.updated_fields.map((name) => ({ title: 'название', description: 'описание', category: 'категорию' })[name]).join(', ')}.</Text>}
     {context.data?.usage?.sources?.length > 0 && <Stack gap="xs"><Text size="sm" fw={500}>Использованные страницы</Text>{context.data.usage.sources.map((source) => <Anchor key={source.url} href={source.url} target="_blank" rel="noreferrer" size="sm">{source.title}</Anchor>)}</Stack>}
     {save.data?.metrics?.status === 'needs_context' && <Text c="yellow">Нужны дополнительные уточнения — см. вопросы выше.</Text>}
     {save.data?.rank != null && <Text>Порядок Ameba: {save.data.rank} из {save.data.ranked_count}</Text>}
@@ -74,7 +73,7 @@ export default function TaskAutomation({ task, features = {} }) {
       provider === 'jev' && queue.data?.ameba_running ? '/integrations/jev/rank' : `/integrations/tasks/${task.id}/${provider}`,
       { method: 'POST' }),
     onSuccess: async (data, provider) => {
-      setNotice(provider === 'codex' ? 'Задача передана Codex' : data.metrics?.status === 'needs_context' ? `Monocle: недостаточно контекста. ${data.metrics.reason}` : data.rank != null ? `Порядок Ameba: ${data.rank} из ${data.ranked_count}` : 'Порядок Ameba обновлён');
+      setNotice(provider === 'codex' ? 'Задача передана Codex' : data.unchanged ? data.status === 'running' ? 'Ameba уже работает с этими данными.' : 'Данные не изменились — порядок сохранён.' : data.metrics?.status === 'needs_context' ? `Monocle: недостаточно контекста. ${data.metrics.reason}` : data.rank != null ? `Порядок Ameba: ${data.rank} из ${data.ranked_count}` : 'Порядок Ameba обновлён');
       await client.invalidateQueries({ queryKey: ['jev-ranking'] });
       await client.invalidateQueries({ queryKey: ['tasks'] });
       await client.invalidateQueries({ queryKey: ['context', task.id] });
@@ -91,9 +90,9 @@ export default function TaskAutomation({ task, features = {} }) {
       {context.data.status === 'new' && <Text size="sm" c="yellow">Контекст изменился. Полную версию нужно обновить через Monocle.</Text>}
       <TaskMarkdown>{context.data.full_markdown || context.data.summary}</TaskMarkdown>
     </Stack></Paper>}
-    <Group>{features.codex !== false && <Button disabled={action.isPending} onClick={() => action.mutate('codex')}>Поручить Codex</Button>}{features.ameba !== false && <Button variant="light" disabled={(action.isPending && !queue.data?.ameba_running) || queue.data?.browser_busy} onClick={() => action.mutate('jev')}>{queue.data?.ameba_running ? 'Перезапустить Ameba' : 'Обновить порядок Ameba'}</Button>}</Group>
+    <Group>{features.codex !== false && <Button disabled={action.isPending} onClick={() => action.mutate('codex')}>Поручить Codex</Button>}{features.ameba !== false && <Button variant="light" disabled={(action.isPending && !queue.data?.ameba_running) || queue.data?.browser_busy} onClick={() => action.mutate('jev')}>{queue.data?.ameba_running ? 'Обновить при изменениях' : 'Обновить порядок Ameba'}</Button>}</Group>
     {features.codex !== false && <AgentProgress taskId={task.id} providers={['codex']} active={(action.isPending && action.variables === 'codex') || runs.data?.some((run) => ['queued', 'running'].includes(run.status))} />}
-    {features.context !== false && <ContextForm key={task.id} taskId={task.id} jevEnabled={features.ameba !== false} jevBusy={action.isPending && action.variables === 'jev'} context={context} />}
+    {features.context !== false && <ContextForm key={task.id} taskId={task.id} context={context} />}
     {notice && <Alert color="purple">{notice}</Alert>}
     {(action.error || runs.error) && <Alert color="red">{(action.error || runs.error).message}</Alert>}
     {features.codex !== false && runs.data?.map((run) => <Paper key={run.id} withBorder p="md"><Stack gap="sm">

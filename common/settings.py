@@ -13,11 +13,11 @@ DEFAULTS = {
     'notifications': {'enabled': False, 'owner_id': None, 'lead_minutes': 30},
     'collector': {'enabled': False, 'chat_ids': []},
     'telegram': {'enabled': False, 'chat_ids': []},
-    'gemini': {'enabled': False, 'model': 'gemini-3.8-flash', 'interval_seconds': 300,
+    'gemini': {'enabled': False, 'base_url': 'https://generativelanguage.googleapis.com', 'model': 'gemini-3.8-flash', 'interval_seconds': 300,
                'confidence_threshold': 0.9, 'timezone': 'UTC', 'owner_context': ''},
     'context': {'enabled': True, 'base_url': 'https://lenec.tech/v1', 'model': 'gpt-6-luna', 'rewrite_title': False},
-    'ameba': {'enabled': False, 'model': 'gpt-6-luna'},
-    'straus': {'enabled': True, 'model': 'gpt-6-luna'},
+    'ameba': {'enabled': False, 'base_url': 'https://lenec.tech/v1', 'model': 'gpt-6-luna'},
+    'straus': {'enabled': True, 'base_url': 'https://lenec.tech/v1', 'model': 'gpt-6-luna'},
     'codex': {'enabled': False, 'auto_prepare': False},
     'jev': {'enabled': False, 'account_id': '', 'model': 'typesafe/jev'},
 }
@@ -40,6 +40,7 @@ def inherit_agent_settings(name):
         config = json.loads(old.config) if old else {}
         inherited = dict(DEFAULTS[name], enabled=config.get('enabled', DEFAULTS[name]['enabled']))
         if context:
+            inherited['base_url'] = json.loads(context.config).get('base_url', DEFAULTS[name]['base_url'])
             inherited['model'] = json.loads(context.config).get('model', 'gpt-6-luna')
         private = json.loads(decrypt(context.secrets)) if context and context.secrets else {}
         row = IntegrationSetting(name=name, config=json.dumps(inherited),
