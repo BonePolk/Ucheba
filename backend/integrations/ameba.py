@@ -127,8 +127,10 @@ def ranking_status():
 
 async def request_ranking(tasks, task_id=0, checked_contexts=()):
     config, secrets = read_settings('ameba')
-    if not config['enabled'] or not secrets.get('api_key'):
-        raise HTTPException(400, 'Включите Ameba и сохраните её API-ключ в профиле')
+    if not config['enabled']:
+        raise HTTPException(400, 'Ameba выключена в настройках профиля')
+    if not secrets.get('api_key'):
+        raise HTTPException(400, 'Для Ameba не сохранён API-ключ. Добавьте его в профиле')
     with Session(get_engine()) as session:
         input_signature = task_state(session)[0]
         saved = session.get(TaskRanking, 1)
