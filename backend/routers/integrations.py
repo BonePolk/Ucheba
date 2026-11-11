@@ -2,6 +2,7 @@ import asyncio
 import base64
 import binascii
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 from typing import Literal
@@ -209,6 +210,7 @@ async def agent_progress_stream(task_id: int = 0, providers: str = 'context,code
                         runs = [value['run'] for value in values if value['run']]
                         current = max(runs, key=lambda item: (item['status'] == 'running', item['started_at'])) if runs else None
                         entries.append({'provider': name, 'run': current,
+                                        'server_time': datetime.now(timezone.utc).isoformat(),
                                         'available': any(value['available'] for value in values),
                                         'queued': scheduler.queued('context' if name in ('monocle', 'straus') else name, task_id)})
                     yield 'data: ' + json.dumps(entries, ensure_ascii=False) + '\n\n'

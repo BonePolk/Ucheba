@@ -39,11 +39,15 @@ export default function AgentProgress({ taskId = 0, providers, active = false, c
     stream.onmessage = (event) => {
       try {
         const entries = JSON.parse(event.data);
-        client.setQueryData(key, (previous = []) => entries.map((entry) => ({
-          ...entry,
-          // Обрыв сервиса не стирает журнал, который уже успел прийти.
-          run: entry.run ?? previous.find((item) => item.provider === entry.provider)?.run ?? null,
-        })));
+        client.setQueryData(key, (previous = []) => entries.map((entry) => {
+          const oldRun = previous.find((item) => item.provider === entry.provider)?.run;
+          // Сохраняем журнал при обрыве связи. Доступный сервис без запуска
+          // означает, что прежняя работа уже потеряна, например после перезапуска.
+          const run = entry.run ?? (entry.available && oldRun?.status === 'running'
+            ? { ...oldRun, status: 'interrupted', model_waiting: false, pending_question: null }
+            : oldRun ?? null);
+          return { ...entry, run, receivedAt: performance.now() };
+        }));
         setStreamError(false);
       } catch {
         setStreamError(true);
@@ -79,7 +83,11 @@ export default function AgentProgress({ taskId = 0, providers, active = false, c
     (b.run.started_at ?? '').localeCompare(a.run.started_at ?? ''))[0];
   const run = current?.run;
   const lastActivity = run?.last_activity_at ?? run?.events?.at(-1)?.at ?? run?.started_at;
-  const quietMinutes = lastActivity ? Math.floor((Date.now() - Date.parse(lastActivity)) / 60000) : 0;
+  // Длительность считаем по серверным часам; часы пользователя могут отличаться.
+  const serverTime = Date.parse(current?.server_time);
+  const elapsed = current?.receivedAt == null ? 0 : Math.max(0, performance.now() - current.receivedAt);
+  const quietMinutes = lastActivity && Number.isFinite(serverTime)
+    ? Math.max(0, Math.floor((serverTime + elapsed - Date.parse(lastActivity)) / 60000)) : 0;
   const allEvents = current?.run.events ?? [];
   const events = allEvents.map((event) => ({
     ...event, provider: current.provider, key: `${current.run.id}:${event.id}`,
@@ -116,7 +124,7 @@ export default function AgentProgress({ taskId = 0, providers, active = false, c
     <Collapse in={opened}><Stack gap="xs" mt="xs">
       <Group gap="xs">{(current ? [current] : []).map(({ provider, run }) => <Badge key={provider} color={run.status === 'failed' ? 'red' : run.status === 'blocked' ? 'yellow' : run.status === 'running' ? 'purple' : 'gray'} variant="light">{(run.agent === 'Lucheba' ? 'Monocle' : run.agent) ?? names[provider]} · {run.pending_question ? 'Ждёт ответа' : statuses[run.status]}</Badge>)}</Group>
       <Text size="xs" c="dimmed">{run?.token_usage ? `Подтверждённые токены: вход ${run.token_usage.input_tokens ?? 'нет данных'} · выход ${run.token_usage.output_tokens ?? 'нет данных'}` : 'Токены: нет данных'}{run?.model_waiting && !run.current_usage_known && run.token_usage ? ' · текущий запрос: нет данных' : ''}</Text>
-      {run?.status === 'running' && !run.pending_question && quietMinutes >= 2 && <Text size="xs" c="yellow">Новых данных нет {quietMinutes} мин. Операция ещё не завершена.</Text>}
+      {current?.available && !streamError && run?.status === 'running' && !run.pending_question && quietMinutes >= 2 && <Text size="xs" c="yellow">Агент не передавал новых данных {quietMinutes} мин.</Text>}
       {events.length === 0 && <Text size="xs" c="dimmed">{running ? 'Ожидаем события агента…' : 'Журналов пока нет'}</Text>}
       <div ref={viewport} onScroll={(event) => {
         const element = event.currentTarget;
