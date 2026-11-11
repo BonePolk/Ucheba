@@ -18,6 +18,7 @@ class Step(BaseModel):
 class Plan(BaseModel):
     model_config = {'extra': 'forbid'}
     task_id: int
+    deadline_policy: Literal['soft', 'finish_before', 'expires'] = Field(description='soft: после срока можно; finish_before: необходимо завершить до срока; expires: после срока выполнение или сдача недопустимы. Выбирай по фактам из контекста.')
     focus_minutes: int = Field(ge=10, le=30, description='Время на концентрацию при начале/возобновлении задачи. Этапы steps не включают это время.')
     steps: list[Step] = Field(min_length=1)
     assumptions: list[str]
@@ -202,7 +203,7 @@ def validate_blocks(blocks, week=None, now=None):
             day += timedelta(days=1)
 
 
-def reorder(arguments, plans, expected, week=None, now=None, previous=None):
+def reorder(arguments, plans, expected, week=None, now=None, previous=None, tasks=()):
     if now:
         clock = datetime.fromisoformat(now).astimezone(timezone.utc)
         minute = clock.replace(second=0, microsecond=0)
@@ -239,6 +240,33 @@ def reorder(arguments, plans, expected, week=None, now=None, previous=None):
         # Недостаток рабочих окон не делает оценки задач или их порядок неверными.
         blocks = []
         timeline_error = str(exc)
+    deadline_conflicts = []
+    if now and tasks:
+        origin = datetime.fromisoformat(now).astimezone(timezone.utc)
+        for task in tasks:
+            task_id = task['id']
+            policy = plans[task_id].get('deadline_policy', 'soft')
+            if policy == 'soft' or not task.get('deadline'):
+                continue
+            raw = task['deadline']
+            deadline = datetime.fromisoformat(raw.replace('Z', '+00:00')) if isinstance(raw, str) else raw
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=timezone.utc)
+            placed = [block for block in blocks if block['kind'] == 'task' and not block.get('permanent') and block.get('task_id') == task_id]
+            finish = max((origin + timedelta(minutes=block['start'] + block['minutes']) for block in placed), default=None)
+            # Проверяем завершение всей работы, а не только время начала.
+            if deadline < origin or finish is not None and finish > deadline:
+                reason = (f"{task['title']}: после срока выполнение недопустимо." if policy == 'expires' and deadline < origin
+                          else f"{task['title']}: в этом плане не успевает завершиться к сроку.")
+                deadline_conflicts.append({'task_id': task_id, 'policy': policy, 'deadline': deadline.isoformat(), 'reason': reason})
+        blocked = {item['task_id'] for item in deadline_conflicts}
+        blocks = [block for block in blocks if block.get('permanent') or block.get('task_id') not in blocked]
+        # Не обещаем выгоду от работы, для которой нет допустимого размещения.
+        rewards = {}
+        for task_id in order:
+            plan = plans[task_id]
+            if task_id not in blocked and plan['reward'] is not None:
+                rewards[plan['reward_unit']] = rewards.get(plan['reward_unit'], 0) + plan['reward']
     focus_total = sum(block.get('focus_minutes', 0) for block in blocks if block['kind'] == 'task' and not block.get('permanent'))
     additional_focus = max(0, focus_total - sum(plans[task_id].get('focus_minutes', 0) for task_id in order if plans[task_id].get('work_max_minutes', plans[task_id]['max_minutes']) > 0))
     low += additional_focus
@@ -261,7 +289,7 @@ def reorder(arguments, plans, expected, week=None, now=None, previous=None):
     return {'focus_minutes': focus_total, 'task_ids': order, 'min_minutes': low, 'max_minutes': high,
             'wait_minutes': wait, 'effort_minutes': effort, 'potential_rewards': rewards,
             'timeline': timeline,
-            'blocks': blocks, 'timeline_error': timeline_error,
+            'blocks': blocks, 'timeline_error': timeline_error, 'deadline_conflicts': deadline_conflicts,
             'start_at': now if week else None,
             'timezone': week['timezone'] if week else None,
             'rest_assumption': 'Личное недельное расписание; перерывы после 90 минут работы.' if week else 'Условные дни: 6 ч работы, еда и сон. Это не личное расписание.',

@@ -1,5 +1,6 @@
 import { calendarColors, calendarBlockColor } from './calendarColors';
 import { useLayoutEffect, useRef, useState } from 'react';
+import { useMediaQuery } from '@mantine/hooks';
 import { Badge, Button, Group, Paper, Stack, Text, Tooltip } from '@mantine/core';
 
 function duration(minutes) {
@@ -9,6 +10,7 @@ function duration(minutes) {
 const rest = { break: 'Перерыв', meal: 'Еда', personal: 'Личное время', sleep: 'Сон' };
 
 export default function AgentTimeline({ tasks = [], finished = false, schedule, calendarOnly = false }) {
+  const compact = useMediaQuery('(max-width: 767px)', window.innerWidth < 768);
   const [expanded, setExpanded] = useState(false);
   const chart = useRef(null);
   const seen = useRef(new Set());
@@ -48,16 +50,26 @@ export default function AgentTimeline({ tasks = [], finished = false, schedule, 
       part += 1;
     }
   }
+  const agenda = [...blocks].filter((block) => block.kind !== 'work').sort((a, b) => a.start - b.start);
   return <Paper withBorder radius="md" p="sm"><Stack gap={8}>
+    {(schedule?.deadline_conflicts ?? []).map((item) => <Text key={item.task_id} size="xs" c="orange">{item.reason} Задача не размещена — нужно изменить план или условия срока.</Text>)}
     <Group justify="space-between">
       <Tooltip multiline w={300} label={`${schedule?.rest_assumption ?? 'Время оценивается приблизительно'}${schedule?.start_at ? ` Начало: ${new Date(schedule.start_at).toLocaleString(undefined, { timeZone: schedule.timezone })}` : ''}`}><Text size="xs" c="dimmed">{calendarOnly ? 'Постоянное расписание' : finished ? 'Итоговый план' : 'План работы'}</Text></Tooltip>
       <Group gap={6}>{!finished && !calendarOnly && <Badge size="xs" variant="light" color="gray">Черновик</Badge>}<Text size="xs" fw={600}>{calendarOnly ? 'Учитывается до начала расчёта' : planned.length || schedule?.max_minutes != null ? `${duration(schedule?.max_minutes ?? planned.reduce((sum, task) => sum + task.plan.max_minutes, 0))} работы` : 'Оценивает время'}</Text></Group>
     </Group>
-    {schedule?.timeline_error ? <Text size="xs" c="yellow">Шкала не построена: {schedule.timeline_error}. Порядок задач сохранён.</Text> : blocks.length > 0 || planned.length > 0 || !finished ? <div style={{ overflowX: 'auto', padding: '5px 0' }}>
+    {schedule?.timeline_error ? <Text size="xs" c="yellow">Шкала не построена: {schedule.timeline_error}. Порядок задач сохранён.</Text> : compact ? <div className="plan-agenda">{(expanded ? agenda : agenda.slice(0, 6)).map((block) => {
+      const task = byId.get(block.task_id);
+      const start = schedule?.start_at ? new Date(new Date(schedule.start_at).getTime() + block.start * 60000) : null;
+      const label = block.title || task?.title || rest[block.kind] || 'Занято';
+      return <a key={`${block.id}-${block.start}`} href={block.kind === 'task' && block.task_id ? `/?task=${block.task_id}` : undefined} className="plan-agenda-row" style={{ borderLeftColor: calendarColors[block.kind], background: calendarBlockColor(block.kind, !block.permanent) }}>
+        <span>{start ? start.toLocaleString('ru-RU', { timeZone: schedule.timezone, day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : `+${duration(block.start)}`}</span>
+        <strong>{label}</strong><small>{duration(block.minutes)}</small>
+      </a>;
+    })}{!agenda.length && <Text size="xs" c="dimmed">{calendarOnly ? 'В календаре пока пусто' : 'План появится по мере расчёта'}</Text>}</div> : blocks.length > 0 || planned.length > 0 || !finished ? <div style={{ overflowX: 'auto', padding: '5px 0' }}>
       <div ref={chart} style={{ position: 'relative', minWidth: 760, height: visibleDays * 66 + 18 }}>
         {Array.from({ length: visibleDays }, (_, day) => <div key={day} style={{ position: 'absolute', top: day * 66, width: '100%' }}>
           <Text size="xs" c="dimmed">День {day + 1}</Text>
-          <div style={{ position: 'absolute', top: 24, width: '100%', height: 34, borderRadius: 6, background: 'var(--mantine-color-dark-7)' }} />
+          <div style={{ position: 'absolute', top: 24, width: '100%', height: 34, borderRadius: 0, background: 'var(--mantine-color-dark-7)' }} />
         </div>)}
         {!planned.length && !calendarOnly && <Text size="xs" c="dimmed" style={{ position: 'absolute', top: 32, left: 12 }}>Оценивает задачи — блоки появятся по мере расчёта</Text>}
         {slices.map((block) => {
@@ -70,7 +82,7 @@ export default function AgentTimeline({ tasks = [], finished = false, schedule, 
         <Group justify="space-between" style={{ position: 'absolute', bottom: 0, width: '100%' }}><Text size="xs" c="dimmed">Начало условного дня</Text><Text size="xs" c="dimmed">24 ч</Text></Group>
       </div>
     </div> : <Text size="xs" c="dimmed">{calendarOnly ? 'В календаре пока нет постоянных событий' : 'Оцениваем задачи…'}</Text>}
-    {days > 3 && <Button size="compact-xs" variant="subtle" onClick={() => setExpanded(!expanded)}>{expanded ? 'Свернуть' : `Все ${days} дней`}</Button>}
+    {(compact ? agenda.length > 6 : days > 3) && <Button size="compact-xs" variant="subtle" onClick={() => setExpanded(!expanded)}>{expanded ? 'Свернуть' : compact ? 'Весь план' : `Все ${days} дней`}</Button>}
     <Group gap={6}><Badge size="xs" variant="light">Работа</Badge><Badge size="xs" color={calendarColors.sleep} variant="light">Сон</Badge><Badge size="xs" color={calendarColors.meal} variant="light">Еда</Badge><Badge size="xs" color={calendarColors.break} variant="light">Отдых</Badge><Badge size="xs" color={calendarColors.busy} variant="light">Календарь</Badge><Text size="xs" c="dimmed">{schedule?.start_at ? `По расписанию · ${schedule.timezone}` : 'Условные дни, не часы личного расписания'}</Text></Group>
     {schedule && <Group gap={6}>{Object.entries(schedule.potential_rewards ?? {}).map(([unit, value]) => <Badge key={unit} size="xs" variant="light">≈ {value} {unit}</Badge>)}</Group>}
     {tasks.length > planned.length && <Text size="xs" c="dimmed">Ещё {tasks.length - planned.length} в оценке</Text>}

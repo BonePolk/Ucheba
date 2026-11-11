@@ -1,7 +1,8 @@
 import { lazy, Suspense, useEffect, useState } from 'react';
-import { Alert, Anchor, Button, Container, Group, Loader, Paper, PasswordInput, Stack, Text, TextInput, Title } from '@mantine/core';
+import { Alert, Button, Container, Loader, Paper, PasswordInput, Stack, Text, TextInput, Title } from '@mantine/core';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { request } from './api';
+import AppNavigation from './AppNavigation';
 
 const TaskBoard = lazy(() => import('./TaskBoard'));
 const Calendar = lazy(() => import('./Calendar'));
@@ -22,7 +23,7 @@ function Login() {
   });
   return <Container size={420} py="xl"><Paper withBorder p="lg"><form onSubmit={(event) => { event.preventDefault(); login.mutate(); }}><Stack>
     <Title order={2}>{registering ? 'Регистрация' : 'Вход'}</Title>
-    <TextInput label="Логин" description="Русские и латинские буквы, цифры, точка, дефис или подчёркивание" autoComplete="username" required minLength={3} maxLength={64} value={credentials.username} onChange={(event) => setCredentials({ ...credentials, username: event.currentTarget.value })} />
+    <TextInput label="Логин" autoComplete="username" required minLength={3} maxLength={64} value={credentials.username} onChange={(event) => setCredentials({ ...credentials, username: event.currentTarget.value })} />
     <PasswordInput label="Пароль" autoComplete={registering ? 'new-password' : 'current-password'} required minLength={12} maxLength={256} value={credentials.password} onChange={(event) => setCredentials({ ...credentials, password: event.currentTarget.value })} />
     {login.error && <Alert color="red">{login.error.message}</Alert>}
     <Button type="submit" loading={login.isPending}>{registering ? 'Создать аккаунт' : 'Войти'}</Button>
@@ -38,6 +39,7 @@ function TaskPanel({ id, features }) {
 }
 
 export default function App() {
+  const [menuCollapsed, setMenuCollapsed] = useState(false);
   const [location, setLocation] = useState(() => window.location.pathname + window.location.search);
   useEffect(() => {
     const update = () => setLocation(window.location.pathname + window.location.search);
@@ -62,12 +64,11 @@ export default function App() {
   const [path, search = ''] = location.split('?');
   const task = new URLSearchParams(search).get('task');
   const board = path === '/' && !task;
-  const inboxEnabled = user.features.gemini !== false;
-  return <Stack gap="md" key={user.id} onClick={followLink}>
-    <Container size="xl" w="100%" pt="md"><Group justify="space-between">
-      <Group gap="md"><Anchor href="/">Задачи и архив</Anchor><Anchor href="/calendar">Календарь</Anchor><Anchor href="/profile">Профиль</Anchor>{user.features.context !== false && <Anchor href="/files">Файлы</Anchor>}{inboxEnabled && <Anchor href="/inbox">На подтверждение</Anchor>}{user.is_admin && <Anchor href="/admin">Админка</Anchor>}</Group>
-      <Group><Text size="sm">{user.username}</Text><Button size="xs" variant="default" loading={logout.isPending} onClick={() => logout.mutate()}>Выйти</Button></Group>
-    </Group>{logout.error && <Alert color="red">{logout.error.message}</Alert>}</Container>
-    <Suspense fallback={<Container py="xl"><Loader /></Container>}>{board ? <TaskBoard features={user.features} /> : <Container size="xl" w="100%" py="lg">{task ? <TaskPanel id={task} features={user.features} /> : path === '/calendar' ? <Calendar features={user.features} /> : path === '/files' ? user.features.context !== false ? <Files /> : <Alert>Функция отключена</Alert> : path.startsWith('/profile') ? <Account user={user} /> : path.startsWith('/admin') ? user.is_admin ? <Admin /> : <Alert color="red">Требуется доступ администратора</Alert> : path.startsWith('/inbox') ? inboxEnabled ? <Inbox /> : <Alert>Функция отключена</Alert> : <Alert>Страница не найдена</Alert>}</Container>}</Suspense>
-  </Stack>;
+  return <div className={`app-shell ${menuCollapsed ? 'is-collapsed' : ''}`} key={user.id} onClick={followLink}>
+    <AppNavigation user={user} path={path} collapsed={menuCollapsed} onToggle={() => setMenuCollapsed(!menuCollapsed)} onLogout={() => logout.mutate()} leaving={logout.isPending} />
+    <main className="app-content">
+      {logout.error && <Container py="sm"><Alert color="red">{logout.error.message}</Alert></Container>}
+    <Suspense fallback={<Container py="xl"><Loader /></Container>}>{board ? <TaskBoard features={user.features} /> : <Container size="xl" w="100%" py="lg">{task ? <TaskPanel id={task} features={user.features} /> : path === '/calendar' ? <Calendar features={user.features} /> : path === '/files' ? user.features.context !== false ? <Files /> : <Alert>Функция отключена</Alert> : path.startsWith('/profile') ? <Account user={user} /> : path.startsWith('/admin') ? user.is_admin ? <Admin /> : <Alert color="red">Требуется доступ администратора</Alert> : path.startsWith('/inbox') ? user.features.gemini !== false ? <Inbox /> : <Alert>Функция отключена</Alert> : <Alert>Страница не найдена</Alert>}</Container>}</Suspense>
+    </main>
+  </div>;
 }

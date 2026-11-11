@@ -62,8 +62,8 @@ def task_state(session):
                                  task['deadline'].isoformat() if task['deadline'] else '9999', task['id']))
     from agent_memory import read as read_facts
     calendar = read_calendar()
-    signature = json.dumps({'version': 27, 'tasks': state, 'calendar': {'events': sorted(calendar['events'], key=lambda event: event['id']), 'timezone': calendar['timezone']},
-        'facts': sorted(({'key': fact['key'], 'text': fact['text']} for fact in read_facts()), key=lambda fact: fact['key']),
+    signature = json.dumps({'version': 28, 'tasks': state, 'calendar': {'events': sorted(calendar['events'], key=lambda event: event['id']), 'timezone': calendar['timezone']},
+        'facts': sorted(({'key': fact['key'], 'text': fact['text']} for fact in read_facts() if fact['agent'] in ('Владелец', 'user')), key=lambda fact: fact['key']),
         'feedback': plan_feedback(),
         'provider': {key: read_config('ameba')[key] for key in ('model', 'base_url')}}, sort_keys=True)
     return signature, ready, waiting
@@ -210,7 +210,7 @@ async def rank_all(force=False, task_id=0):
             session.add(saved)
             for task_id in ids:
                 task = session.get(Task, task_id)
-                task.ai_details = json.dumps({'version': 27, 'status': 'ranked'})
+                task.ai_details = json.dumps({'version': 28, 'status': 'ranked'})
                 task.ai_scored_at = datetime.now(timezone.utc)
                 session.add(task)
             session.commit()
@@ -255,7 +255,7 @@ async def evaluate_task(task_id):
     # Monocle мог уточнить поля задачи. Дальше сравниваем уже с её результатом.
     original = context['task_snapshot']
     if context['status'] != 'ready':
-        metrics = {'version': 27, 'status': 'needs_context', 'reason': ' '.join(context['questions'])}
+        metrics = {'version': 28, 'status': 'needs_context', 'reason': ' '.join(context['questions'])}
         with Session(get_engine()) as session:
             task = session.get(Task, task_id)
             if not task:
@@ -270,4 +270,4 @@ async def evaluate_task(task_id):
     result = await rank_all(task_id=task_id)
     ids = result['task_ids']
     return result | {'rank': ids.index(task_id) + 1 if task_id in ids else None,
-                     'metrics': {'status': 'ranked', 'version': 27}}
+                     'metrics': {'status': 'ranked', 'version': 28}}

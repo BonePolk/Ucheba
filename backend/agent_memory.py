@@ -31,6 +31,10 @@ def save(body, agent):
         raise HTTPException(422, 'Факт не должен быть пустым')
     with Session(target()) as session:
         row = session.get(AgentFact, body.key) or AgentFact(key=body.key, text=body.text, agent=agent)
+        if row.agent in ('Владелец', 'user') and agent not in ('Владелец', 'user'):
+            if row.text != body.text.strip():
+                raise HTTPException(422, 'Факт задан владельцем. Не заменяй его догадкой; сохрани подтверждённое новое наблюдение отдельно')
+            return row.model_dump(mode='json')
         row.text, row.agent = body.text.strip(), agent
         row.updated_at = datetime.now(timezone.utc)
         session.add(row)

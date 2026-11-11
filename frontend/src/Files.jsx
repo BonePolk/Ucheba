@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Alert, Badge, Breadcrumbs, Button, FileButton, Group, Loader, Modal, Paper, SegmentedControl, Select, Stack, Text, Textarea, TextInput, Title } from '@mantine/core';
+import { useMediaQuery } from '@mantine/hooks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { request } from './api';
 import { fileContent } from './fileUpload';
@@ -54,6 +55,8 @@ function FolderTree({ node, current, onSelect }) {
 }
 
 export default function Files() {
+  const compact = useMediaQuery('(max-width: 767px)', window.innerWidth < 768);
+  const [foldersOpen, setFoldersOpen] = useState(false);
   const client = useQueryClient();
   const [folder, setFolder] = useState('');
   const [search, setSearch] = useState('');
@@ -143,19 +146,18 @@ export default function Files() {
   const columns = [...new Set((data?.table?.rows ?? []).flatMap((row) => Object.keys(row.cells)))];
   const error = tree.error || open.error || save.error || createFolder.error || upload.error;
   return <Stack gap="md">
-    <Group justify="space-between"><div><Title order={2}>Мои файлы</Title><Text c="dimmed" size="sm">{total.length} файлов · {sizeLabel(total.reduce((sum, file) => sum + (file.size ?? 0), 0))} · Silo</Text></div><Button variant="subtle" loading={tree.isFetching} onClick={refresh}>Обновить</Button></Group>
+    <Group justify="space-between"><div><Title order={2}>Мои файлы</Title><Text c="dimmed" size="sm">{total.length} файлов · {sizeLabel(total.reduce((sum, file) => sum + (file.size ?? 0), 0))}</Text></div><Button variant="subtle" loading={tree.isFetching} onClick={refresh}>Обновить</Button></Group>
     {error && <Alert color="red">{error.message}</Alert>}
     {tree.data?.warning && <Alert color="yellow">{tree.data.warning}</Alert>}
     {notice && <Text size="sm" c="dimmed">{notice}</Text>}
     <Paper withBorder radius="md" className={`file-explorer ${editor ? 'has-preview' : ''} ${dragging ? 'file-drop-active' : ''}`} onDragOver={(event) => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); setDragging(true); } }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setDragging(false); }} onDrop={dropFiles}>
-      <aside className="file-sidebar"><Text size="xs" fw={700} c="dimmed" mb="sm" tt="uppercase">Библиотека</Text>
+      <aside className="file-sidebar">{compact && <Button fullWidth variant="subtle" onClick={() => setFoldersOpen(!foldersOpen)} aria-expanded={foldersOpen}>{foldersOpen ? 'Скрыть папки' : 'Папки'} {foldersOpen ? '−' : '+'}</Button>}{(!compact || foldersOpen) && <><Text size="xs" fw={700} c="dimmed" mb="sm" tt="uppercase">Библиотека</Text>
         <button className={`file-nav ${!folder ? 'is-selected' : ''}`} onClick={() => { setFolder(''); setSearch(''); }}><FileIcon file={{ folder: true }} /><span>Все файлы</span><small>{total.length}</small></button>
         <FolderTree node={root} current={folder} onSelect={(path) => { setFolder(path); setSearch(''); }} />
-        <Text size="xs" c="dimmed" mt="xl">Перетащите файлы в папку или нажмите «Загрузить». Файлы агентов появляются автоматически.</Text>
-      </aside>
+      </>} </aside>
       <section className="file-main">
         <div className="file-toolbar"><Group justify="space-between" gap="xs"><Breadcrumbs separator="/" style={{ minWidth: 0 }}><Button size="compact-xs" variant="subtle" onClick={() => setFolder('')}>Файлы</Button>{folder.split('/').filter(Boolean).map((part, index, parts) => <Button key={index} size="compact-xs" variant="subtle" onClick={() => setFolder(parts.slice(0, index + 1).join('/'))}>{part === '@tasks' ? 'Файлы задач' : part}</Button>)}</Breadcrumbs>
-          <Group gap={6}><FileButton multiple onChange={(files) => { if (files.length) upload.mutate({ files, target: folder }); }}>{(props) => <Button {...props} size="compact-xs" variant="default" loading={upload.isPending} disabled={busy || folder.startsWith('@')}>Загрузить</Button>}</FileButton><Button size="compact-xs" variant="light" disabled={busy || folder.startsWith('@')} onClick={() => { setName(''); setCreating('folder'); }}>+ Папка</Button><Button size="compact-xs" disabled={busy || folder.startsWith('@')} onClick={() => { setName(''); setCreating('file'); }}>+ Файл</Button></Group>
+          <Group gap={6}><FileButton multiple onChange={(files) => { if (files.length) upload.mutate({ files, target: folder }); }}>{(props) => <Button {...props} size="compact-xs" variant="default" loading={upload.isPending} disabled={busy || folder.startsWith('@')}>Загрузить</Button>}</FileButton><Button size="compact-xs" variant="light" disabled={busy || folder.startsWith('@')} onClick={() => { setName(''); setCreating('folder'); }}>Создать папку</Button><Button size="compact-xs" disabled={busy || folder.startsWith('@')} onClick={() => { setName(''); setCreating('file'); }}>Создать файл</Button></Group>
         </Group><Group gap="xs" mt="sm"><TextInput aria-label="Поиск файлов" placeholder="Поиск по имени…" value={search} onChange={(event) => setSearch(event.currentTarget.value)} style={{ flex: 1, minWidth: 140 }} /><Select aria-label="Сортировка файлов" value={sort} onChange={setSort} data={[{ value: 'name', label: 'По имени' }, { value: 'recent', label: 'Сначала новые' }, { value: 'size', label: 'По размеру' }]} w={145} /><SegmentedControl size="xs" aria-label="Вид файлов" value={view} onChange={setView} data={[{ value: 'grid', label: 'Плитки' }, { value: 'list', label: 'Список' }]} /></Group></div>
         {tree.isPending ? <div className="file-empty"><Loader /></div> : rows.length ? <div className={`file-items file-items-${view}`}>{rows.map((file) => <button key={file.path} disabled={busy} className={`file-item ${editor?.path === file.path ? 'is-selected' : ''}`} onClick={() => select(file)} onDragOver={(event) => { if (file.folder) event.preventDefault(); }} onDrop={(event) => { if (file.folder) dropFiles(event, file.path); }} title={file.path}>
           <FileIcon file={file} /><span className="file-item-name">{file.name}</span><span className="file-item-meta">{file.folder ? 'Папка' : sizeLabel(file.size)}{view === 'grid' && !file.folder && <span> · {file.name.includes('.') ? file.name.split('.').at(-1).toUpperCase() : 'Файл'}</span>}</span>
@@ -164,7 +166,7 @@ export default function Files() {
       {editor && <aside className="file-preview"><Group justify="space-between" wrap="nowrap"><Group gap="xs" wrap="nowrap"><FileIcon file={editor} /><Text fw={600} size="sm" style={{ overflowWrap: 'anywhere' }}>{editor.name}</Text></Group><Button variant="subtle" size="compact-xs" disabled={busy} aria-label="Закрыть просмотр" onClick={() => { if (!dirty || window.confirm('Закрыть без сохранения изменений?')) setEditor(null); }}>✕</Button></Group>
         <Text size="xs" c="dimmed" mt="xs" style={{ overflowWrap: 'anywhere' }}>{editor.path}</Text>
         <Group my="sm" gap="xs">{editor.url && <Button component="a" href={editor.url} download variant="light" size="compact-xs">Скачать</Button>}{editor.editable && <SegmentedControl size="xs" value={mode} onChange={setMode} data={[{ value: 'preview', label: 'Просмотр' }, { value: 'edit', label: 'Редактор' }]} />}{dirty && <Badge size="xs" variant="dot">Не сохранено</Badge>}</Group>
-        {open.isPending ? <Loader /> : mode === 'edit' && editor.editable ? <Stack gap="sm"><Textarea aria-label="Содержимое файла" minRows={18} autosize maxRows={30} value={editor.content} onChange={(event) => { const content = event.currentTarget.value; setEditor((current) => ({ ...current, content })); }} styles={{ input: { fontFamily: 'monospace', fontSize: 12 } }} /><Button loading={save.isPending} disabled={!dirty || open.isPending} onClick={() => save.mutate(editor)}>Сохранить в Silo</Button></Stack> : <Stack gap="sm">
+        {open.isPending ? <Loader /> : mode === 'edit' && editor.editable ? <Stack gap="sm"><Textarea aria-label="Содержимое файла" minRows={18} autosize maxRows={30} value={editor.content} onChange={(event) => { const content = event.currentTarget.value; setEditor((current) => ({ ...current, content })); }} styles={{ input: { fontFamily: 'monospace', fontSize: 12 } }} /><Button loading={save.isPending} disabled={!dirty || open.isPending} onClick={() => save.mutate(editor)}>Сохранить файл</Button></Stack> : <Stack gap="sm">
           {preview.isFetching && <Loader size="sm" />}{preview.error && <Alert color="yellow">{preview.error.message}</Alert>}
           {data?.notice && <Text size="xs" c="dimmed">{data.notice}</Text>}
           {data?.image && <img className="file-preview-image" src={`data:${data.mime ?? 'image/jpeg'};base64,${data.image}`} alt={editor.name} />}

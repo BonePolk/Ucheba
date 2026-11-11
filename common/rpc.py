@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import hmac
 import logging
@@ -39,8 +40,18 @@ async def call(service, path, body=None, method='POST', timeout=90):
     async with httpx.AsyncClient(timeout=timeout, transport=httpx.AsyncHTTPTransport(retries=1)) as client:
         host = 'lucheba' if service == 'context' else service
         try:
-            response = await client.request(method, f'http://{host}:8000{path}',
-                headers={'X-Service-Token': internal_token(service), 'X-User-ID': str(user_id())}, json=jsonable_encoder(body))
+            # Чтение списка безопасно повторить, если Watch ещё перезапускает сервис.
+            # Запуск агентов и остальные операции здесь не повторяем.
+            attempts = 3 if path == '/models' else 1
+            for attempt in range(attempts):
+                try:
+                    response = await client.request(method, f'http://{host}:8000{path}',
+                        headers={'X-Service-Token': internal_token(service), 'X-User-ID': str(user_id())}, json=jsonable_encoder(body))
+                    break
+                except httpx.ConnectError:
+                    if attempt == attempts - 1:
+                        raise
+                    await asyncio.sleep(attempt + 1)
         except httpx.HTTPError as exc:
             # Не выводим тело запроса: в нём могут быть ключи и личные данные.
             logging.getLogger('uvicorn.error').warning('%s: %s', host, type(exc).__name__)

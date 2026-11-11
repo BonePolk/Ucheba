@@ -21,9 +21,8 @@ export default function Cabinets() {
   });
   const field = (name) => (event) => setForm({ ...form, [name]: event.currentTarget.value });
   const visible = (sites.data ?? []).filter((site) => `${site.name} ${site.group} ${site.url}`.toLowerCase().includes(search.toLowerCase()));
-  return <Paper withBorder p="lg" radius="md"><Stack>
-    <Group justify="space-between"><Title order={4}>Сохранённые входы</Title><Button size="xs" onClick={() => { setForm(empty); setEditing({}); }}>Добавить</Button></Group>
-    <Text size="xs" c="dimmed">Все входы используются в одном браузере вашего аккаунта. Агенты работают с ним по очереди.</Text>
+  return <Paper withBorder p="md" radius="md"><Stack gap="sm">
+    <Group justify="space-between"><Title order={4}>Сохранённые входы</Title><Button size="xs" onClick={() => { setForm(empty); setEditing({}); }}>Добавить вход</Button></Group>
     <TextInput placeholder="Найти кабинет, группу или адрес" value={search} onChange={(event) => setSearch(event.currentTarget.value)} />
     <SimpleGrid cols={{ base: 1, sm: 2 }}>
       {visible.map((site) => <Paper key={site.id} withBorder p="sm" radius="md" style={{ borderTop: `3px solid ${site.color}` }}><Stack gap={6}>

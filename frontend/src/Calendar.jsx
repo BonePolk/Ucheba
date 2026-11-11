@@ -2,6 +2,7 @@ import AgentProblemReport from './AgentProblemReport';
 import { calendarColors as colors, calendarBlockColor } from './calendarColors';
 import { useEffect, useRef, useState } from 'react';
 import { Alert, Anchor, Badge, Button, Group, Modal, NumberInput, Paper, Select, Stack, Text, Textarea, TextInput, Title, Tooltip, Switch } from '@mantine/core';
+import { useMediaQuery } from '@mantine/hooks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { agentRequest, request } from './api';
 import AgentProgress from './AgentProgress';
@@ -10,6 +11,7 @@ import MonocleBrowser from './LuchebaBrowser';
 const names = { task: 'Задача', busy: 'Занятость', sleep: 'Сон', meal: 'Еда', break: 'Отдых', work: 'Рабочее время', personal: 'Личное время' };
 const units = [{ value: 'none', label: 'Не повторять' }, { value: 'day', label: 'Дни' }, { value: 'week', label: 'Недели' }, { value: 'month', label: 'Месяцы' }];
 const minutes = (time) => Number(time.slice(0, 2)) * 60 + Number(time.slice(3));
+const eventId = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, '0')).join('');
 const clock = (value) => `${String(Math.floor(value / 60)).padStart(2, '0')}:${String(value % 60).padStart(2, '0')}`;
 const dateKey = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 const asDate = (value) => new Date(`${value}T12:00:00`);
@@ -34,6 +36,7 @@ function layout(events) {
 
 export default function Calendar({ features = {} }) {
   const client = useQueryClient();
+  const compact = useMediaQuery('(max-width: 767px)', window.innerWidth < 768);
   const [date, setDate] = useState(() => dateKey(new Date()));
   const [view, setView] = useState('week');
   const [showAmeba, setShowAmeba] = useState(true);
@@ -68,7 +71,7 @@ export default function Calendar({ features = {} }) {
     const task = taskList.find((item) => item.id === id);
     if (!config || !task || addedTask.current) return;
     addedTask.current = true;
-    setEditor({ id: crypto.randomUUID(), date: calendar.data.today, start: '09:00', end: '10:00',
+    setEditor({ id: eventId(), date: calendar.data.today, start: '09:00', end: '10:00',
       title: task.title.slice(0, 150), summary: (task.description ?? '').slice(0, 500), kind: 'task', task_id: task.id,
       repeat_unit: 'none', repeat_interval: 1, repeat_count: null });
   }, [config, tasks.data]);
@@ -77,7 +80,7 @@ export default function Calendar({ features = {} }) {
     if (!config) return;
     save.reset();
     setError('');
-    setEditor({ id: crypto.randomUUID(), date: day, start: clock(minute), end: clock(Math.min(1440, minute + 60)), title: '', summary: '', kind: 'busy', task_id: null, repeat_unit: 'none', repeat_interval: 1, repeat_count: null });
+    setEditor({ id: eventId(), date: day, start: clock(minute), end: clock(Math.min(1440, minute + 60)), title: '', summary: '', kind: 'busy', task_id: null, repeat_unit: 'none', repeat_interval: 1, repeat_count: null });
   }
   function edit(event, day = event.date, startTime = event.start) {
     if (!config) return;
@@ -89,7 +92,7 @@ export default function Calendar({ features = {} }) {
     const original = config.events.find((item) => item.id === event.id);
     const duration = minutes(event.end) - minutes(event.start);
     setEditor(original ? { ...original, date: day === event.date ? original.date : day, start: startTime, end: clock(Math.min(1440, minutes(startTime) + duration)) } : {
-      id: crypto.randomUUID(), date: day, start: startTime, end: clock(Math.min(1440, minutes(startTime) + duration)),
+      id: eventId(), date: day, start: startTime, end: clock(Math.min(1440, minutes(startTime) + duration)),
       title: event.title, summary: event.summary ?? '', task_id: event.task_id ?? null, kind: event.kind,
       repeat_unit: 'none', repeat_interval: 1, repeat_count: null,
     });
@@ -120,13 +123,18 @@ export default function Calendar({ features = {} }) {
   return <Paper withBorder p="md" radius="md"><Stack gap="sm">
     <Group justify="space-between">
       <Group gap="xs"><Title order={3}>Календарь</Title><Badge variant="light">{calendar.data?.timezone ?? '…'}</Badge></Group>
-      <Group gap="xs"><Button size="xs" variant="default" disabled={!config} onClick={() => create(date)}>+ Событие</Button><Button size="xs" variant="light" onClick={() => setDate(calendar.data?.today ?? dateKey(new Date()))}>Сегодня</Button><Button size="xs" variant="subtle" aria-label="Назад" onClick={() => shift(-1)}>‹</Button><Button size="xs" variant="subtle" aria-label="Вперёд" onClick={() => shift(1)}>›</Button><Select size="xs" w={110} value={view} onChange={setView} allowDeselect={false} data={[{ value: 'week', label: 'Неделя' }, { value: 'month', label: 'Месяц' }]} /></Group>
+      <Group gap="xs"><Button size="xs" variant="default" disabled={!config} onClick={() => create(date)}>Добавить событие</Button><Button size="xs" variant="light" onClick={() => setDate(calendar.data?.today ?? dateKey(new Date()))}>Сегодня</Button><Button size="xs" variant="subtle" aria-label="Назад" onClick={() => shift(-1)}>‹</Button><Button size="xs" variant="subtle" aria-label="Вперёд" onClick={() => shift(1)}>›</Button><Select size="xs" w={110} value={view} onChange={setView} allowDeselect={false} data={[{ value: 'week', label: 'Неделя' }, { value: 'month', label: 'Месяц' }]} /></Group>
     </Group>
     <Text fw={500}>{asDate(view === 'month' ? monthStart(date) : start).toLocaleDateString('ru-RU', view === 'month' ? { month: 'long', year: 'numeric' } : { day: 'numeric', month: 'long' })}{view === 'week' && ` — ${asDate(end).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' })}`}</Text>
-    {features.ameba !== false && <Group gap="xs"><Switch size="xs" label="Временный план Ameba" checked={showAmeba} onChange={(event) => setShowAmeba(event.currentTarget.checked)} /><Text size="xs" c="dimmed">Сбрасывается при её следующем запуске. Постоянные события сохраняются.</Text></Group>}
+    {features.ameba !== false && <Group gap="xs"><Switch size="xs" label="Временный план Ameba" checked={showAmeba} onChange={(event) => setShowAmeba(event.currentTarget.checked)} /></Group>}
     {calendar.error && <Alert color="red">{calendar.error.message}</Alert>}
     {error && !editor && <Alert color="yellow">{error}</Alert>}
-    {view === 'week' ? <div className="calendar-scroll" ref={viewport}><div className="calendar-week">
+    {compact ? <div className="calendar-agenda">{days.map((day) => <section key={day} className={`agenda-day ${day === calendar.data?.today ? 'is-today' : ''}`}>
+      <div className="agenda-date"><Text fw={700}>{asDate(day).toLocaleDateString('ru-RU', { day: 'numeric' })}</Text><Text size="xs" c="dimmed">{asDate(day).toLocaleDateString('ru-RU', { weekday: 'short', month: 'short' })}</Text></div>
+      <div className="agenda-events">{events.filter((event) => event.date === day).sort((a, b) => a.start.localeCompare(b.start)).map((event) => <button type="button" key={event.id} className="agenda-event" style={{ borderLeftColor: colors[event.kind], background: calendarBlockColor(event.kind, event.source === 'ameba') }} onClick={() => edit(event)}>
+        <span>{event.start}–{event.end}{event.source === 'ameba' ? ' · Ameba' : ''}</span><strong>{event.title}</strong>{event.summary && <small>{event.summary}</small>}
+      </button>)}<button type="button" className="agenda-add" onClick={() => create(day)}>+ Событие</button></div>
+    </section>)}</div> : view === 'week' ? <div className="calendar-scroll" ref={viewport}><div className="calendar-week">
       <div className="calendar-week-header"><div />{days.map((day) => <div key={day} className={day === calendar.data?.today ? 'calendar-today' : ''}>{asDate(day).toLocaleDateString('ru-RU', { weekday: 'short', day: 'numeric', month: 'short' })}</div>)}</div>
       <div className="calendar-week-body"><div className="calendar-hours">{Array.from({ length: 24 }, (_, hour) => <span key={hour} style={{ top: hour * 44 }}>{String(hour).padStart(2, '0')}:00</span>)}</div>
         {days.map((day) => <div key={day} className="calendar-day" onClick={(click) => { const box = click.currentTarget.getBoundingClientRect(); create(day, Math.min(1410, Math.floor((click.clientY - box.top) / 1056 * 96) * 15)); }}
@@ -142,7 +150,6 @@ export default function Calendar({ features = {} }) {
         {items.length > 4 && <Button variant="subtle" size="compact-xs" onClick={() => { setDate(day); setView('week'); }}>Ещё {items.length - 4}</Button>}
       </div>;
     })}</div>}
-    <Text size="xs" c="dimmed">Нажми на свободное время, чтобы добавить событие. Перенос открывает подтверждение; для повторяющегося события меняется вся серия.</Text>
     <Group gap="xs">{['task', 'busy', 'sleep', 'meal', 'break', 'work'].map((kind) => <Badge key={kind} size="xs" color={colors[kind]} variant="light">{names[kind]}</Badge>)}</Group>
     {config && <Group align="end"><TextInput label="Часовой пояс" placeholder="Europe/Moscow" value={timezoneDraft ?? config.timezone} onChange={(change) => setTimezoneDraft(change.currentTarget.value)} /><Button size="xs" variant="light" disabled={timezoneDraft === null || save.isPending} onClick={() => save.mutate({ ...config, timezone: timezoneDraft })}>Сохранить часовой пояс</Button></Group>}
     {config && features.straus !== false && <>

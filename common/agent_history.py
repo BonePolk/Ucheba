@@ -26,6 +26,8 @@ def with_history(agent):
             request = {key: body[key] for key in ('instruction', 'task_id', 'task', 'subject', 'owner_notes') if key in body}
             if agent == 'Ameba':
                 request['task_ids'] = [task['id'] for task in body.get('tasks', [])]
+                if body.get('user_feedback'):
+                    request['user_feedback'] = body['user_feedback']
             try:
                 record = await history_request('POST', {'agent': agent, 'request': request})
             except httpx.HTTPError:

@@ -1,5 +1,6 @@
 import AgentExplanation from './AgentExplanation';
 import { useEffect, useRef, useState } from 'react';
+import { useMediaQuery } from '@mantine/hooks';
 import { Alert, Badge, Button, Collapse, Group, Loader, Paper, Stack, Text } from '@mantine/core';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 
@@ -8,9 +9,10 @@ const statuses = { running: 'Работает', completed: 'Завершено',
 
 export default function AgentProgress({ taskId = 0, providers, active = false, children }) {
   const client = useQueryClient();
+  const compact = useMediaQuery('(max-width: 767px)', window.innerWidth < 768);
   const providerList = providers.join(',');
   const openKey = ['agent-progress-open', taskId, providerList];
-  const [opened, setOpened] = useState(() => client.getQueryData(openKey) ?? true);
+  const [opened, setOpened] = useState(() => client.getQueryData(openKey) ?? !compact);
   const viewport = useRef(null);
   const logContent = useRef(null);
   const followLog = useRef(true);

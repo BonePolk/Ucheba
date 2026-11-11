@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { agentRequest, request } from './api';
 import BotSettings from './BotSettings';
 import AgentSettings from './AgentSettings';
+import ModelPicker from './ModelPicker';
 
 function ConnectionInfo({ value }) {
   return <>
@@ -33,7 +34,6 @@ function IntegrationForms({ data, features }) {
   const [chatIds, setChatIds] = useState(data.telegram.chat_ids.map(String));
   const [notice, setNotice] = useState('');
   const chats = useQuery({ queryKey: ['integrations', 'chats'], queryFn: () => request('/integrations/telegram/chats'), enabled: false, retry: false });
-  const models = useQuery({ queryKey: ['integrations', 'models', gemini.base_url], queryFn: () => request('/integrations/gemini/models', { method: 'POST', body: JSON.stringify({ base_url: gemini.base_url, api_key: gemini.api_key }) }), enabled: false, retry: false });
   const [codexOpened, setCodexOpened] = useState(data.codex.enabled);
   const codexState = useQuery({ queryKey: ['integrations', 'codex'], enabled: features.codex !== false && codexOpened, queryFn: () => request('/integrations/codex/status'), refetchInterval: 10000, retry: false });
   const mutation = useMutation({
@@ -64,17 +64,16 @@ function IntegrationForms({ data, features }) {
     const checked = event.currentTarget.checked;
     setter((current) => ({ ...current, [name]: checked }));
   };
-  const error = mutation.error || chats.error || models.error || codexState.error;
+  const error = mutation.error || chats.error || codexState.error;
   return <Stack>
-    <Text size="sm" c="dimmed">Пустые поля ключей сохраняют прежнее значение. Сначала сохраните настройки, затем проверяйте подключение. Проверка использует квоту провайдера.</Text>
     {error && <Alert color="red">{error.message}</Alert>}
     {notice && <Alert color="purple" withCloseButton onClose={() => setNotice('')}>{notice}</Alert>}
     <SimpleGrid cols={{ base: 1, md: 2 }}>
-      {features.context !== false && <AgentSettings name="context" title="Monocle" description="Собирает контекст задачи. Отдельный сервис, ключ и модель." data={data.context} />}
-      {features.ameba !== false && data.ameba && <AgentSettings name="ameba" title="Ameba" description="Планирует время и результат, расставляет задачи по важности." data={data.ameba} />}
-      {features.straus !== false && data.straus && <AgentSettings name="straus" title="Straus" description="Изменяет календарь по твоему поручению, сам выбирает ЛК и ищет сведения в интернете." data={data.straus} />}
+      {features.context !== false && <AgentSettings name="context" title="Monocle" data={data.context} />}
+      {features.ameba !== false && data.ameba && <AgentSettings name="ameba" title="Ameba" data={data.ameba} />}
+      {features.straus !== false && data.straus && <AgentSettings name="straus" title="Straus" data={data.straus} />}
 
-      {features.telegram !== false && <Paper withBorder p="lg"><Stack>
+      {features.telegram !== false && <Paper withBorder p="md"><Stack gap="sm">
         <Group justify="space-between"><Title order={3}>Telegram</Title><Badge color={data.telegram_connected ? 'green' : 'gray'}>{data.telegram_connected ? 'Подключён' : 'Не подключён'}</Badge></Group>
         <PasswordInput label="API ID" placeholder={data.telegram.configured.api_id ? 'Сохранён' : ''} value={telegram.api_id} onChange={field(setTelegram, 'api_id')} />
         <PasswordInput label="API Hash" placeholder={data.telegram.configured.api_hash ? 'Сохранён' : ''} value={telegram.api_hash} onChange={field(setTelegram, 'api_hash')} />
@@ -90,22 +89,20 @@ function IntegrationForms({ data, features }) {
         <Button color="red" variant="subtle" disabled={mutation.isPending} onClick={() => { if (window.confirm('Отключить Telegram?')) run('telegram/disconnect'); }}>Отключить аккаунт</Button>
         <ConnectionInfo value={data.telegram} />
       </Stack></Paper>}
-      {features.gemini !== false && <Paper withBorder p="lg"><Stack>
+      {features.gemini !== false && <Paper withBorder p="md"><Stack gap="sm">
         <Title order={3}>Gemini</Title>
-        <TextInput label="Endpoint Gemini API" description="Адрес провайдера с нативным Gemini API" value={gemini.base_url} onChange={field(setGemini, 'base_url')} />
+        <TextInput label="Адрес Gemini API" value={gemini.base_url} onChange={field(setGemini, 'base_url')} />
         <PasswordInput label="API-ключ" placeholder={data.gemini.configured.api_key ? 'Сохранён' : ''} value={gemini.api_key} onChange={field(setGemini, 'api_key')} />
-        <Select label="Модель" searchable data={[...new Set([gemini.model, ...(models.data ?? [])])]} value={gemini.model} allowDeselect={false} onChange={(model) => setGemini({ ...gemini, model })} />
-        <Button variant="subtle" loading={models.isFetching} onClick={() => models.refetch()}>Загрузить доступные модели</Button>
-        <TextInput label="Часовой пояс" description="Например, Europe/Moscow" value={gemini.timezone} onChange={field(setGemini, 'timezone')} />
-        <Textarea label="Контекст владельца" description="Имя, группа, какие поручения относятся к вам" value={gemini.owner_context} onChange={field(setGemini, 'owner_context')} />
+        <ModelPicker path="/integrations/gemini/models" endpoint={gemini.base_url} apiKey={gemini.api_key} configured={data.gemini.configured.api_key} value={gemini.model} onChange={(model) => setGemini((current) => ({ ...current, model }))} />
+        <TextInput label="Часовой пояс" placeholder="Europe/Moscow" value={gemini.timezone} onChange={field(setGemini, 'timezone')} />
+        <Textarea label="Обо мне" placeholder="Имя, группа, мои поручения" value={gemini.owner_context} onChange={field(setGemini, 'owner_context')} />
         <NumberInput label="Интервал обработки, секунд" min={30} max={86400} value={gemini.interval_seconds} onChange={(value) => setGemini({ ...gemini, interval_seconds: value })} />
         <NumberInput label="Порог уверенности автосоздания" min={0.5} max={1} step={0.05} decimalScale={2} value={gemini.confidence_threshold} onChange={(value) => setGemini({ ...gemini, confidence_threshold: value })} />
         <Switch label="Разрешить анализ сообщений" checked={gemini.enabled} onChange={toggle(setGemini, 'enabled')} />
-        <Text size="xs" c="dimmed">Изменения, отмена, неясный адресат и неоднозначные задачи всегда требуют подтверждения.</Text>
         <Group><Button loading={saving('gemini')} disabled={mutation.isPending} onClick={() => save('gemini', gemini)}>Сохранить</Button><Button variant="default" disabled={mutation.isPending} onClick={() => run('gemini/check')}>Проверить подключение</Button><Button variant="subtle" color="red" disabled={mutation.isPending} onClick={() => run('gemini', { api_key: null, enabled: false }, 'PATCH')}>Удалить ключ</Button></Group>
         <ConnectionInfo value={data.gemini} />
       </Stack></Paper>}
-      {features.codex !== false && <Paper withBorder p="lg"><Stack>
+      {features.codex !== false && <Paper withBorder p="md"><Stack gap="sm">
         <Group justify="space-between"><Title order={3}>Codex</Title><Badge color={codexState.data?.authorized ? 'green' : 'gray'}>{codexState.data?.authorized ? 'Вход выполнен' : 'Нет авторизации'}</Badge></Group>
         <Text size="sm">Официальный Python SDK openai-codex с входом ChatGPT по device code. Включите device code login в настройках безопасности ChatGPT. Доступ зависит от подписки и лимитов аккаунта.</Text>
         {codexState.data && !codexState.data.sandbox_available && <Alert color="yellow">Linux sandbox недоступен в этом окружении. Выполнение заблокировано; режим без защиты не используется.</Alert>}

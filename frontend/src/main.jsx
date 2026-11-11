@@ -13,7 +13,11 @@ const queryClient = new QueryClient();
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
-    <MantineProvider forceColorScheme="dark" theme={{ primaryColor: 'purple', primaryShade: 6, colors: {
+    <MantineProvider forceColorScheme="dark" theme={{ primaryColor: 'purple', primaryShade: 6, defaultRadius: 0,
+      radius: { xs: '0', sm: '0', md: '0', lg: '0', xl: '0' },
+      shadows: { xs: 'none', sm: 'none', md: 'none', lg: 'none', xl: 'none' },
+      components: { Loader: { defaultProps: { type: 'dots' } } },
+      colors: {
       purple: ['#f5edfc', '#e7d9f4', '#d0b5e7', '#b78fd9', '#a171cc', '#905bc0', '#7f49b4', '#6e3c9f', '#5c3287', '#4c296f'],
       dark: ['#e6e6e6', '#b8b8b8', '#999999', '#707070', '#454545', '#303030', '#1c1c1c', '#0a0a0a', '#070707', '#000000'],
     } }}>

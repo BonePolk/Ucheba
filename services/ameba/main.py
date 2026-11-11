@@ -129,6 +129,7 @@ async def rank(body: dict):
         http = httpx.AsyncClient(timeout=httpx.Timeout(None, connect=8))
         async with AsyncOpenAI(api_key=key, base_url=config.get('base_url') or 'https://lenec.tech/v1',
                               http_client=http, max_retries=0) as client:
+            memory_checked = False
             plans = {}
             schedule = None
             planning_week = planning.with_rest(body.get('weekly_schedule'), body['now'], timezone_name=body.get('timezone', 'UTC'))
@@ -149,6 +150,25 @@ async def rank(body: dict):
                 response = await stream_model_response(client, progress,
                     model=model, reasoning={'effort': 'medium', 'summary': 'auto'}, max_output_tokens=8000,
                     instructions=ISSUE_INSTRUCTION + MEMORY_INSTRUCTION + NOTE_INSTRUCTION + (
+                        'Перед любым планированием обязательно вызови read_user_memory и проверь, '
+                        'нет ли важных фактов о владельце: сон, еда, время подъёма, энергия, работа, '
+                        'обязательства, предпочтения и ограничения. Слова владельца важнее догадок. '
+                        'Применяй важные факты к реальному расписанию и порядку, а не просто упоминай их. '
+                        'Если ты узнала новое устойчивое предпочтение из слов владельца или подтверждённых '
+                        'повторяющихся наблюдений, сохрани его через remember_user_fact. '
+                        'Не запоминай своё допущение как факт; не дублируй существующие записи '
+                        'и не заменяй явно заданный владельцем факт своей догадкой. '
+                        'Для каждой задачи задай deadline_policy: soft — позднее выполнение допустимо; '
+                        'finish_before — работу необходимо полностью закончить до срока; '
+                        'expires — после срока выполнить/сдать уже нельзя или результат теряет смысл. '
+                        'Определи политику из контекста, не объявляй каждый дедлайн запретом. '
+                        'Учитывай время всей работы, концентрацию, занятость и отдых: начать до срока '
+                        'недостаточно, надо успеть завершить. Сначала сохраняй ещё достижимые обязательные сроки. '
+                        'Не сохраняй старое размещение, если из-за него задача не успеет к сроку. '
+                        'Если reorder_tasks вернул deadline_conflicts, попробуй осмысленно изменить порядок '
+                        'или отказаться от прежнего времени; не занижай оценки ради дедлайна. '
+                        'Если выполнить вовремя невозможно, сообщи об этом владельцу в explanation '
+                        'и через agent_note, не обещай результат и не переноси запрещённую работу за срок. '
                         'previous_plan — прошлый план этого владельца, а user_feedback — его замечания к расписанию. '
                         'Старайся максимально сохранить прежние дни, время и порядок задач, меняя только необходимое. '
                         'В reorder_tasks используй keep_previous_times=true по умолчанию; false только при необходимости перестроения. '
@@ -261,7 +281,7 @@ async def rank(body: dict):
                         'Если задачи равноценны, явно укажи сохранение исходного порядка. '
                         'Пиши кратко: explanation до 400 символов; effort и impact — короткая выжимка. Не пересказывай контекст. По-русски, без Markdown.'),
                     input=messages, tools=[planning.TOOL, planning.ORDER_TOOL, planning.REST_TOOL, CONTEXT_TOOL, NOTE_TOOL, ISSUE_TOOL, *MEMORY_TOOLS],
-                    tool_choice=('none' if repaired else
+                    tool_choice=({'type': 'function', 'name': 'read_user_memory'} if not memory_checked else 'none' if repaired else
                         {'type': 'function', 'name': 'plan_rest'} if set(plans) == set(expected) and schedule is not None and not rest_planned else
                         'required' if set(plans) != set(expected) or schedule is None else 'auto'),
                     parallel_tool_calls=False,
@@ -298,6 +318,8 @@ async def rank(body: dict):
                 messages.extend(response.output)
                 for call in calls:
                     try:
+                        if call.name in ('plan_tasks', 'plan_rest', 'reorder_tasks') and not memory_checked:
+                            raise ValueError('Сначала прочитай факты владельца через read_user_memory')
                         if call.name == 'agent_note':
                             output = progress.note(call.arguments)
                         elif call.name == 'report_tool_problem':
@@ -306,6 +328,8 @@ async def rank(body: dict):
                         elif call.name in MEMORY_NAMES:
                             progress.add('Читает общую память' if call.name == 'read_user_memory' else 'Запоминает факт о владельце', description='Использует или сохраняет подтверждённые сведения для планирования следующих поручений.')
                             output = await memory_tool(call.name, json.loads(call.arguments), 'Ameba')
+                            if call.name == 'read_user_memory':
+                                memory_checked = True
                         elif call.name == 'request_context_check':
                             arguments = json.loads(call.arguments)
                             ids = arguments['task_ids']
@@ -335,9 +359,11 @@ async def rank(body: dict):
                             output = {'plans': list(calculated.values())}
                         elif call.name == 'reorder_tasks':
                             progress.add('Переставляет задачи и пересчитывает календарный план', description='Проверяет порядок с учётом доступного времени, занятости и отдыха.')
-                            schedule = planning.reorder(call.arguments, plans, expected, planning_week, body.get('now'), body.get('previous_plan', {}).get('schedule'))
+                            schedule = planning.reorder(call.arguments, plans, expected, planning_week, datetime.now(timezone.utc).isoformat(), body.get('previous_plan', {}).get('schedule'), tasks)
                             schedule['rest_assumption'] = rest_assumption
                             order = schedule['task_ids']
+                            for conflict in schedule.get('deadline_conflicts', []):
+                                progress.add(conflict['reason'])
                             if schedule.get('timeline_error'):
                                 progress.add('Порядок рассчитан; календарная шкала недоступна: ' + schedule['timeline_error'])
                             progress.add(f"Переставляет задачи: {' → '.join(map(str, order))}; работа {schedule['min_minutes']}–{schedule['max_minutes']} мин")
@@ -363,6 +389,14 @@ async def rank(body: dict):
                                   'details': errors, 'expected_task_ids': expected,
                                   'planned_task_ids': list(plans),
                                   'missing_plan_ids': [task_id for task_id in expected if task_id not in plans]}
+
+                    except httpx.HTTPError as exc:
+                        if call.name not in MEMORY_NAMES:
+                            raise
+                        status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+                        progress.add('Не удалось прочитать память' if call.name == 'read_user_memory' else 'Не удалось сохранить факт')
+                        output = {'error': ('Память отклонила запись. Проверь формат; не заменяй факт владельца своей догадкой.'
+                                            if status == 422 else 'Память временно недоступна. Повтори обращение.'), 'status': status}
 
                     messages.append({'type': 'function_call_output', 'call_id': call.call_id,
                                      'output': json.dumps(output, ensure_ascii=False)})

@@ -35,7 +35,7 @@ export default function MonocleBrowser({ active = false }) {
   return <Paper withBorder p="xs" radius="md" maw={360}><Stack gap={6}>
     <Group gap="xs" justify="space-between"><Button variant="subtle" size="compact-xs" onClick={() => setOpened(!opened)}>{opened ? 'Скрыть браузер' : 'Браузер агента'}</Button><Button variant="subtle" size="compact-xs" onClick={() => setExpanded(true)}>{paused ? 'Пройти капчу / продолжить' : 'Увеличить ↗'}</Button></Group>
     <Collapse in={opened}>
-      {image ? <button type="button" onClick={() => setExpanded(true)} style={{ display: 'block', width: '100%', border: 0, padding: 0, background: 'none', cursor: 'zoom-in' }}><img src={image} alt="Увеличить экран браузера агента" style={{ display: 'block', width: '100%', borderRadius: 6 }} /></button> : <Text size="xs" c="dimmed">Браузер ещё не открыт.</Text>}
+      {image ? <button type="button" onClick={() => setExpanded(true)} style={{ display: 'block', width: '100%', border: 0, padding: 0, background: 'none', cursor: 'zoom-in' }}><img src={image} alt="Увеличить экран браузера агента" style={{ display: 'block', width: '100%', borderRadius: 0 }} /></button> : <Text size="xs" c="dimmed">Браузер ещё не открыт.</Text>}
       {error && <Text size="xs" c="yellow">Переподключаемся…</Text>}
     </Collapse>
     <Modal opened={expanded} onClose={() => setExpanded(false)} title="Браузер агента" size="xl" centered>
@@ -43,7 +43,7 @@ export default function MonocleBrowser({ active = false }) {
         <Button loading={busy} onClick={() => action.mutate({ action: paused ? 'resume' : 'pause' })}>{paused ? 'Готово — продолжить работу агента' : 'Взять управление / пройти капчу'}</Button>
       </Group>
       {paused && <Text size="xs" mb="xs">Агент ждёт. Нажимайте на элементы снимка, чтобы пройти капчу или завершить вход. Затем верните управление кнопкой выше.</Text>}
-      {image && <><Text size="xs" c="dimmed" style={{ overflowWrap: 'anywhere' }}>{frame.url}</Text><img src={image} alt="Экран браузера агента" onClick={click} style={{ display: 'block', width: '100%', borderRadius: 8, marginTop: 8, cursor: paused ? 'crosshair' : 'default' }} /></>}
+      {image && <><Text size="xs" c="dimmed" style={{ overflowWrap: 'anywhere' }}>{frame.url}</Text><img src={image} alt="Экран браузера агента" onClick={click} style={{ display: 'block', width: '100%', borderRadius: 0, marginTop: 8, cursor: paused ? 'crosshair' : 'default' }} /></>}
       {paused && <Stack gap="xs" mt="sm">
         <Group align="end"><PasswordInput label="Ввести в выбранное поле" value={typing} onChange={(event) => setTyping(event.currentTarget.value)} autoComplete="off" /><Button disabled={busy || !typing} onClick={() => { action.mutate({ action: 'type', text: typing }); setTyping(''); }}>Ввести</Button></Group>
         <Group>{['Enter', 'Tab', 'Backspace', 'Control+A', 'Escape'].map((key) => <Button key={key} size="compact-xs" disabled={busy} variant="default" onClick={() => action.mutate({ action: 'press', text: key })}>{key}</Button>)}</Group>

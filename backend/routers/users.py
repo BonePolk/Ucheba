@@ -1,4 +1,5 @@
 import os
+from uuid import uuid4
 
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -148,6 +149,17 @@ def agent_memory_list(request: Request):
     require_user(request)
     from agent_memory import read
     return read()
+
+
+class NewFact(BaseModel):
+    text: str = Field(min_length=1, max_length=1500)
+
+
+@router.post('/agent-memory')
+def agent_memory_create(body: NewFact, request: Request):
+    require_user(request)
+    from agent_memory import save
+    return save({'key': 'user.' + uuid4().hex, 'text': body.text}, 'Владелец')
 
 
 @router.put('/agent-memory')

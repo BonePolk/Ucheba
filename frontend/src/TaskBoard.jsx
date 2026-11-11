@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Alert, Badge, Button, Checkbox, Container, Group, Loader, Paper, SegmentedControl, Select, SimpleGrid, Stack, Table, Text, Textarea, Title, Tooltip } from '@mantine/core';
+import { useMediaQuery } from '@mantine/hooks';
+import TaskCard from './TaskCard';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { uploadTaskFiles } from './fileUpload';
 import { agentRequest, deleteTask, getTasks, request, saveTask } from './api';
@@ -29,6 +31,9 @@ const sorting = [
 
 export default function TaskBoard({ features = {} }) {
   const queryClient = useQueryClient();
+  const compact = useMediaQuery('(max-width: 62em)', window.innerWidth <= 992);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [plannerOpen, setPlannerOpen] = useState(false);
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000);
@@ -100,14 +105,14 @@ export default function TaskBoard({ features = {} }) {
   const changeFilter = (name, value) => setFilters((current) => ({ ...current, [name]: value }));
 
   return (
-    <Container size="xl" py="xl">
-      <Stack gap="lg">
-        <Group justify="space-between">
+    <Container size="xl" py="md" className="task-board">
+      <Stack gap="md">
+        <Group justify="space-between" className="task-heading">
           <Group gap="sm">
-            <img src="/icon.png" alt="" width="44" height="44" style={{ borderRadius: 10 }} />
-            <Title order={1}>Задачи</Title>
+            <div><Text size="xs" c="dimmed" className="page-eyebrow">МОЙ ДЕНЬ</Text>
+            <Title order={2}>Задачи <span className="task-count">{rows.length}</span></Title></div>
           </Group>
-          <Button onClick={() => { save.reset(); setEditor({ task: null }); }}>Добавить задачу</Button>
+          <Button onClick={() => { save.reset(); setEditor({ task: null }); }}>{compact ? '+ Задача' : 'Добавить задачу'}</Button>
         </Group>
         <SegmentedControl
           value={view}
@@ -116,29 +121,39 @@ export default function TaskBoard({ features = {} }) {
           styles={{ root: { flexWrap: 'wrap' } }}
         />
         {taskView && <>
-        <Paper withBorder p="md" radius="md">
-          <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }}>
+        <Paper withBorder p="sm" radius="md" className="task-filter-panel">
+          {compact && <Button fullWidth variant="subtle" color="gray" onClick={() => setFiltersOpen(!filtersOpen)} aria-expanded={filtersOpen}>Фильтры и сортировка{Object.values(filters).filter(Boolean).length > 0 ? ` · ${Object.values(filters).filter(Boolean).length}` : ''} {filtersOpen ? '−' : '+'}</Button>}
+          {(!compact || filtersOpen) && <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }}>
             <Select label="Статус" placeholder="Все статусы" data={statuses} clearable value={filters.status} onChange={(value) => changeFilter('status', value)} />
             <Select label="Приоритет" placeholder="Все приоритеты" data={[{ value: 'overdue', label: 'Просрочено' }, ...priorities]} clearable value={filters.priority} onChange={(value) => changeFilter('priority', value)} />
             <Select label="Категория" placeholder="Все категории" data={categories.data ?? []} clearable searchable value={filters.category} onChange={(value) => changeFilter('category', value)} />
             <Select label="Сортировка" data={sorting.filter((item) => features.ameba !== false || item.value !== 'jev:asc')} value={currentSort} allowDeselect={false} onChange={setSort} />
-          </SimpleGrid>
+          </SimpleGrid>}
         </Paper>
         {!archived && features.context !== false && features.ameba === false && <AgentProgress providers={['context']} active={queue.data?.active?.some((item) => item.provider === 'context')} />}
         {!archived && (features.context !== false || features.ameba !== false) && <AgentQueue queue={queue.data} error={queue.error} />}
-        {features.ameba !== false && !archived && <Stack gap="xs">
-          <Textarea label="Что изменить в расписании?" placeholder="Например: оставь утро свободным, а лабораторную перенеси на вечер"
+        {features.ameba !== false && !archived && <Paper withBorder radius="lg" p="md" className="planner-panel"><Stack gap="sm">
+          <Group justify="space-between"><Group gap="xs"><span className={`planner-dot ${queue.data?.ameba_running ? 'is-active' : ''}`} /><Text fw={600} size="sm">План дня</Text></Group><Button size="compact-sm" variant="subtle" onClick={() => setPlannerOpen(!plannerOpen)} aria-expanded={plannerOpen}>{plannerOpen ? 'Свернуть' : 'Настроить'}</Button></Group>
+          {plannerOpen && <>
+          <Textarea label="Пожелания к расписанию" placeholder="Например: оставь утро свободным, а лабораторную перенеси на вечер"
             autosize minRows={1} maxRows={4} maxLength={4000} value={planFeedback ?? ranking.data?.feedback ?? ''}
-            onChange={(event) => setPlanFeedback(event.currentTarget.value)} description="Замечания сохранятся при обновлении порядка. Подходящие части прошлого плана Амёба постарается оставить." />
-          <Group>
-          <Button variant="light" loading={rank.isPending && !queue.data?.ameba_running} disabled={queue.data?.browser_busy} onClick={() => rank.mutate()}>{queue.data?.ameba_running ? 'Обновить при изменениях' : 'Обновить порядок Ameba'}</Button>
+            onChange={(event) => setPlanFeedback(event.currentTarget.value)} />
+          </>}<Group>
+          <Button variant="light" loading={rank.isPending && !queue.data?.ameba_running} disabled={queue.data?.browser_busy} onClick={() => rank.mutate()}>{queue.data?.ameba_running ? 'Применить изменения' : 'Обновить расписание'}</Button>
           <Text size="sm" c="dimmed">{ranking.data?.needs_refresh ? 'Порядок нужно обновить.' : `Сравнено задач: ${ranking.data?.ranked_count ?? 0}.`}{ranking.data?.pending_count > 0 && ` Ожидают контекста Monocle: ${ranking.data.pending_count}.`}{ranking.data?.uncertain_comparisons > 0 && ' При неуверенном сравнении сохранён ручной приоритет и дедлайн.'}</Text>
-        </Group>{rank.data?.unchanged && <Text size="xs" c="dimmed">{rank.data.status === 'running' ? 'Ameba уже работает с этими данными.' : 'Данные не изменились — сохранённый порядок остаётся.'}</Text>}{ranking.data?.explanation && <Tooltip multiline w={320} label={ranking.data.explanation} events={{ hover: true, focus: true, touch: true }}><Text component="button" type="button" size="xs" c="dimmed" style={{ cursor: 'help', background: 'none', border: 0, padding: 0, width: 'fit-content' }}>{ranking.data.needs_refresh ? 'О последней сортировке' : 'Почему такой порядок'}</Text></Tooltip>}<JebaProgress active={rank.isPending} /></Stack>}
+        </Group>{rank.data?.unchanged && <Text size="xs" c="dimmed">{rank.data.status === 'running' ? 'Ameba уже работает с этими данными.' : 'Данные не изменились — сохранённый порядок остаётся.'}</Text>}{ranking.data?.explanation && <Tooltip multiline w={320} label={ranking.data.explanation} events={{ hover: true, focus: true, touch: true }}><Text component="button" type="button" size="xs" c="dimmed" style={{ cursor: 'help', background: 'none', border: 0, padding: 0, width: 'fit-content' }}>{ranking.data.needs_refresh ? 'О последней сортировке' : 'Почему такой порядок'}</Text></Tooltip>}<div className="planner-progress"><JebaProgress active={rank.isPending} /></div></Stack></Paper>}
         {error && <Alert color="red">{error.message}</Alert>}
         {tasks.isPending ? <Loader aria-label="Загрузка задач" /> : (
-          <Paper withBorder radius="md" p="sm">
-            <Table.ScrollContainer minWidth={900}>
-              <Table verticalSpacing="sm" highlightOnHover>
+          compact ? <div className="task-card-grid">{rows.map((task) => <TaskCard key={task.id} task={task} archived={archived}
+            completing={completing === task.id} busy={update.isPending} removing={remove.isPending}
+            position={features.ameba !== false ? positions.get(task.id) : null} assessment={features.ameba !== false ? rankingReasons.get(task.id) : null}
+            overdue={isOverdue(task, now)} agents={automationEnabled}
+            onUpdate={(data) => update.mutate({ id: task.id, data })}
+            onEdit={() => { save.reset(); setEditor({ task }); }}
+            onRemove={() => { if (!archived || window.confirm(`Удалить задачу «${task.title}» навсегда?`)) remove.mutate({ id: task.id, permanent: archived }); }}
+          />)}{!rows.length && <Paper p="xl" withBorder radius="lg"><Text ta="center" c="dimmed">{archived ? 'Архив пуст' : 'Задач нет'}</Text></Paper>}</div> : <Paper withBorder radius="lg" p="sm">
+            <Table.ScrollContainer minWidth={0} className="task-table">
+              <Table verticalSpacing="xs" highlightOnHover>
                 <Table.Thead>
                   <Table.Tr>
                     <Table.Th>Готово</Table.Th><Table.Th>Задача</Table.Th><Table.Th>Дедлайн</Table.Th><Table.Th>Приоритет</Table.Th><Table.Th>Статус</Table.Th><Table.Th>Категория</Table.Th><Table.Th>Действия</Table.Th>
@@ -155,10 +170,10 @@ export default function TaskBoard({ features = {} }) {
                         {task.source_url && <Text component="a" href={task.source_url} target="_blank" rel="noreferrer" size="xs" c="purple">Источник Telegram</Text>}
                         {task.description && <Text size="sm" c="dimmed" lineClamp={2} style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{task.description}</Text>}
                       </Table.Td>
-                      <Table.Td style={{ whiteSpace: 'nowrap' }}><Text size="sm" c={isOverdue(task, now) ? 'red' : undefined}>{task.deadline ? dayjs.utc(task.deadline).local().format('DD.MM.YYYY HH:mm') : '—'}</Text>{isOverdue(task, now) && <Text size="xs" c="red">Просрочено</Text>}</Table.Td>
-                      <Table.Td><Badge color={{ low: 'gray', medium: 'yellow', high: 'red' }[task.priority]} variant="light">{priorities.find((item) => item.value === task.priority)?.label}</Badge>{features.context !== false && task.ai_details && JSON.parse(task.ai_details).status === 'needs_context' && <Text size="xs" c="yellow">Недостаточно контекста. {JSON.parse(task.ai_details).reason} <a href={`/?task=${task.id}`}>Ответить</a></Text>}{features.context !== false && task.ai_details && JSON.parse(task.ai_details).status === 'context_pending' && <Text size="xs" c="dimmed">Ожидает проверки Monocle</Text>}{features.ameba !== false && positions.has(task.id) && <Text size="xs" c="dimmed">Порядок Ameba: {positions.get(task.id)} из {ranking.data.ranked_count}</Text>}{features.ameba !== false && positions.has(task.id) && rankingReasons.has(task.id) && <RankingAssessment assessment={rankingReasons.get(task.id)} />}</Table.Td>
-                      <Table.Td><Select aria-label={`Статус: ${task.title}`} w={160} data={statuses} value={completing === task.id ? 'done' : task.status} allowDeselect={false} disabled={update.isPending || archived} onChange={(value) => update.mutate({ id: task.id, data: { status: value } })} /></Table.Td>
-                      <Table.Td>{task.category || '—'}</Table.Td>
+                      <Table.Td data-label="Дедлайн" style={{ whiteSpace: 'nowrap' }}><Text size="sm" c={isOverdue(task, now) ? 'red' : undefined}>{task.deadline ? dayjs.utc(task.deadline).local().format('DD.MM.YYYY HH:mm') : '—'}</Text>{isOverdue(task, now) && <Text size="xs" c="red">Просрочено</Text>}</Table.Td>
+                      <Table.Td data-label="Приоритет"><Badge color={{ low: 'gray', medium: 'yellow', high: 'red' }[task.priority]} variant="light">{priorities.find((item) => item.value === task.priority)?.label}</Badge>{features.context !== false && task.ai_details && JSON.parse(task.ai_details).status === 'needs_context' && <Text size="xs" c="yellow">Недостаточно контекста. {JSON.parse(task.ai_details).reason} <a href={`/?task=${task.id}`}>Ответить</a></Text>}{features.context !== false && task.ai_details && JSON.parse(task.ai_details).status === 'context_pending' && <Text size="xs" c="dimmed">Ожидает проверки Monocle</Text>}{features.ameba !== false && positions.has(task.id) && <Text size="xs" c="dimmed">Порядок Ameba: {positions.get(task.id)} из {ranking.data.ranked_count}</Text>}{features.ameba !== false && positions.has(task.id) && rankingReasons.has(task.id) && <RankingAssessment assessment={rankingReasons.get(task.id)} />}</Table.Td>
+                      <Table.Td data-label="Статус"><Select aria-label={`Статус: ${task.title}`} w={{ base: '100%', sm: 160 }} data={statuses} value={completing === task.id ? 'done' : task.status} allowDeselect={false} disabled={update.isPending || archived} onChange={(value) => update.mutate({ id: task.id, data: { status: value } })} /></Table.Td>
+                      <Table.Td data-label="Категория">{task.category || '—'}</Table.Td>
                       <Table.Td>
                         <Group gap="xs">
                           {archived ? <>
@@ -169,7 +184,7 @@ export default function TaskBoard({ features = {} }) {
                               }
                             }}>Удалить навсегда</Button>
                           </> : <>
-                          {automationEnabled && <Button size="xs" variant="light" component="a" href={`/?task=${task.id}`}>Действия ИИ</Button>}
+                          {automationEnabled && <Button size="xs" variant="light" component="a" href={`/?task=${task.id}`}>Открыть агента</Button>}
                           <Button size="xs" variant="default" onClick={() => { save.reset(); setEditor({ task }); }}>Изменить</Button>
                           <Button size="xs" variant="subtle" color="red" disabled={remove.isPending} onClick={() => remove.mutate({ id: task.id })}>В архив</Button>
                           </>}
