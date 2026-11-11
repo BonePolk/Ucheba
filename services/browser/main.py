@@ -27,7 +27,6 @@ from common.http import private_app
 from common.identity import user_id, current_user_id
 
 contexts = {}
-public_contexts = {}
 locks = {}
 screens = OrderedDict()
 schedule_pages = {}
@@ -46,8 +45,6 @@ async def lifespan(app):
     finally:
         for context in contexts.values():
             await context.close()
-        for context in public_contexts.values():
-            await context.browser.close()
         await playwright.stop()
 
 
@@ -89,14 +86,9 @@ async def browser_error(request, exc):
 
 
 async def open_page(tab, url):
-    # Не ждём все ресурсы: у университетских сайтов они часто загружаются долго.
+    # Достаточно начала нового документа; ресурсы продолжают грузиться в фоне.
     await tab.goto(url, wait_until='commit', timeout=0)
-    try:
-        await tab.wait_for_load_state('domcontentloaded', timeout=8000)
-        return True
-    except BrowserTimeoutError:
-        logging.getLogger('uvicorn.error').warning('browser: partial_load')
-        return False
+    return False  # Полная загрузка не ожидалась; вызывающий код покажет notice.
 
 
 async def schedule_snapshot(tab):
@@ -107,6 +99,7 @@ async def schedule_snapshot(tab):
             return await tab.evaluate("""() => ({
                 url: location.href, title: document.title, ready_state: document.readyState,
                 text: (document.body?.innerText || "").slice(0, 40000),
+                images: [...document.querySelectorAll('img')].slice(0,100).map((el,index)=>({index,alt:el.alt})),
                 needs_login: [...document.querySelectorAll('input[type="password"]')]
                     .some(input => input.getClientRects().length > 0),
                 links: [...document.querySelectorAll('a[href]')]
@@ -114,8 +107,11 @@ async def schedule_snapshot(tab):
                     .filter(a => a.text.trim() && /^https?:/.test(a.href)).slice(0, 100)
             })""")
         except BrowserError as exc:
-            if attempt or not changing_document(exc):
+            if not changing_document(exc):
                 raise
+            if attempt:
+                return {'url': tab.url, 'title': '', 'text': '', 'ready_state': 'loading',
+                        'needs_login': False, 'links': [], 'images': []}
             logging.getLogger('uvicorn.error').warning('browser: schedule_redirect_retry')
 
 
@@ -252,20 +248,8 @@ async def page():
 
 
 async def public_page():
-    owner = user_id()
-    context = public_contexts.get(owner)
-    if context is None:
-        browser = await playwright.chromium.launch()
-        context = await browser.new_context(viewport={'width': 1100, 'height': 750},
-                                            service_workers='block', accept_downloads=True)
-        await context.route('**/*', guard)
-        await context.route_web_socket('**/*', lambda ws: ws.close())
-        capture_downloads(context)
-        context.set_default_timeout(8000)
-        context.set_default_navigation_timeout(25000)
-        public_contexts[owner] = context
-    pages = [tab for tab in context.pages if not tab.is_closed()]
-    return pages[-1] if pages else await context.new_page()
+    # Поиск, ЛК и скачивания используют один профиль владельца.
+    return await page()
 
 
 def lock():
@@ -278,8 +262,13 @@ def safe_url(url):
 
 
 async def screenshot(tab):
-    return {'url': safe_url(tab.url), 'image': base64.b64encode(await tab.screenshot(type='png')).decode(),
-            'width': 1100, 'height': 750}
+    state = screens.get(user_id(), {'tab': tab, 'frame': None})
+    loading = (await schedule_snapshot(tab))['ready_state'] == 'loading'
+    # Ответ управления не ждёт картинку; SSE продолжает присылать свежие кадры.
+    frame = state.get('frame') if loading else await capture_screen(state)
+    return {'url': safe_url(tab.url), 'image': frame['image'] if frame else '',
+            'mime': frame['mime'] if frame else 'image/jpeg',
+            'width': 1100, 'height': 750, 'loading': loading}
 
 
 def watch_screen(tab):
@@ -347,7 +336,7 @@ async def screen_stream(request: Request):
                              headers={'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no'})
 
 
-async def visual_frame(tab, full_page=False, image=None):
+async def visual_frame(tab, full_page=False, image=None, timeout=8000):
     # Парольные поля не передаются модели даже на снимке страницы входа.
     masks = [tab.locator('input[type="password"], input[autocomplete="one-time-code"], '
                          'input[autocomplete="current-password"], input[autocomplete="new-password"]')]
@@ -362,24 +351,27 @@ async def visual_frame(tab, full_page=False, image=None):
         bounds = await image.bounding_box()
         if not bounds or bounds['width'] * bounds['height'] > 33000000:
             raise HTTPException(413, 'Изображение слишком большое или скрыто')
-        content = await image.screenshot(type='jpeg', quality=85, timeout=8000)
+        content = await image.screenshot(type='jpeg', quality=85, timeout=timeout)
     else:
         content = await tab.screenshot(type='jpeg', quality=85, full_page=full_page,
-                                       mask=masks, timeout=8000)
+                                       mask=masks, timeout=timeout)
     return {'image': base64.b64encode(content).decode(), 'mime': 'image/jpeg',
             'url': safe_url(tab.url), 'full_page': full_page, 'viewport': {'width': 1100, 'height': 750}}
 
 
 async def action_frame(tab, full_page=False, image=None):
     try:
-        return await visual_frame(tab, full_page, image)
+        snapshot = await schedule_snapshot(tab)
+        if snapshot['ready_state'] == 'loading' and image is None:
+            return {'url': safe_url(tab.url), 'visual_error': 'Документ ещё загружается; текст доступен без снимка.'}
+        return await visual_frame(tab, full_page, image, timeout=1500)
     except BrowserError:
         # Ошибка снимка не должна отменять уже прочитанный текст или скачанный файл.
         return {'url': safe_url(tab.url), 'visual_error': 'Снимок пока не готов. Повторите browser_screenshot.'}
 
 
 class VisualAction(BaseModel):
-    action: Literal['screenshot', 'click', 'type', 'press', 'scroll', 'open', 'back', 'forward', 'image', 'javascript']
+    action: Literal['screenshot', 'click', 'type', 'press', 'scroll', 'open', 'back', 'forward', 'image']
     full_page: bool = False
     x: int = Field(default=0, ge=0, lt=1100)
     y: int = Field(default=0, ge=0, lt=750)
@@ -387,23 +379,30 @@ class VisualAction(BaseModel):
     text: SecretStr = SecretStr('')
     url: str = Field(default='', max_length=2000)
     index: int = Field(default=0, ge=0, lt=100)
-    target: Literal['coordinates', 'role', 'text', 'selector', 'element'] = 'coordinates'
+    target: Literal['coordinates', 'role', 'text', 'selector', 'css', 'xpath', 'element'] = 'coordinates'
     role: str = Field(default='button', max_length=40)
     name: str = Field(default='', max_length=500)
     selector: str = Field(default='', max_length=1000)
-    script: SecretStr = SecretStr('')
 
 
 async def elements(tab):
-    result = await tab.locator('a, button, input:not([type="hidden"]), textarea, select, [role="button"], [role="link"]').evaluate_all('''items => {
-        document.querySelectorAll('[data-luna-element]').forEach(el => el.removeAttribute('data-luna-element'));
-        return items.filter(el => el.getClientRects().length).slice(0, 150).map((el, index) => {
-            const id = String(index);
-            el.setAttribute('data-luna-element', id);
-            return {id, role: el.getAttribute('role') || el.tagName.toLowerCase(),
-                name: (el.getAttribute('aria-label') || el.innerText || el.getAttribute('placeholder') || el.getAttribute('title') || '').slice(0, 250)};
-        });
-    }''')
+    try:
+        result = await tab.locator('a, button, input:not([type="hidden"]), textarea, select, [role="button"], [role="link"]').evaluate_all('''items => {
+            document.querySelectorAll('[data-luna-element]').forEach(el => el.removeAttribute('data-luna-element'));
+            return items.filter(el => el.getClientRects().length).slice(0, 150).map((el, index) => {
+                const id = String(index);
+                el.setAttribute('data-luna-element', id);
+                return {id, tag: el.tagName.toLowerCase(),
+                    css: el.id ? '#' + CSS.escape(el.id) : '[data-luna-element="' + id + '"]',
+                    xpath: '//*[@data-luna-element="' + id + '"]',
+                    role: el.getAttribute('role') || el.tagName.toLowerCase(),
+                    name: (el.getAttribute('aria-label') || el.innerText || el.getAttribute('placeholder') || el.getAttribute('title') || '').slice(0, 250)};
+            });
+        }''')
+    except BrowserError as exc:
+        if changing_document(exc):
+            return []
+        raise
     return redact_result(result, [site['password'] for site in vault().values() if site['password']])
 
 
@@ -419,21 +418,6 @@ def redact_result(value, secrets):
     return value
 
 
-async def javascript(tab, script):
-    if not script or len(script) > 20000:
-        raise HTTPException(422, 'JavaScript должен содержать от 1 до 20000 символов')
-    secrets = {site['password'] for site in vault().values() if site['password']}
-    secrets.update(cookie['value'] for cookie in await tab.context.cookies() if cookie['value'])
-    try:
-        value = await tab.evaluate(script)
-    except BrowserError:
-        return {'error': 'JavaScript завершился ошибкой. Проверь код; подробности с данными страницы скрыты.'}
-    secrets.update(cookie['value'] for cookie in await tab.context.cookies() if cookie['value'])
-    value = redact_result(value, sorted(secrets, key=len, reverse=True))
-    text = json.dumps(value, ensure_ascii=False, default=str)
-    return {'value': value} if len(text) <= 12000 else {'preview': text[:12000], 'truncated': True}
-
-
 @app.post('/visual')
 async def visual(body: VisualAction, request: Request):
     return await tracked_action(request, lambda: run_visual_action(body))
@@ -446,7 +430,6 @@ async def run_visual_action(body):
         if tab is None or tab.is_closed():
             raise HTTPException(400, 'Сначала откройте страницу через web_read или browser_login')
         clicked = None
-        script_result = None
         if body.action == 'click':
             if body.target == 'coordinates':
                 clicked = await tab.evaluate('''({x, y}) => {
@@ -459,20 +442,28 @@ async def run_visual_action(body):
                     target = tab.get_by_role(body.role, name=body.name, exact=True)
                 elif body.target == 'text':
                     target = tab.get_by_text(body.name, exact=True)
+                    # Надпись может быть вложенным div/span, смещённым внутри кнопки.
+                    if await target.count() == 1:
+                        control = target.locator('xpath=ancestor-or-self::*[self::button or self::a or @role="button" or @role="link"][1]')
+                        if await control.count():
+                            target = control
                 elif body.target == 'element':
                     if not body.name.isdecimal():
                         raise HTTPException(422, 'Укажите id из последнего списка elements')
                     target = tab.locator(f'[data-luna-element="{body.name}"]')
+                elif body.target in ('css', 'xpath'):
+                    if not body.selector.strip():
+                        raise HTTPException(422, 'Укажите selector для CSS или XPath')
+                    expression = body.selector.removeprefix(body.target + '=')
+                    target = tab.locator(body.target + '=' + expression)
                 else:
                     target = tab.locator(body.selector)
                 if await target.count() > 1:
                     raise HTTPException(409, 'Найдено несколько элементов. Уточни selector или id из elements')
                 clicked = await target.evaluate('(el) => (el.getAttribute("aria-label") || el.innerText || el.getAttribute("title") || el.tagName).slice(0, 250)')
                 # Locator сам прокручивает, ждёт видимость и проверяет перекрытие.
-                await target.click()
+                await target.click(no_wait_after=True)
             clicked = redact_result(clicked, [site['password'] for site in vault().values() if site['password']])
-        elif body.action == 'javascript':
-            script_result = await javascript(tab, body.script.get_secret_value())
         elif body.action == 'type':
             secret_field = await tab.locator('input[type="password"]:focus, input[autocomplete="one-time-code"]:focus').count()
             if secret_field:
@@ -487,13 +478,11 @@ async def run_visual_action(body):
             await tab.mouse.wheel(0, body.delta)
         elif body.action == 'open' or body.action == 'image' and body.url:
             await public_url(body.url)
-            await tab.goto(body.url, wait_until='domcontentloaded')
+            await tab.goto(body.url, wait_until='commit')
         elif body.action == 'back':
-            await tab.go_back(wait_until='domcontentloaded')
+            await tab.go_back(wait_until='commit')
         elif body.action == 'forward':
-            await tab.go_forward(wait_until='domcontentloaded')
-        if body.action in ('click', 'press', 'scroll'):
-            await tab.wait_for_timeout(300)
+            await tab.go_forward(wait_until='commit')
         tabs = [item for item in tab.context.pages if not item.is_closed()]
         if tabs and tabs[-1] != tab:
             tab = tabs[-1]
@@ -515,13 +504,14 @@ async def run_visual_action(body):
                     pass  # Если оригинал не отдаётся, рассматриваем отрисованное изображение.
         if frame is None:
             frame = await action_frame(tab, body.full_page, image)
-        text = (await tab.locator('body').inner_text())[:40000]
+        snapshot = await schedule_snapshot(tab)
+        text = snapshot['text']
         for site in vault().values():
             if site['password']:
                 text = text.replace(site['password'], '[скрыто]')
-        images = await tab.locator('img').evaluate_all('(items) => items.slice(0, 100).map((image, index) => ({index, alt: image.alt}))')
-        return frame | {'status': 'page', 'title': await tab.title(), 'text': text, 'images': images,
-                        'elements': await elements(tab), 'clicked': clicked, 'javascript_result': script_result,
+        return frame | {'status': 'page', 'title': snapshot['title'], 'text': text, 'images': snapshot['images'],
+                        'ready_state': snapshot['ready_state'],
+                        'elements': await elements(tab), 'clicked': clicked,
                         'downloads': download_status()}
 
 
@@ -616,7 +606,7 @@ async def cancel_action(body: dict):
         if not task.cancelling():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
-        for context in (contexts.get(user_id()), public_contexts.get(user_id())):
+        for context in (contexts.get(user_id()),):
             if context:
                 for tab in context.pages:
                     if not tab.is_closed():
@@ -708,7 +698,7 @@ async def login(tab, site):
             submit = tab.locator('button[type="submit"]:visible, input[type="submit"]:visible').first
         if not await submit.count():
             return {'status': 'needs_user', 'reason': 'Не найдена кнопка входа. Продолжите в браузере.'}
-        await submit.click()
+        await submit.click(no_wait_after=True)
         await tab.wait_for_timeout(1000)
     return {'status': 'check_page', 'reason': 'Проверьте страницу: сайт может запросить 2FA или CAPTCHA.'}
 
@@ -794,7 +784,7 @@ async def manual(body: Action):
         notice = None
         if body.action == 'open':
             await public_url(site['url'])
-            await tab.goto(site['url'], wait_until='domcontentloaded')
+            await tab.goto(site['url'], wait_until='commit')
         elif body.action == 'login':
             notice = await login(tab, site)
         elif body.action == 'click':
@@ -809,7 +799,7 @@ async def manual(body: Action):
         elif body.action == 'scroll':
             await tab.mouse.wheel(0, body.delta)
         elif body.action == 'back':
-            await tab.go_back(wait_until='domcontentloaded')
+            await tab.go_back(wait_until='commit')
         elif body.action != 'state':
             raise HTTPException(400, 'Неизвестное действие браузера')
         return await screenshot(tab) | {'notice': notice}
@@ -830,7 +820,7 @@ async def run_browser_action(body):
 
 
 async def agent_action(body):
-    site = get_site(body.site_id)
+    site = get_site(body.site_id) if body.action == 'login' else {'url': ''}
     tab = await page()
     watch_screen(tab)
     if body.action == 'login':
@@ -847,7 +837,7 @@ async def agent_action(body):
         if body.action == 'download' or Path(urlsplit(url).path).suffix.lower() in ('.pdf', '.docx', '.txt', '.md', '.csv', '.png', '.jpg', '.jpeg', '.webp'):
             return await download_link(tab, site, url)
         try:
-            await tab.goto(url, wait_until='domcontentloaded')
+            await tab.goto(url, wait_until='commit')
         except BrowserError as exc:
             if 'Download is starting' not in str(exc):
                 raise
@@ -888,17 +878,17 @@ async def browse_web(body):
     tab = await public_page()
     watch_screen(tab)
     tab.set_default_timeout(8000)
-    response = await tab.goto(url, wait_until='domcontentloaded', timeout=25000)
+    response = await tab.goto(url, wait_until='commit', timeout=25000)
     if response and response.status >= 400:
         return {'status': 'unavailable', 'reason': f'Сайт вернул HTTP {response.status}'}
     if body.action == 'search':
         consent = tab.get_by_role('button', name=re.compile(r'^(Accept all|Принять все|Alle akzeptieren)$', re.I)).first
         if await consent.count():
-            await consent.click()
-            await tab.wait_for_load_state('domcontentloaded')
-    text = (await tab.locator('body').inner_text())[:40000]
+            await consent.click(no_wait_after=True)
+    snapshot = await schedule_snapshot(tab)
+    text = snapshot['text']
     if body.action == 'read':
-        return {'status': 'page', 'title': await tab.title(), 'url': tab.url, 'text': text}
+        return {'status': 'page', 'title': snapshot['title'], 'url': safe_url(snapshot['url']), 'text': text, 'ready_state': snapshot['ready_state']}
     links = await tab.locator('a:has(h3)').evaluate_all('(items) => items.map(a => ({title: a.innerText.slice(0, 250), url: a.href}))')
     results = []
     for link in links:

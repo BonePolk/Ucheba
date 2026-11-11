@@ -1,3 +1,4 @@
+from common.agent_memory import MEMORY_TOOLS, MEMORY_NAMES, MEMORY_INSTRUCTION, memory_tool
 from common.file_tools import FILE_TOOLS, FILE_NAMES, FILE_INSTRUCTION
 from common.agent_history import with_history
 """Straus исследует источники и редактирует календарь инструментами."""
@@ -57,22 +58,21 @@ def tool(name, description, properties, required=None):
 VISUAL_ACTIONS = {
     'browser_screenshot': 'screenshot', 'browser_click': 'click',
     'browser_type': 'type', 'browser_press': 'press', 'browser_scroll': 'scroll',
-    'browser_navigate': 'open', 'browser_view_image': 'image', 'browser_javascript': 'javascript',
+    'browser_navigate': 'open', 'browser_view_image': 'image',
 }
 
 
 TOOLS = [
     NOTE_TOOL,
+    *MEMORY_TOOLS,
     *FILE_TOOLS,
     tool('browser_screenshot', 'Получить снимок текущего браузера. full_page=true показывает всю страницу, false — видимую область 1100×750.',
                 {'full_page': {'type': 'boolean'}}),
-    tool('browser_click', 'Нажать элемент. Предпочитай target=element по id из последнего elements (id передай в name), либо role + точное name. text — точный текст, selector — CSS/Playwright-селектор. coordinates — запасной вариант. Для неиспользуемых строк передай пустую строку, x/y=0.',
-                {'target': {'type': 'string', 'enum': ['element', 'role', 'text', 'selector', 'coordinates']},
+    tool('browser_click', 'Нажать элемент. Предпочитай target=element по id из последнего elements (id передай в name), либо role + точное name. text — точный текст. css — CSS-селектор HTML-элемента, например #submit, button.download или a[href$=".pdf"]. xpath — XPath, например //button[@type="submit"]. Выражение передай в selector. selector — прежний CSS/Playwright-вариант. coordinates — запасной вариант. Для неиспользуемых строк передай пустую строку, x/y=0.',
+                {'target': {'type': 'string', 'enum': ['element', 'role', 'text', 'css', 'xpath', 'selector', 'coordinates']},
                  'role': {'type': 'string', 'maxLength': 40}, 'name': {'type': 'string', 'maxLength': 500},
                  'selector': {'type': 'string', 'maxLength': 1000},
                  'x': {'type': 'integer', 'minimum': 0, 'maximum': 1099}, 'y': {'type': 'integer', 'minimum': 0, 'maximum': 749}}),
-    tool('browser_javascript', 'Выполнить JavaScript в текущей странице для чтения DOM или взаимодействия. Передай выражение либо самовызывающуюся функцию, например (() => document.title)(). Не читай и не отправляй пароли, cookie, токены и storage. Нет доступа к Python, shell и файлам сервера. Возвращается результат и свежий снимок.',
-                {'script': {'type': 'string', 'minLength': 1, 'maxLength': 20000}}),
     tool('browser_type', 'Ввести обычный текст в выбранное поле, например поиск. Пароли вводит browser_login, коды 2FA — владелец.',
                 {'text': {'type': 'string', 'maxLength': 2000}}),
     tool('browser_press', 'Нажать клавишу в браузере.',
@@ -105,11 +105,11 @@ TOOLS = [
      'parameters': ReadPage.model_json_schema()},
     tool('web_search', 'Искать общедоступную информацию в Google. Не отправляй приватные данные и секреты.',
          {'query': {'type': 'string'}}, ['query']),
-    tool('web_read', 'Прочитать общедоступную страницу без cookie личных кабинетов.',
+    tool('web_read', 'Прочитать страницу в общем браузере владельца.',
          {'url': {'type': 'string'}}, ['url']),
 ]
 
-INSTRUCTIONS = FILE_INSTRUCTION + NOTE_INSTRUCTION + """
+INSTRUCTIONS = MEMORY_INSTRUCTION + FILE_INSTRUCTION + NOTE_INSTRUCTION + """
 Ты Straus, агент редактирования календаря по поручению владельца. Отвечай по-русски.
 Измени только то, что попросил владелец. Самостоятельно составлять план дня, сортировать
 или распределять все задачи не нужно. Для чтения и изменений используй инструменты,
@@ -137,8 +137,7 @@ parity_anchor — понедельник первой нечётной неде�
 полностраничному снимку; перед нажатием по координатам получи full_page=false.
 Для поиска/фильтров можно вводить текст через browser_type, нажимать browser_press,
 прокручивать browser_scroll, переходить browser_navigate. browser_view_image
-показывает отдельное изображение; browser_javascript читает DOM или взаимодействует
-со страницей. Не извлекай секреты. После действия используй свежие text/elements
+показывает отдельное изображение; Произвольный JavaScript запрещён. Взаимодействуй через кнопки, ввод и переходы. После действия используй свежие text/elements
 и снимок. Разрешены переходы, раскрытие разделов, фильтры и поиск для чтения.
 Не обходи 2FA/CAPTCHA. Ссылки могут вести на другие домены. Ошибку инструмента
 можно исправить или выбрать другой источник. Не повторяй одинаковую ошибку бесконечно.
@@ -271,6 +270,9 @@ async def run(body):
                                 progress.add(('Изменения не внесены: ' if status == 'blocked' else 'Изменения не нужны: ') + reason.strip())
                             return {'calendar': config.model_dump() if status == 'changed' else original,
                                     'status': status, 'reason': reason.strip()}
+                        elif call.name in MEMORY_NAMES:
+                            progress.add('Обновляет общую память' if call.name == 'remember_user_fact' else 'Читает общую память')
+                            output = await memory_tool(call.name, args, 'Straus')
                         elif call.name == 'agent_note':
                             output = progress.note(call.arguments)
                         elif call.name.startswith('calendar_'):
@@ -309,7 +311,7 @@ async def run(body):
                                           'press': 'Нажимает клавишу', 'scroll': 'Прокручивает страницу',
                                           'open': 'Открывает страницу', 'back': 'Возвращается назад',
                                           'forward': 'Переходит вперёд', 'image': 'Рассматривает изображение',
-                                          'javascript': 'Выполняет JavaScript на странице'}
+                                          'screenshot': 'Смотрит снимок браузера'}
                                 progress.add(labels[action])
                             output = await browser_request('/visual', {'action': action, **values})
                             if output.get('clicked'):
@@ -329,7 +331,7 @@ async def run(body):
                             output = {'error': 'Неизвестный инструмент'}
                     except HTTPException as exc:
                         output = {'status': 'unavailable', 'reason': exc.detail}
-                        progress.add('Источник недоступен; выбирает другой путь')
+                        progress.add('Источник недоступен: ' + str(exc.detail)[:300])
                     except (ValidationError, ValueError, KeyError, TypeError) as exc:
                         output = {'error': 'Проверь ID, время, повторения и параметры инструмента по схеме.'}
                         if isinstance(exc, ValueError) and not isinstance(exc, ValidationError):

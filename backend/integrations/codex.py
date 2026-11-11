@@ -76,7 +76,8 @@ def start_task(task_id):
         session.add(run)
         session.commit()
         run_id = run.id
-        payload = {'title': task.title, 'description': task.description}
+        from agent_memory import read as read_memory
+        payload = {'title': task.title, 'description': task.description, 'user_memory': read_memory()}
     job_task = asyncio.create_task(execute(run_id, payload, task_id))
     return {'id': run_id, 'status': 'queued'}
 

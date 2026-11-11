@@ -53,10 +53,10 @@ export default function ContextBrowser({ taskId, disabled, initialSiteId = null 
   const error = sites.error || selected.error || select.error || save.error || forget.error || action.error;
   const field = (name) => (event) => setCredentials({ ...credentials, [name]: event.currentTarget.value });
   function screenImage(large = false) {
-    return <img src={live.frame ? `data:${live.frame.mime};base64,${live.frame.image}` : `data:image/png;base64,${screen.image}`} alt="Браузер личного кабинета — нажми на нужный элемент" style={{ width: '100%', maxWidth: large ? 1100 : 360, display: 'block', cursor: busy ? 'wait' : 'crosshair', borderRadius: 8 }} onClick={(event) => {
+    return <img src={live.frame ? `data:${live.frame.mime};base64,${live.frame.image}` : `data:${screen?.mime ?? 'image/png'};base64,${screen?.image}`} alt="Браузер личного кабинета — нажми на нужный элемент" style={{ width: '100%', maxWidth: large ? 1100 : 360, display: 'block', cursor: busy ? 'wait' : 'crosshair', borderRadius: 8 }} onClick={(event) => {
       if (busy) return;
       const rect = event.currentTarget.getBoundingClientRect();
-      action.mutate({ action: 'click', x: Math.min(1099, Math.max(0, Math.floor((event.clientX - rect.left) * screen.width / rect.width))), y: Math.min(749, Math.max(0, Math.floor((event.clientY - rect.top) * screen.height / rect.height))) });
+      action.mutate({ action: 'click', x: Math.min(1099, Math.max(0, Math.floor((event.clientX - rect.left) * (screen?.width ?? live.frame?.width ?? 1100) / rect.width))), y: Math.min(749, Math.max(0, Math.floor((event.clientY - rect.top) * (screen?.height ?? live.frame?.height ?? 750) / rect.height))) });
     }} />;
   }
   return <Stack gap="xs">
@@ -84,8 +84,8 @@ export default function ContextBrowser({ taskId, disabled, initialSiteId = null 
         <Text size="xs" c="dimmed">Для 2FA и CAPTCHA используй снимок: нажми на поле, введи значение ниже и нажми «Ввести». Пароль и код не отправляются Lucheba.</Text>
         {live.error && <Text size="xs" c="yellow">Переподключаем экран браузера…</Text>}
         {screen?.notice && <Alert>{screen.notice.reason}</Alert>}
-        {screen?.image && <>
-          <Text size="xs" c="dimmed">{screen.url}</Text>
+        {(screen?.image || live.frame?.image) && <>
+          <Text size="xs" c="dimmed">{screen?.url ?? live.frame?.url}</Text>
           {screenImage()}
           <Button size="compact-xs" variant="subtle" onClick={() => setExpanded(true)}>Увеличить браузер ↗</Button>
           <Modal opened={expanded} onClose={() => setExpanded(false)} title="Личный кабинет" size="xl" centered>{screenImage(true)}</Modal>

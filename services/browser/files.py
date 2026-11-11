@@ -64,7 +64,8 @@ def read(file_id, page=1):
         result.update(pages=len(reader.pages), page=page, text=(reader.pages[page - 1].extract_text() or '')[:40000])
         # Вызывается без await в одном event loop: PDFium не выполняется параллельно.
         with pdfium.PdfDocument(content) as document:
-            with document[page - 1] as sheet:
+            sheet = document[page - 1]
+            try:
                 width, height = sheet.get_size()
                 scale = min(2, 2000 / max(width, height))
                 bitmap = sheet.render(scale=scale)
@@ -75,6 +76,8 @@ def read(file_id, page=1):
                     result.update(image=base64.b64encode(stream.getvalue()).decode(), mime='image/jpeg')
                 finally:
                     bitmap.close()
+            finally:
+                sheet.close()
     elif suffix in ('.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.tiff'):
         with Image.open(io.BytesIO(content)) as image:
             if image.width * image.height > 20000000:
@@ -93,8 +96,15 @@ def read(file_id, page=1):
                     if sum(map(len, texts)) > 40000:
                         break
             result['text'] = '\n'.join(texts)[:40000]
+    elif content.startswith(bytes.fromhex('d0cf11e0a1b11ae1')):
+        result['notice'] = ('Старый бинарный Office OLE (например DOC/XLS). Этот формат здесь не декодируется. '
+                            'Не пытайся разбирать его повторными hex/struct-вызовами: найди PDF/DOCX/XLSX '
+                            'либо сообщи владельцу, что требуется преобразование файла.')
+        result['format'] = 'ole_office'
     else:
         try:
+            if b'\x00' in content[:4096]:
+                raise UnicodeDecodeError('utf-8', content, 0, 1, 'binary NUL')
             result['text'] = content.decode('utf-8-sig')[:40000]
         except UnicodeDecodeError:
             result.update(hex=content[:512].hex(' '), notice='Бинарный формат: используй python_binary с известной схемой. Произвольные программы из файла не запускаются.')

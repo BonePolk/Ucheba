@@ -1,10 +1,10 @@
 import { useState } from 'react';
-import { Alert, Button, Paper, PasswordInput, Stack, Title } from '@mantine/core';
+import { Alert, Button, Paper, PasswordInput, Stack, Tabs, Title } from '@mantine/core';
 import { useMutation } from '@tanstack/react-query';
 import Integrations from './Integrations';
-import Calendar from './Calendar';
 import Cabinets from './Cabinets';
 import AgentHistory from './AgentHistory';
+import AgentMemory from './AgentMemory';
 import { request } from './api';
 
 export default function Account({ user }) {
@@ -15,6 +15,10 @@ export default function Account({ user }) {
   });
   return <Stack>
     <Title order={2}>Профиль · {user.username}</Title>
+    <Tabs defaultValue="settings" keepMounted={false}>
+    <Tabs.List><Tabs.Tab value="settings">Настройки</Tabs.Tab><Tabs.Tab value="history">История агентов</Tabs.Tab></Tabs.List>
+    <Tabs.Panel value="settings" pt="md"><Stack>
+    <AgentMemory />
     <Paper withBorder p="lg" maw={480}><form onSubmit={(event) => { event.preventDefault(); change.mutate(); }}><Stack>
       <Title order={4}>Изменить пароль</Title>
       <PasswordInput label="Текущий пароль" autoComplete="current-password" required value={passwords.current_password} onChange={(event) => setPasswords({ ...passwords, current_password: event.currentTarget.value })} />
@@ -23,10 +27,11 @@ export default function Account({ user }) {
       {change.error && <Alert color="red">{change.error.message}</Alert>}
       {change.isSuccess && <Alert color="green">Пароль изменён</Alert>}
     </Stack></form></Paper>
-    <Calendar features={user.features} />
     {(user.features?.context !== false || user.features?.straus !== false) && <Cabinets />}
-    <AgentHistory />
     <Title order={3}>Мои интеграции и ключи</Title>
     <Integrations features={user.features} />
+    </Stack></Tabs.Panel>
+    <Tabs.Panel value="history" pt="md"><AgentHistory /></Tabs.Panel>
+    </Tabs>
   </Stack>;
 }

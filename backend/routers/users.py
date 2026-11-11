@@ -7,6 +7,8 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
+from agent_memory import FactInput
+
 from common.accounts import account, check_feature, features, passwords, public_user
 from common.database import engine, user_engine
 from common.models.user import Feature, User
@@ -136,5 +138,43 @@ async def agent_history_internal(request: Request):
     try:
         body = await request.json()
         return start(body) if request.method == 'POST' else finish(body)
+    finally:
+        current_user_id.reset(token)
+
+
+@router.get('/agent-memory')
+def agent_memory_list(request: Request):
+    require_user(request)
+    from agent_memory import read
+    return read()
+
+
+@router.put('/agent-memory')
+def agent_memory_update(body: FactInput, request: Request):
+    require_user(request)
+    from agent_memory import save
+    return save(body.model_dump(), 'Владелец')
+
+
+@router.delete('/agent-memory/{key}')
+def agent_memory_delete(key: str, request: Request):
+    require_user(request)
+    from agent_memory import delete
+    return delete(key)
+
+
+@router.api_route('/agent-memory/internal', methods=['GET', 'POST'])
+async def agent_memory_internal(request: Request):
+    from common.rpc import require_service
+    from common.identity import current_user_id
+    from agent_memory import read, save
+    token = current_user_id.set(require_service(request, 'context'))
+    try:
+        if request.method == 'GET':
+            return read()
+        body = await request.json()
+        if body.get('agent') not in ('Straus', 'Lucheba', 'Ameba'):
+            raise HTTPException(422, 'Неизвестный агент')
+        return save(body, body['agent'])
     finally:
         current_user_id.reset(token)

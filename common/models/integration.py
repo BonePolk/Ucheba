@@ -125,3 +125,10 @@ class AgentHistory(SQLModel, table=True):
     status: str = 'running'
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     finished_at: datetime | None = None
+
+
+class AgentFact(SQLModel, table=True):
+    key: str = Field(primary_key=True)
+    text: str
+    agent: str
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

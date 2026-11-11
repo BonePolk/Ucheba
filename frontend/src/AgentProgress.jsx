@@ -11,6 +11,7 @@ export default function AgentProgress({ taskId = 0, providers, active = false, c
   const openKey = ['agent-progress-open', taskId, providerList];
   const [opened, setOpened] = useState(() => client.getQueryData(openKey) ?? true);
   const viewport = useRef(null);
+  const followLog = useRef(true);
   function toggle() {
     client.setQueryData(openKey, !opened);
     setOpened(!opened);
@@ -52,7 +53,7 @@ export default function AgentProgress({ taskId = 0, providers, active = false, c
     }
   }, [active, client, taskId, providerList]);
   useEffect(() => {
-    if (viewport.current) viewport.current.scrollTop = viewport.current.scrollHeight;
+    if (viewport.current && followLog.current) viewport.current.scrollTop = viewport.current.scrollHeight;
   }, [query.data, opened]);
   const runs = (query.data ?? []).filter((entry) => entry.run);
   const queued = (query.data ?? []).some((entry) => entry.queued);
@@ -83,7 +84,10 @@ export default function AgentProgress({ taskId = 0, providers, active = false, c
       </Stack>}
       {run?.status === 'running' && quietMinutes >= 2 && <Text size="xs" c="yellow">Новых данных нет {quietMinutes} мин. Операция ещё не завершена.</Text>}
       {events.length === 0 && <Text size="xs" c="dimmed">{running ? 'Ожидаем события агента…' : 'Журналов пока нет'}</Text>}
-      <div ref={viewport} role="log" aria-live="polite" style={{ maxHeight: 280, overflowY: 'auto' }}>
+      <div ref={viewport} onScroll={(event) => {
+        const element = event.currentTarget;
+        followLog.current = element.scrollHeight - element.scrollTop - element.clientHeight < 32;
+      }} role="log" aria-live="polite" style={{ maxHeight: 280, overflowY: 'auto' }}>
         {events.map((event) => <Text key={event.key} size="xs" style={{ fontFamily: 'monospace', overflowWrap: 'anywhere', padding: '3px 0', whiteSpace: 'pre-wrap' }}>
           <Text component="span" inherit c="dimmed">{new Date(event.at).toLocaleTimeString()} · {current?.run.agent ?? names[event.provider]}{event.task_id ? ` #${event.task_id}` : ''} · </Text>{event.message}
         </Text>)}

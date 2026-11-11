@@ -1,3 +1,4 @@
+from common.agent_memory import MEMORY_TOOLS, MEMORY_NAMES, MEMORY_INSTRUCTION, memory_tool
 from common.agent_history import with_history
 import asyncio
 from collections import OrderedDict
@@ -142,7 +143,7 @@ async def rank(body: dict):
                 progress.begin_response()
                 async with client.responses.stream(
                     model=model, reasoning={'effort': 'medium', 'summary': 'auto'}, max_output_tokens=8000,
-                    instructions=NOTE_INSTRUCTION + (
+                    instructions=MEMORY_INSTRUCTION + NOTE_INSTRUCTION + (
                         'Если контекст существенно устарел, противоречив или не хватает фактов для приоритизации, '
                         'вызови request_context_check с ID и краткой причиной. Ameba остановится, '
                         'Lucheba проверит контекст, затем сортировка начнётся заново. '
@@ -226,7 +227,7 @@ async def rank(body: dict):
                         'обязательства и зависимости из переданных данных. Не выдумывай причины. '
                         'Если задачи равноценны, явно укажи сохранение исходного порядка. '
                         'Пиши кратко: explanation до 400 символов; effort и impact — короткая выжимка. Не пересказывай контекст. По-русски, без Markdown.'),
-                    input=messages, tools=[planning.TOOL, planning.ORDER_TOOL, CONTEXT_TOOL, NOTE_TOOL],
+                    input=messages, tools=[planning.TOOL, planning.ORDER_TOOL, CONTEXT_TOOL, NOTE_TOOL, *MEMORY_TOOLS],
                     tool_choice='none' if repaired else 'required' if set(plans) != set(expected) or schedule is None else 'auto',
                     parallel_tool_calls=False,
                     text={'format': {'type': 'json_schema', 'name': 'task_ranking', 'strict': True,
@@ -267,6 +268,8 @@ async def rank(body: dict):
                     try:
                         if call.name == 'agent_note':
                             output = progress.note(call.arguments)
+                        elif call.name in MEMORY_NAMES:
+                            output = await memory_tool(call.name, json.loads(call.arguments), 'Ameba')
                         elif call.name == 'request_context_check':
                             arguments = json.loads(call.arguments)
                             ids = arguments['task_ids']

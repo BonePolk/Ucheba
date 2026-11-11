@@ -13,13 +13,14 @@ waiting = []
 running = []
 planned = {}
 active_users = set()
-jeba_running = False
-ranking_request = None
+jeba_users = set()
+ranking_requests = {}
 
 
 async def interrupt_ranking(own_only=False):
-    request = ranking_request
-    if request and (not own_only or request['owner'] == user_id()):
+    # Прерываем только Ameba владельца запроса. Чужие очереди независимы.
+    request = ranking_requests.get(user_id())
+    if request:
         # Отменяем только запрос Ameba, не фоновый worker целиком.
         if not request['task'].cancelling():
             request['task'].cancel()
@@ -27,7 +28,6 @@ async def interrupt_ranking(own_only=False):
 
 
 async def run_ranking(body):
-    global ranking_request
     run_id = uuid4().hex
 
     async def request():
@@ -40,7 +40,7 @@ async def run_ranking(body):
 
     task = asyncio.create_task(request())
     entry = {'owner': user_id(), 'task': task}
-    ranking_request = entry
+    ranking_requests[user_id()] = entry
     try:
         return await task
     except asyncio.CancelledError:
@@ -48,13 +48,12 @@ async def run_ranking(body):
             raise
         raise HTTPException(409, 'Ameba остановлена. Последний порядок сохранён; сортировку можно запустить заново.') from None
     finally:
-        if ranking_request is entry:
-            ranking_request = None
+        if ranking_requests.get(user_id()) is entry:
+            ranking_requests.pop(user_id(), None)
 
 
 @asynccontextmanager
 async def slot(provider, task_id=0):
-    global jeba_running
     owner = user_id()
     entry = {'owner': owner, 'provider': provider, 'task_id': task_id}
     async with condition:
@@ -64,13 +63,13 @@ async def slot(provider, task_id=0):
             await interrupt_ranking()
         async with condition:
             def available():
-                if jeba_running or active_users:
+                if owner in jeba_users or owner in active_users:
                     return False
-                browser_waiting = [item for item in waiting if item['provider'] == 'context']
+                browser_waiting = [item for item in waiting if item['owner'] == owner and item['provider'] == 'context']
                 if provider == 'context':
                     return bool(browser_waiting) and browser_waiting[0] is entry
-                ranking_waiting = [item for item in waiting if item['provider'] != 'context']
-                return not browser_waiting and not any(planned.values()) and ranking_waiting[0] is entry
+                ranking_waiting = [item for item in waiting if item['owner'] == owner and item['provider'] != 'context']
+                return not browser_waiting and not planned.get(owner) and ranking_waiting[0] is entry
 
             await condition.wait_for(available)
             waiting.remove(entry)
@@ -79,7 +78,7 @@ async def slot(provider, task_id=0):
                 if owner in planned:
                     planned[owner] = [value for value in planned[owner] if value != task_id]
             else:
-                jeba_running = True
+                jeba_users.add(owner)
             running.append(entry)
     except BaseException:
         async with condition:
@@ -94,7 +93,7 @@ async def slot(provider, task_id=0):
             if provider == 'context':
                 active_users.discard(owner)
             else:
-                jeba_running = False
+                jeba_users.discard(owner)
             condition.notify_all()
 
 
@@ -118,9 +117,9 @@ def queue_state():
     pending.extend({'owner': owner, 'provider': 'context', 'task_id': task_id}
                    for task_id in planned.get(owner, []) if task_id not in visible)
     return {'active': active, 'waiting': pending,
-            'browser_busy': bool(active_users or any(item['provider'] == 'context' for item in waiting) or any(planned.values())),
+            'browser_busy': bool(owner in active_users or any(item['provider'] == 'context' for item in pending) or planned.get(owner)),
             'ameba_running': any(item['provider'] == 'jev' for item in active),
-            'busy': bool(active_users or jeba_running or waiting or any(planned.values()))}
+            'busy': bool(active or pending)}
 
 
 def queued(provider, task_id):
