@@ -3,7 +3,7 @@ import { Alert, Anchor, Badge, Button, Group, Loader, MultiSelect, NumberInput, 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { agentRequest, request } from './api';
 import BotSettings from './BotSettings';
-import JebaProgress from './JebaProgress';
+import AgentSettings from './AgentSettings';
 
 function ConnectionInfo({ value }) {
   return <>
@@ -27,8 +27,6 @@ function IntegrationForms({ data, features }) {
   const [telegram, setTelegram] = useState({ enabled: data.telegram.enabled, api_id: '', api_hash: '', phone: '' });
   const [gemini, setGemini] = useState({ enabled: data.gemini.enabled, model: data.gemini.model, interval_seconds: data.gemini.interval_seconds, confidence_threshold: data.gemini.confidence_threshold, timezone: data.gemini.timezone, owner_context: data.gemini.owner_context, api_key: '' });
   const [codex, setCodex] = useState({ enabled: data.codex.enabled, auto_prepare: data.codex.auto_prepare });
-  const [context, setContext] = useState({ enabled: data.context.enabled, rewrite_title: data.context.rewrite_title ?? false, api_key: '' });
-  const [jev, setJeba] = useState({ enabled: data.jev.enabled });
   const [code, setCode] = useState('');
   const [password, setPassword] = useState('');
   const [step, setStep] = useState('');
@@ -42,7 +40,7 @@ function IntegrationForms({ data, features }) {
     mutationFn: ({ path, body, method = 'POST' }) => (path === 'jev/check' ? agentRequest : request)(`/integrations/${path}`, { method, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) }),
     onSuccess: async (result, variables) => {
       if (variables.method === 'PATCH') {
-        const setter = { telegram: setTelegram, gemini: setGemini, codex: setCodex, context: setContext, jev: setJeba }[variables.path];
+        const setter = { telegram: setTelegram, gemini: setGemini, codex: setCodex }[variables.path];
         if (setter) setter((current) => Object.fromEntries(Object.entries(current).map(([key, value]) => [
           key, ['api_id', 'api_hash', 'phone', 'api_key', 'api_token'].includes(key) ? '' : variables.body[key] ?? value,
         ])));
@@ -72,15 +70,9 @@ function IntegrationForms({ data, features }) {
     {error && <Alert color="red">{error.message}</Alert>}
     {notice && <Alert color="purple" withCloseButton onClose={() => setNotice('')}>{notice}</Alert>}
     <SimpleGrid cols={{ base: 1, md: 2 }}>
-      {features.context !== false && <Paper withBorder p="lg"><Stack>
-        <Title order={3}>Контекст · Lucheba</Title>
-        <Text size="sm">Личный ключ шлюза lenec.tech. Память контекста и ответы доступны только в твоём аккаунте.</Text>
-        <PasswordInput label="API-ключ" placeholder={data.context.configured.api_key ? 'Сохранён' : ''} value={context.api_key} onChange={field(setContext, 'api_key')} />
-        <Switch label="Собирать контекст перед сортировкой" checked={context.enabled} onChange={toggle(setContext, 'enabled')} />
-        <Switch label="Разрешить Lucheba переписывать название задачи" checked={context.rewrite_title} onChange={toggle(setContext, 'rewrite_title')} />
-        <Group><Button loading={saving('context')} disabled={mutation.isPending} onClick={() => save('context', context)}>Сохранить</Button><Button variant="subtle" color="red" disabled={mutation.isPending} onClick={() => run('context', { api_key: null, enabled: false }, 'PATCH')}>Удалить ключ</Button></Group>
-        <ConnectionInfo value={data.context} />
-      </Stack></Paper>}
+      {features.context !== false && <AgentSettings name="context" title="Lucheba" description="Собирает контекст задачи. Отдельный сервис, ключ и модель." data={data.context} />}
+      {features.ameba !== false && data.ameba && <AgentSettings name="ameba" title="Ameba" description="Планирует время и результат, расставляет задачи по важности." data={data.ameba} />}
+      {features.straus !== false && data.straus && <AgentSettings name="straus" title="Straus" description="Изменяет календарь по твоему поручению, сам выбирает ЛК и ищет сведения в интернете." data={data.straus} />}
 
       {features.telegram !== false && <Paper withBorder p="lg"><Stack>
         <Group justify="space-between"><Title order={3}>Telegram</Title><Badge color={data.telegram_connected ? 'green' : 'gray'}>{data.telegram_connected ? 'Подключён' : 'Не подключён'}</Badge></Group>
@@ -124,15 +116,6 @@ function IntegrationForms({ data, features }) {
         <Text size="xs" c="dimmed">Одна задача за раз, до 5 минут. Подготовка файлов и встроенный поиск; сетевой доступ команд отключён. Результат переводит задачу «На проверку». Публикация и отправка сообщений не выполняются.</Text>
         <Group><Button loading={saving('codex')} disabled={mutation.isPending} onClick={() => save('codex', codex)}>Сохранить</Button><Button color="red" variant="subtle" disabled={mutation.isPending} onClick={() => run('codex/disconnect')}>Отключить</Button></Group>
         <ConnectionInfo value={data.codex} />
-      </Stack></Paper>}
-      {features.jev !== false && <Paper withBorder p="lg"><Stack>
-        <Title order={3}>Приоритеты · Ameba</Title>
-        <Text size="sm">Ameba оценивает время по этапам через инструмент планирования и расставляет готовые задачи. Используется API-ключ из настроек контекста; каждый запрос расходует квоту.</Text>
-        <Switch label="Автоматически обновлять порядок задач" checked={jev.enabled} onChange={toggle(setJeba, 'enabled')} />
-        <Text size="xs" c="dimmed">Сначала Lucheba проверяет контекст. Затем Ameba получает общий список с полным контекстом и возвращает порядок выполнения. Просрочка учитывается вместе с последствиями и зависимостями, без автоматического подъёма наверх. Задачи без готового контекста ожидают уточнений.</Text>
-        <Group><Button loading={saving('jev')} disabled={mutation.isPending} onClick={() => save('jev', jev)}>Сохранить</Button><Button variant="default" disabled={mutation.isPending} onClick={() => run('jev/check')}>Проверить модель</Button></Group>
-        <JebaProgress active={mutation.isPending && mutation.variables?.path === 'jev/check'} />
-        <ConnectionInfo value={data.jev} />
       </Stack></Paper>}
       {features.collector !== false && <Paper withBorder p="lg"><BotSettings name="collector" data={data.collector} /></Paper>}
       {features.notifications !== false && <Paper withBorder p="lg"><BotSettings name="notifications" data={data.notifications} /></Paper>}

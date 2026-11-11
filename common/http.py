@@ -2,14 +2,28 @@ import logging
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from common.rpc import require_service
 from common.identity import current_user_id
-from common.progress import get_progress
+from common.progress import get_progress, stream_progress
+
+
+class HealthLogFilter(logging.Filter):
+    def filter(self, record):
+        args = record.args
+        return not (isinstance(args, tuple) and len(args) > 2
+                    and isinstance(args[2], str) and args[2].split('?', 1)[0] == '/health')
+
+
+def hide_health_logs():
+    logger = logging.getLogger('uvicorn.access')
+    if not any(isinstance(item, HealthLogFilter) for item in logger.filters):
+        logger.addFilter(HealthLogFilter())
 
 
 def private_app(name, lifespan=None):
+    hide_health_logs()
     app = FastAPI(title=f'{name} integration', lifespan=lifespan, docs_url=None, openapi_url=None)
 
     @app.middleware('http')
@@ -40,6 +54,13 @@ def private_app(name, lifespan=None):
     @app.get('/health')
     def health():
         return {'ok': True}
+
+    @app.get('/progress/stream')
+    async def progress_stream(task_id: int = 0, namespace: str = 'agent', work: bool = False):
+        if task_id < 0 or namespace not in ('agent', 'ranking'):
+            raise HTTPException(422, 'Некорректный журнал')
+        return StreamingResponse(stream_progress(task_id, namespace, work), media_type='text/event-stream',
+                                 headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
     @app.get('/progress')
     async def progress(task_id: int = 0):

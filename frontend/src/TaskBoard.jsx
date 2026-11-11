@@ -37,11 +37,11 @@ export default function TaskBoard({ features = {} }) {
   const [completing, setCompleting] = useState(null);
   const archived = view === 'archive';
   const [filters, setFilters] = useState({ status: null, priority: null, category: null });
-  const [sort, setSort] = useState(features.jev !== false ? 'jev:asc' : 'deadline:asc');
+  const [sort, setSort] = useState(features.ameba !== false ? 'jev:asc' : 'deadline:asc');
   const [editor, setEditor] = useState(null);
   const taskView = view === 'active' || view === 'archive';
-  const automationEnabled = features.codex !== false || features.jev !== false || features.context !== false;
-  const currentSort = features.jev === false && sort === 'jev:asc' ? 'deadline:asc' : sort;
+  const automationEnabled = features.codex !== false || features.ameba !== false || features.context !== false;
+  const currentSort = features.ameba === false && sort === 'jev:asc' ? 'deadline:asc' : sort;
   const [sortBy, order] = currentSort.split(':');
   const tasks = useQuery({
     queryKey: ['tasks', filters, currentSort, archived],
@@ -55,9 +55,9 @@ export default function TaskBoard({ features = {} }) {
     queryClient.invalidateQueries({ queryKey: ['jev-ranking'] }),
   ]);
   const ranking = useQuery({ queryKey: ['jev-ranking'], queryFn: () => request('/integrations/jev/ranking'),
-    enabled: features.jev !== false && !archived, refetchInterval: 15000 });
+    enabled: features.ameba !== false && !archived, refetchInterval: 15000 });
   const queue = useQuery({ queryKey: ['agent-queue'], queryFn: () => request('/integrations/queue'),
-    enabled: !archived && (features.context !== false || features.jev !== false), refetchInterval: 1000 });
+    enabled: !archived && (features.context !== false || features.ameba !== false), refetchInterval: 1000 });
   const rank = useMutation({ mutationFn: () => agentRequest('/integrations/jev/rank', { method: 'POST' }),
     onSuccess: async () => { setSort('jev:asc'); await queryClient.invalidateQueries({ queryKey: ['jev-ranking'] }); await refresh(); } });
   const rankingReasons = new Map((ranking.data?.reasons ?? []).map((item) => [item.task_id, item]));
@@ -108,13 +108,13 @@ export default function TaskBoard({ features = {} }) {
             <Select label="Статус" placeholder="Все статусы" data={statuses} clearable value={filters.status} onChange={(value) => changeFilter('status', value)} />
             <Select label="Приоритет" placeholder="Все приоритеты" data={[{ value: 'overdue', label: 'Просрочено' }, ...priorities]} clearable value={filters.priority} onChange={(value) => changeFilter('priority', value)} />
             <Select label="Категория" placeholder="Все категории" data={categories.data ?? []} clearable searchable value={filters.category} onChange={(value) => changeFilter('category', value)} />
-            <Select label="Сортировка" data={sorting.filter((item) => features.jev !== false || item.value !== 'jev:asc')} value={currentSort} allowDeselect={false} onChange={setSort} />
+            <Select label="Сортировка" data={sorting.filter((item) => features.ameba !== false || item.value !== 'jev:asc')} value={currentSort} allowDeselect={false} onChange={setSort} />
           </SimpleGrid>
         </Paper>
-        {!archived && features.context !== false && features.jev === false && <AgentProgress providers={['context']} active={queue.data?.active?.some((item) => item.provider === 'context')} />}
-        {!archived && (features.context !== false || features.jev !== false) && <AgentQueue queue={queue.data} error={queue.error} />}
-        {features.jev !== false && !archived && <Stack gap="xs"><Group>
-          <Button variant="light" loading={rank.isPending} disabled={queue.data?.busy} onClick={() => rank.mutate()}>Обновить порядок Ameba</Button>
+        {!archived && features.context !== false && features.ameba === false && <AgentProgress providers={['context']} active={queue.data?.active?.some((item) => item.provider === 'context')} />}
+        {!archived && (features.context !== false || features.ameba !== false) && <AgentQueue queue={queue.data} error={queue.error} />}
+        {features.ameba !== false && !archived && <Stack gap="xs"><Group>
+          <Button variant="light" loading={rank.isPending && !queue.data?.ameba_running} disabled={queue.data?.browser_busy} onClick={() => rank.mutate()}>{queue.data?.ameba_running ? 'Перезапустить Ameba' : 'Обновить порядок Ameba'}</Button>
           <Text size="sm" c="dimmed">{ranking.data?.needs_refresh ? 'Порядок нужно обновить.' : `Сравнено задач: ${ranking.data?.ranked_count ?? 0}.`}{ranking.data?.pending_count > 0 && ` Ожидают контекста Lucheba: ${ranking.data.pending_count}.`}{ranking.data?.uncertain_comparisons > 0 && ' При неуверенном сравнении сохранён ручной приоритет и дедлайн.'}</Text>
         </Group>{ranking.data?.explanation && <Tooltip multiline w={320} label={ranking.data.explanation} events={{ hover: true, focus: true, touch: true }}><Text component="button" type="button" size="xs" c="dimmed" style={{ cursor: 'help', background: 'none', border: 0, padding: 0, width: 'fit-content' }}>{ranking.data.needs_refresh ? 'О последней сортировке' : 'Почему такой порядок'}</Text></Tooltip>}<JebaProgress active={rank.isPending} /></Stack>}
         {error && <Alert color="red">{error.message}</Alert>}
@@ -139,7 +139,7 @@ export default function TaskBoard({ features = {} }) {
                         {task.description && <Text size="sm" c="dimmed" lineClamp={2} style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{task.description}</Text>}
                       </Table.Td>
                       <Table.Td style={{ whiteSpace: 'nowrap' }}><Text size="sm" c={isOverdue(task, now) ? 'red' : undefined}>{task.deadline ? dayjs.utc(task.deadline).local().format('DD.MM.YYYY HH:mm') : '—'}</Text>{isOverdue(task, now) && <Text size="xs" c="red">Просрочено</Text>}</Table.Td>
-                      <Table.Td><Badge color={{ low: 'gray', medium: 'yellow', high: 'red' }[task.priority]} variant="light">{priorities.find((item) => item.value === task.priority)?.label}</Badge>{features.context !== false && task.ai_details && JSON.parse(task.ai_details).status === 'needs_context' && <Text size="xs" c="yellow">Недостаточно контекста. {JSON.parse(task.ai_details).reason} <a href={`/?task=${task.id}`}>Ответить</a></Text>}{features.context !== false && task.ai_details && JSON.parse(task.ai_details).status === 'context_pending' && <Text size="xs" c="dimmed">Ожидает проверки Lucheba</Text>}{features.jev !== false && positions.has(task.id) && <Text size="xs" c="dimmed">Порядок Ameba: {positions.get(task.id)} из {ranking.data.ranked_count}</Text>}{features.jev !== false && positions.has(task.id) && rankingReasons.has(task.id) && <RankingAssessment assessment={rankingReasons.get(task.id)} />}</Table.Td>
+                      <Table.Td><Badge color={{ low: 'gray', medium: 'yellow', high: 'red' }[task.priority]} variant="light">{priorities.find((item) => item.value === task.priority)?.label}</Badge>{features.context !== false && task.ai_details && JSON.parse(task.ai_details).status === 'needs_context' && <Text size="xs" c="yellow">Недостаточно контекста. {JSON.parse(task.ai_details).reason} <a href={`/?task=${task.id}`}>Ответить</a></Text>}{features.context !== false && task.ai_details && JSON.parse(task.ai_details).status === 'context_pending' && <Text size="xs" c="dimmed">Ожидает проверки Lucheba</Text>}{features.ameba !== false && positions.has(task.id) && <Text size="xs" c="dimmed">Порядок Ameba: {positions.get(task.id)} из {ranking.data.ranked_count}</Text>}{features.ameba !== false && positions.has(task.id) && rankingReasons.has(task.id) && <RankingAssessment assessment={rankingReasons.get(task.id)} />}</Table.Td>
                       <Table.Td><Select aria-label={`Статус: ${task.title}`} w={160} data={statuses} value={completing === task.id ? 'done' : task.status} allowDeselect={false} disabled={update.isPending || archived} onChange={(value) => update.mutate({ id: task.id, data: { status: value } })} /></Table.Td>
                       <Table.Td>{task.category || '—'}</Table.Td>
                       <Table.Td>

@@ -19,17 +19,21 @@ from cryptography.fernet import Fernet
 from fastapi import HTTPException, Request
 from fastapi.responses import StreamingResponse
 import httpx
-from playwright.async_api import async_playwright, Error as BrowserError
+from playwright.async_api import async_playwright, Error as BrowserError, TimeoutError as BrowserTimeoutError
 from pydantic import BaseModel, Field, SecretStr
 from typing import Literal
 
 from common.http import private_app
-from common.identity import user_id
+from common.identity import user_id, current_user_id
 
 contexts = {}
 public_contexts = {}
 locks = {}
 screens = OrderedDict()
+schedule_pages = {}
+active_actions = {}
+cancelled_actions = OrderedDict()
+browser_downloads = {}
 playwright = None
 
 
@@ -51,12 +55,68 @@ async def lifespan(app):
 app = private_app('context', lifespan)
 
 
+def browser_failure(exc):
+    # Полный текст Playwright может содержать URL с токенами и поля формы.
+    text = str(exc)
+    if isinstance(exc, BrowserTimeoutError):
+        return 'timeout', 'Браузер не дождался страницы или элемента. Повторите действие после загрузки страницы.'
+    if 'Download is starting' in text:
+        return 'download_navigation', 'Ссылка открывает скачивание файла вместо страницы.'
+    network = re.search(r'net::(ERR_[A-Z_]+)', text)
+    if network:
+        code = network.group(1)
+        return code, f'Сайт не открылся: {code}. Это ошибка соединения, а не подтверждение неверного пароля.'
+    if changing_document(exc):
+        return 'document_changed', 'Сайт перенаправил страницу во время чтения. Повторите чтение после перехода.'
+    if 'closed' in text.lower():
+        return 'browser_closed', 'Вкладка или браузер закрылись. Откройте личный кабинет заново.'
+    return 'action_failed', 'Не удалось выполнить действие браузера. Попробуйте открыть страницу заново.'
+
+
+def changing_document(exc):
+    return any(value in str(exc) for value in (
+        'Execution context was destroyed', 'Cannot find context with specified id',
+        'Frame was detached', 'Frame has been detached',
+    ))
+
+
 @app.exception_handler(BrowserError)
 async def browser_error(request, exc):
     from fastapi.responses import JSONResponse
-    category = 'download_navigation' if 'Download is starting' in str(exc) else type(exc).__name__
-    logging.getLogger('uvicorn.error').error('browser: %s', category)
-    return JSONResponse(status_code=502, content={'detail': 'Браузер не выполнил действие. Обновите снимок страницы; при необходимости завершите вход вручную.'})
+    category, detail = browser_failure(exc)
+    logging.getLogger('uvicorn.error').error('browser: %s (%s)', category, request.url.path)
+    return JSONResponse(status_code=502, content={'detail': detail})
+
+
+async def open_page(tab, url):
+    # Не ждём все ресурсы: у университетских сайтов они часто загружаются долго.
+    await tab.goto(url, wait_until='commit', timeout=0)
+    try:
+        await tab.wait_for_load_state('domcontentloaded', timeout=8000)
+        return True
+    except BrowserTimeoutError:
+        logging.getLogger('uvicorn.error').warning('browser: partial_load')
+        return False
+
+
+async def schedule_snapshot(tab):
+    for attempt in range(2):
+        try:
+            # Один вызов вместо отдельных чтений текста, ссылок и заголовка:
+            # все данные относятся к одному документу.
+            return await tab.evaluate("""() => ({
+                url: location.href, title: document.title, ready_state: document.readyState,
+                text: (document.body?.innerText || "").slice(0, 40000),
+                needs_login: [...document.querySelectorAll('input[type="password"]')]
+                    .some(input => input.getClientRects().length > 0),
+                links: [...document.querySelectorAll('a[href]')]
+                    .map(a => ({text: a.innerText.slice(0, 150), href: a.href}))
+                    .filter(a => a.text.trim() && /^https?:/.test(a.href)).slice(0, 100)
+            })""")
+        except BrowserError as exc:
+            if attempt or not changing_document(exc):
+                raise
+            logging.getLogger('uvicorn.error').warning('browser: schedule_redirect_retry')
 
 
 def root():
@@ -126,14 +186,61 @@ async def guard(route):
         await route.continue_()
 
 
+def capture_downloads(context):
+    owner = user_id()
+
+    async def save_download(download, record):
+        import files
+        token = current_user_id.set(owner)
+        try:
+            path = await download.path()
+            if path is None or not 0 < Path(path).stat().st_size <= files.LIMIT:
+                record.update(status='failed', error='Файл пустой или больше 10 МБ')
+                return
+            info = files.save(download.suggested_filename, Path(path).read_bytes())
+            record.update(info, status='saved')
+        except asyncio.CancelledError:
+            record.update(status='cancelled')
+            await download.cancel()
+            raise
+        except Exception as exc:
+            record.update(status='failed', error='Не удалось сохранить загрузку браузера')
+            logging.getLogger('uvicorn.error').warning('browser download: %s', type(exc).__name__)
+        finally:
+            record.pop('task', None)
+            try:
+                await download.delete()
+            except BrowserError:
+                pass
+            current_user_id.reset(token)
+
+    def started(download):
+        record = {'status': 'downloading', 'name': download.suggested_filename}
+        entries = browser_downloads.setdefault(owner, [])
+        entries.append(record)
+        # Не теряем незавершённые загрузки при очистке истории в RAM.
+        entries[:] = [entry for entry in entries[:-20] if entry.get('task')] + entries[-20:]
+        record['task'] = asyncio.create_task(save_download(download, record))
+
+    context.on('page', lambda tab: tab.on('download', started))
+    for tab in context.pages:
+        tab.on('download', started)
+
+
+def download_status():
+    return [{key: value for key, value in entry.items() if key != 'task'}
+            for entry in browser_downloads.get(user_id(), [])]
+
+
 async def page():
     owner = user_id()
     context = contexts.get(owner)
     if context is None:
         context = await playwright.chromium.launch_persistent_context(
             str(root() / 'profile'), headless=True, viewport={'width': 1100, 'height': 750},
-            accept_downloads=False, service_workers='block',
+            accept_downloads=True, service_workers='block',
         )
+        capture_downloads(context)
         context.set_default_timeout(8000)
         context.set_default_navigation_timeout(25000)
         await context.route('**/*', guard)
@@ -150,9 +257,10 @@ async def public_page():
     if context is None:
         browser = await playwright.chromium.launch()
         context = await browser.new_context(viewport={'width': 1100, 'height': 750},
-                                            service_workers='block', accept_downloads=False)
+                                            service_workers='block', accept_downloads=True)
         await context.route('**/*', guard)
         await context.route_web_socket('**/*', lambda ws: ws.close())
+        capture_downloads(context)
         context.set_default_timeout(8000)
         context.set_default_navigation_timeout(25000)
         public_contexts[owner] = context
@@ -189,7 +297,8 @@ async def capture_screen(state):
             image = await tab.screenshot(type='jpeg', quality=65, timeout=1500,
                                          mask=[tab.locator('input[type="password"]')])
             state['frame'] = {'image': base64.b64encode(image).decode(), 'mime': 'image/jpeg',
-                              'url': safe_url(tab.url), 'at': datetime.now(timezone.utc).isoformat()}
+                              'url': safe_url(tab.url), 'at': datetime.now(timezone.utc).isoformat(),
+                              'width': 1100, 'height': 750}
         except BrowserError:
             # Во время перехода временно показываем последний удачный снимок.
             pass
@@ -200,6 +309,21 @@ async def capture_screen(state):
 async def agent_screen():
     state = screens.get(user_id())
     return await capture_screen(state) if state else None
+
+
+@app.get('/screen/stream')
+async def screen_events(request: Request):
+    owner = user_id()
+
+    async def frames():
+        while not await request.is_disconnected():
+            state = screens.get(owner)
+            frame = await capture_screen(state) if state else None
+            yield 'data: ' + json.dumps(frame, ensure_ascii=False) + '\n\n'
+            await asyncio.sleep(0.3)
+
+    return StreamingResponse(frames(), media_type='text/event-stream',
+                             headers={'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no'})
 
 
 @app.get('/stream')
@@ -311,7 +435,11 @@ async def javascript(tab, script):
 
 
 @app.post('/visual')
-async def visual(body: VisualAction):
+async def visual(body: VisualAction, request: Request):
+    return await tracked_action(request, lambda: run_visual_action(body))
+
+
+async def run_visual_action(body):
     async with lock():
         state = screens.get(user_id())
         tab = state['tab'] if state else None
@@ -393,7 +521,8 @@ async def visual(body: VisualAction):
                 text = text.replace(site['password'], '[скрыто]')
         images = await tab.locator('img').evaluate_all('(items) => items.slice(0, 100).map((image, index) => ({index, alt: image.alt}))')
         return frame | {'status': 'page', 'title': await tab.title(), 'text': text, 'images': images,
-                        'elements': await elements(tab), 'clicked': clicked, 'javascript_result': script_result}
+                        'elements': await elements(tab), 'clicked': clicked, 'javascript_result': script_result,
+                        'downloads': download_status()}
 
 
 @app.get('/sites')
@@ -449,41 +578,94 @@ async def edit_site(site_id: str, body: Site):
 
 
 class SchedulePage(BaseModel):
-    site_id: str
+    site_id: str = ''
     url: str = Field(default='', max_length=2000)
     index: int | None = Field(default=None, ge=0, lt=100)
 
 
+async def tracked_action(request, operation):
+    run_id = request.headers.get('x-agent-run')
+    if not run_id:
+        return await operation()
+    key = (user_id(), run_id)
+    if key in cancelled_actions:
+        raise HTTPException(409, 'Действие остановлено')
+    task = asyncio.create_task(operation())
+    active_actions[key] = task
+    try:
+        return await task
+    except asyncio.CancelledError:
+        raise HTTPException(409, 'Действие остановлено') from None
+    finally:
+        active_actions.pop(key, None)
+
+
+@app.post('/cancel')
+async def cancel_action(body: dict):
+    key = (user_id(), body['run_id'])
+    cancelled_actions[key] = True
+    while len(cancelled_actions) > 256:
+        cancelled_actions.popitem(last=False)
+    downloads = [entry['task'] for entry in browser_downloads.get(user_id(), []) if entry.get('task')]
+    for download_task in downloads:
+        download_task.cancel()
+    if downloads:
+        await asyncio.gather(*downloads, return_exceptions=True)
+    task = active_actions.get(key)
+    if task:
+        if not task.cancelling():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        for context in (contexts.get(user_id()), public_contexts.get(user_id())):
+            if context:
+                for tab in context.pages:
+                    if not tab.is_closed():
+                        session = await context.new_cdp_session(tab)
+                        try:
+                            await session.send('Page.stopLoading')
+                        finally:
+                            await session.detach()
+    return {'ok': True}
+
+
 @app.post('/schedule/read')
-async def schedule_page(body: SchedulePage):
-    get_site(body.site_id)
+async def schedule_page(body: SchedulePage, request: Request):
+    return await tracked_action(request, lambda: read_schedule_page(body))
+
+
+async def read_schedule_page(body):
+    if body.site_id:
+        get_site(body.site_id)
     async with lock():
         tab = await page()
         watch_screen(tab)
         url = body.url
+        notice = None
         if body.index is not None:
-            links = await schedule_links(tab)
-            if body.index >= len(links):
-                raise HTTPException(400, 'Ссылка изменилась. Перечитайте страницу расписания')
-            url = links[body.index]['href']
-        await public_url(url)
-        await tab.goto(url, wait_until='domcontentloaded')
-        if await tab.locator('input[type="password"]:visible').count():
+            # Номер относится к списку, который видел агент, а не к новому DOM.
+            previous = schedule_pages.get(user_id())
+            if previous and previous['url'] == tab.url and body.index < len(previous['links']):
+                url = previous['links'][body.index]['href']
+            else:
+                url = None
+                notice = 'Список ссылок обновлён. Выбери нужную ссылку из этого ответа заново.'
+        if url:
+            await public_url(url)
+            if not await open_page(tab, url):
+                notice = 'Страница ещё загружается. Если данных мало, перечитай её без повторного открытия URL.'
+        snapshot = await schedule_snapshot(tab)
+        if snapshot['needs_login']:
             return {'status': 'needs_login', 'reason': 'Завершите вход через основной ЛК в этом браузере'}
-        text = (await tab.locator('body').inner_text())[:40000]
+        text = snapshot['text']
         for site in vault().values():
             if site['password']:
                 text = text.replace(site['password'], '[скрыто]')
-        links = await schedule_links(tab)
-        return {'status': 'page', 'url': safe_url(tab.url), 'title': await tab.title(), 'text': text,
+        links = snapshot['links']
+        schedule_pages[user_id()] = {'url': snapshot['url'], 'links': links}
+        return {'status': 'page', 'url': safe_url(snapshot['url']), 'title': snapshot['title'], 'text': text,
+                'notice': notice,
                 'links': [{'index': index, 'text': item['text']} for index, item in enumerate(links)]}
 
-
-async def schedule_links(tab):
-    links = await tab.locator('a[href]').evaluate_all(
-        '(items) => items.map(a => ({text: a.innerText.slice(0,150), href: a.href}))')
-    return [item for item in links if item['text'].strip()
-            and urlsplit(item['href']).scheme in ('http', 'https')][:100]
 
 
 @app.delete('/sites/{site_id}')
@@ -505,7 +687,7 @@ async def delete_site(site_id: str):
 
 async def login(tab, site):
     await public_url(site['url'])
-    await tab.goto(site['url'], wait_until='domcontentloaded')
+    await open_page(tab, site['url'])
     for _ in range(2):
         if origin(tab.url) != origin(site['url']):
             return {'status': 'needs_user', 'reason': 'Вход перенаправлен на другой сайт. Завершите его в браузере.'}
@@ -534,16 +716,18 @@ async def login(tab, site):
 async def read_page(tab, site):
     if tab.url == 'about:blank':
         return {'status': 'needs_login', 'reason': 'Используйте browser_login, чтобы открыть личный кабинет.'}
-    if await tab.locator('input[type="password"]:visible').count():
+    snapshot = await schedule_snapshot(tab)
+    if snapshot['needs_login']:
         return {'status': 'needs_login', 'reason': 'Сайт показывает форму входа.'}
-    # inner_text не возвращает значения полей ввода, cookie или storage.
-    text = (await tab.locator('body').inner_text())[:40000]
-    text = text.replace(site['password'], '[скрыто]')
-    links = await tab.locator('a[href]').evaluate_all('(items) => items.map(a => ({text: a.innerText.slice(0, 150), href: a.href}))')
-    links = [item for item in links if item['text'].strip() and urlsplit(item['href']).scheme in ('http', 'https')][:100]
-    return {'status': 'page', 'url': safe_url(tab.url), 'text': text,
-            'title': await tab.title(),
-            'links': [{'index': index, 'text': item['text']} for index, item in enumerate(links)]}
+    text = snapshot['text']
+    for saved_site in vault().values():
+        if saved_site['password']:
+            text = text.replace(saved_site['password'], '[скрыто]')
+    return {'status': 'page', 'url': safe_url(snapshot['url']), 'text': text,
+            'title': snapshot['title'], 'ready_state': snapshot['ready_state'],
+            'notice': 'Страница ещё загружается. При нехватке данных перечитай её без перехода.' if snapshot['ready_state'] != 'complete' else '',
+            'links': [{'index': index, 'text': item['text']} for index, item in enumerate(snapshot['links'])]}
+
 
 
 class Action(BaseModel):
@@ -606,6 +790,7 @@ async def manual(body: Action):
     async with lock():
         site = get_site(body.site_id)
         tab = await page()
+        watch_screen(tab)
         notice = None
         if body.action == 'open':
             await public_url(site['url'])
@@ -631,11 +816,17 @@ async def manual(body: Action):
 
 
 @app.post('/agent')
-async def agent(body: Action):
+async def agent(body: Action, request: Request):
+    return await tracked_action(request, lambda: run_browser_action(body))
+
+
+async def run_browser_action(body):
     async with lock():
         result = await agent_action(body)
         tab = await page()
-        return result | await action_frame(tab) | {'elements': await elements(tab)}
+        # Текст не должен ждать отрисовки снимка. Для картинки есть browser_screenshot.
+        frame = {} if body.action == 'read' else await action_frame(tab)
+        return result | frame | {'elements': await elements(tab), 'downloads': download_status()}
 
 
 async def agent_action(body):
@@ -673,7 +864,11 @@ class WebAction(BaseModel):
 
 
 @app.post('/web')
-async def web(body: WebAction):
+async def web(body: WebAction, request: Request):
+    return await tracked_action(request, lambda: run_web_action(body))
+
+
+async def run_web_action(body):
     async with lock():
         result = await browse_web(body)
         tab = await public_page()
@@ -718,3 +913,41 @@ async def browse_web(body):
     if not results:
         return {'status': 'unavailable', 'reason': 'Google не вернул доступную выдачу. Возможно, требуется CAPTCHA или изменился формат страницы.'}
     return {'status': 'search', 'results': results, 'text': text}
+
+
+@app.post('/files')
+async def agent_files(body: dict, request: Request):
+    return await tracked_action(request, lambda: run_file_action(body))
+
+
+async def run_file_action(body):
+    import files
+    async with lock():
+        try:
+            action = body['action']
+            if action in ('download_file', 'python_http_request'):
+                result = await files.request_file(body, await page(), public_url, safe_url)
+            elif action == 'save_download':
+                content = base64.b64decode(body['content'], validate=True)
+                if not content or len(content) > files.LIMIT:
+                    raise ValueError('Размер файла должен быть от 1 байта до 10 МБ')
+                result = files.save(body['name'], content)
+            elif action == 'list_downloads':
+                result = {'downloads': download_status(), 'files': [json.loads(path.read_text()) for path in sorted(files.root().glob('*.json'), key=lambda path: path.stat().st_mtime, reverse=True)[:200]]}
+            elif action == 'read_download':
+                result = files.read(body['file_id'], body['page'])
+            elif action == 'python_binary':
+                result = files.binary(body)
+            else:
+                raise ValueError('Неизвестное действие с файлом')
+            # Редактируем известные пароли в тексте/результатах, но не в изображении.
+            image = result.pop('image', None)
+            result = redact_result(result, [site['password'] for site in vault().values() if site['password']])
+            if image:
+                result['image'] = image
+            return result
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logging.getLogger('uvicorn.error').warning('browser files: %s', type(exc).__name__)
+            raise HTTPException(422, 'Не удалось прочитать файл или выполнить запрос. Проверьте ID, формат, страницу и доступность URL.') from None

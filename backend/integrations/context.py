@@ -105,12 +105,12 @@ def invalidate_file_contexts(task_id=None):
         session.commit()
 
 
-async def prepare(task_id, force=False):
+async def prepare(task_id, force=False, review_request=""):
     async with scheduler.slot('context', task_id):
-        return await prepare_task(task_id, force)
+        return await prepare_task(task_id, force, review_request)
 
 
-async def prepare_task(task_id, force=False):
+async def prepare_task(task_id, force=False, review_request=""):
     with Session(get_engine()) as session:
         task = session.get(Task, task_id)
         if not task:
@@ -144,6 +144,8 @@ async def prepare_task(task_id, force=False):
         'task_id': task_id, 'task': json.loads(task_state), 'subject': subject,
         'current_clock': deadline_facts(task.deadline),
         'owner_notes': notes, 'past_tasks': memory,
+        'review_request': review_request,
+        'previous_context': usage.get('full_markdown', '') if review_request else '',
         'allow_title_rewrite': config['rewrite_title'],
     }, timeout=None)
     changes = ContextTaskUpdate.model_validate(result.get('task_update') or {

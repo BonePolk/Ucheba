@@ -18,10 +18,10 @@ async def run():
     while True:
         now = time.monotonic()
         try:
-            config = read_config('jev')
+            config = read_config('ameba')
             if config['enabled'] and now >= next_score:
                 next_score = now + 60
-                await provider_call('jev', jev.rank_all())
+                await provider_call('ameba', jev.rank_all())
             agent, _ = read_settings('codex')
             if agent['enabled'] and agent['auto_prepare'] and now >= next_prepare and not (codex.job_task and not codex.job_task.done()):
                 next_prepare = now + 60

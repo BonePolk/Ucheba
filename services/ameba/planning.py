@@ -126,7 +126,7 @@ def weekly_timeline(order, plans, week, now):
             if not todo:
                 return blocks
             if slot['kind'] != 'work':
-                add(slot['kind'], right, title=slot['title'])
+                add(slot['kind'], right, slot.get('task_id'), title=slot['title'])
                 streak = 0
                 continue
             while cursor < right and todo:
@@ -154,8 +154,11 @@ def weekly_timeline(order, plans, week, now):
 
 def reorder(arguments, plans, expected, week=None, now=None):
     order = Order.model_validate_json(arguments).task_ids
-    if len(order) != len(expected) or set(order) != set(expected) or set(plans) != set(expected):
-        raise ValueError('Сначала оцени все задачи, затем передай каждый ID ровно один раз')
+    missing_plans = [task_id for task_id in expected if task_id not in plans]
+    if missing_plans:
+        raise ValueError(f'Сначала вызови plan_tasks для задач: {missing_plans}')
+    if len(order) != len(expected) or set(order) != set(expected):
+        raise ValueError(f'В task_ids нужны все ID ровно по одному разу: {expected}')
     low = high = wait = 0
     effort = {level: 0 for level in ('low', 'medium', 'high', 'unknown')}
     rewards = {}
@@ -173,10 +176,17 @@ def reorder(arguments, plans, expected, week=None, now=None):
         timeline.append({'task_id': task_id, 'start_active_minutes': start,
                          'end_active_minutes': high,
                          'expected_result': plan['expected_result']})
+    timeline_error = None
+    try:
+        blocks = weekly_timeline(order, plans, week, now) if week and now else rest_timeline(order, plans)
+    except ValueError as exc:
+        # Недостаток рабочих окон не делает оценки задач или их порядок неверными.
+        blocks = []
+        timeline_error = str(exc)
     return {'task_ids': order, 'min_minutes': low, 'max_minutes': high,
             'wait_minutes': wait, 'effort_minutes': effort, 'potential_rewards': rewards,
             'timeline': timeline,
-            'blocks': weekly_timeline(order, plans, week, now) if week and now else rest_timeline(order, plans),
+            'blocks': blocks, 'timeline_error': timeline_error,
             'start_at': now if week else None,
             'timezone': week['timezone'] if week else None,
             'rest_assumption': 'Личное недельное расписание; перерывы после 90 минут работы.' if week else 'Условные дни: 6 ч работы, еда и сон. Это не личное расписание.',
@@ -189,11 +199,11 @@ def calculate(arguments, expected):
     result = {}
     for plan in body.plans:
         if plan.task_id not in expected or plan.task_id in result:
-            raise ValueError('План должен относиться к переданной задаче и не дублироваться')
+            raise ValueError(f'ID {plan.task_id} неизвестен или повторяется в вызове. Допустимые ID: {expected}')
         if any(step.min_minutes > step.max_minutes for step in plan.steps):
-            raise ValueError('Минимальная длительность этапа не может превышать максимальную')
+            raise ValueError(f'Задача {plan.task_id}: min_minutes каждого этапа должен быть не больше max_minutes')
         if plan.reward is not None and not plan.reward_unit.strip():
-            raise ValueError('Для числового результата нужна единица измерения')
+            raise ValueError(f'Задача {plan.task_id}: укажи reward_unit для числового reward либо reward=null, если выгода неизвестна')
         low = sum(step.min_minutes for step in plan.steps)
         high = sum(step.max_minutes for step in plan.steps)
         wait = sum(step.wait_minutes for step in plan.steps)

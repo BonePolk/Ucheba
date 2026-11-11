@@ -1,34 +1,22 @@
 import { useEffect, useState } from 'react';
-import { Alert, Button, Collapse, Group, Loader, Paper, Stack, Text } from '@mantine/core';
-import { useQuery } from '@tanstack/react-query';
-import { request } from './api';
+import { Alert, Button, Collapse, Group, Modal, Paper, Stack, Text } from '@mantine/core';
+import useBrowserScreen from './useBrowserScreen';
 
 export default function LuchebaBrowser({ active = false }) {
   const [opened, setOpened] = useState(() => new URLSearchParams(window.location.search).get('browser') === '1');
-  const [streamFailed, setStreamFailed] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   useEffect(() => { if (active) setOpened(true); }, [active]);
-  useEffect(() => { if (opened) setStreamFailed(false); }, [opened]);
-  const screen = useQuery({
-    queryKey: ['luna-browser-screen'],
-    queryFn: () => request('/integrations/context/browser/screen'),
-    enabled: opened,
-    refetchInterval: 2000,
-    retry: false,
-  });
-  return <Paper withBorder p="sm"><Stack gap="xs">
-    <Group>
-      <Button variant="light" size="xs" onClick={() => setOpened(!opened)}>{opened ? 'Скрыть экран браузера Lucheba' : 'Экран браузера Lucheba'}</Button>
-      {opened && screen.isFetching && <Loader size="xs" />}
-    </Group>
-    <Collapse in={opened}><Stack gap="xs">
-      <Text size="xs" c="dimmed">Прямой поток окна Lucheba: личный кабинет или поиск. Агент тоже получает снимки после действий и может рассматривать страницу целиком.</Text>
-      {screen.data ? <>
-        <Text size="xs" style={{ overflowWrap: 'anywhere' }}>{screen.data.url}</Text>
-        <Text size="xs" c="dimmed">Снимок: {new Date(screen.data.at).toLocaleTimeString()}</Text>
-        {opened && <img src={streamFailed ? `data:${screen.data.mime};base64,${screen.data.image}` : '/api/integrations/context/browser/stream'} onError={() => setStreamFailed(true)} alt="Экран браузера Lucheba" style={{ display: 'block', width: '100%', maxWidth: 1100, borderRadius: 8 }} />}
-        {streamFailed && <Text size="xs" c="yellow">Поток прерван, показываем обновляемые снимки. Закрой и открой панель для переподключения.</Text>}
-      </> : <Text size="sm" c="dimmed">Снимков пока нет. Они появятся, когда Lucheba откроет личный кабинет или поиск.</Text>}
-      {screen.error && <Alert color="yellow">Не удалось обновить экран: {screen.error.message}</Alert>}
-    </Stack></Collapse>
+  const { frame, error } = useBrowserScreen(opened || expanded);
+  const image = frame ? `data:${frame.mime};base64,${frame.image}` : null;
+  return <Paper withBorder p="xs" radius="md" maw={360}><Stack gap={6}>
+    <Group gap="xs" justify="space-between"><Button variant="subtle" size="compact-xs" onClick={() => setOpened(!opened)}>{opened ? 'Скрыть браузер' : 'Браузер агента'}</Button>{image && <Button variant="subtle" size="compact-xs" onClick={() => setExpanded(true)}>Увеличить ↗</Button>}</Group>
+    <Collapse in={opened}>
+      {image ? <button type="button" onClick={() => setExpanded(true)} style={{ display: 'block', width: '100%', border: 0, padding: 0, background: 'none', cursor: 'zoom-in' }}><img src={image} alt="Увеличить экран браузера агента" style={{ display: 'block', width: '100%', borderRadius: 6 }} /></button> : <Text size="xs" c="dimmed">Браузер ещё не открыт.</Text>}
+      {error && <Text size="xs" c="yellow">Переподключаемся…</Text>}
+    </Collapse>
+    <Modal opened={expanded} onClose={() => setExpanded(false)} title="Браузер агента" size="xl" centered>
+      {image && <><Text size="xs" c="dimmed" style={{ overflowWrap: 'anywhere' }}>{frame.url}</Text><img src={image} alt="Экран браузера агента" style={{ display: 'block', width: '100%', borderRadius: 8, marginTop: 8 }} /></>}
+      {error && <Alert color="yellow">Поток прерван. Переподключаемся…</Alert>}
+    </Modal>
   </Stack></Paper>;
 }

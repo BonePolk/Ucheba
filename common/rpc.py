@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import logging
 import os
 
 import httpx
@@ -28,11 +29,29 @@ def require_service(request: Request, service):
 
 async def call(service, path, body=None, method='POST', timeout=90):
     from common.accounts import check_feature
-    if path not in ('/close', '/disconnect'):
-        check_feature(service)
+    if path not in ('/close', '/disconnect', '/cancel'):
+        if service == 'context' and path.startswith('/browser/'):
+            from common.accounts import features
+            if not (features()['context'] or features()['straus']):
+                check_feature('context')
+        else:
+            check_feature(service)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.request(method, f'http://{service}:8000{path}',
-            headers={'X-Service-Token': internal_token(service), 'X-User-ID': str(user_id())}, json=jsonable_encoder(body))
+        host = 'lucheba' if service == 'context' else service
+        try:
+            response = await client.request(method, f'http://{host}:8000{path}',
+                headers={'X-Service-Token': internal_token(service), 'X-User-ID': str(user_id())}, json=jsonable_encoder(body))
+        except httpx.HTTPError as exc:
+            # Не выводим тело запроса: в нём могут быть ключи и личные данные.
+            logging.getLogger('uvicorn.error').warning('%s: %s', host, type(exc).__name__)
+            label = {'straus': 'Straus', 'context': 'Lucheba', 'ameba': 'Ameba'}.get(service, service)
+            if isinstance(exc, httpx.TimeoutException):
+                detail = f'{label}: истекло время ожидания сервиса. Повторите запрос.'
+            elif isinstance(exc, httpx.ConnectError):
+                detail = f'{label}: не удалось подключиться к сервису. Возможно, он перезапускается.'
+            else:
+                detail = f'{label}: соединение с сервисом оборвалось. Повторите запрос.'
+            raise HTTPException(502, detail) from None
         if not response.is_success:
             try:
                 detail = response.json()['detail']

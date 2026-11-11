@@ -23,7 +23,6 @@ from common import extraction as pipeline
 from common.settings import SECRET_FIELDS, public_settings, read_settings, report, save_settings
 from common.models.integration import CodexRun, Suggestion
 from common.models.task import Task, TaskCreate
-from common.schedule import read_week
 
 settings_lock = asyncio.Lock()
 
@@ -50,24 +49,28 @@ def agent_job(job_id: str):
     return jobs.result(job_id)
 
 
-class ScheduleImport(BaseModel):
-    site_id: str = Field(min_length=1, max_length=32)
-    url: str = Field(min_length=1, max_length=2000)
-    notes: str = Field(default='', max_length=2000)
+@router.get('/context/schedule/import/status')
+def schedule_import_status():
+    check_feature('straus')
+    previous = jobs.last('straus')
+    error = previous.get('detail') if previous and previous['status'] == 'failed' else None
+    return {'running': jobs.active('straus') is not None,
+            'error': error if error != 'Операция остановлена' else None}
 
 
-@router.post('/context/schedule/import')
-async def import_schedule(body: ScheduleImport):
-    config, secrets = read_settings('context')
-    if not config['enabled'] or not secrets.get('api_key'):
-        raise HTTPException(400, 'Включите Lucheba и сохраните ключ в профиле')
-    async def operation():
-        from datetime import datetime, timezone
-        async with scheduler.slot('context'):
-            return await call('context', '/schedule/import', body.model_dump() | {
-                'api_key': secrets['api_key'], 'now': datetime.now(timezone.utc).isoformat(),
-                'weekly_schedule': read_week()}, timeout=None)
-    return jobs.start(operation)
+@router.post('/context/schedule/import/stop')
+async def stop_schedule_import():
+    result = await jobs.stop('straus')
+    return result
+
+
+@router.get('/agents/{name}/models')
+async def agent_models(name: Literal['context', 'ameba', 'straus']):
+    config, secrets = read_settings(name)
+    check_feature(name)
+    if not secrets.get('api_key'):
+        raise HTTPException(400, 'Сначала сохраните API-ключ этого агента')
+    return await call(name, '/models', {'api_key': secrets['api_key']}, timeout=45)
 
 
 @router.get('/queue')
@@ -78,11 +81,12 @@ async def agent_queue():
         for group in ('active', 'waiting'):
             entries = []
             for item in state[group]:
-                if not enabled.get(item['provider'], False):
+                feature = 'ameba' if item['provider'] == 'jev' else 'straus' if item['provider'] == 'context' and not item['task_id'] else item['provider']
+                if not enabled.get(feature, False):
                     continue
                 task = session.get(Task, item['task_id']) if item['task_id'] else None
                 entries.append({'provider': item['provider'], 'task_id': item['task_id'],
-                                'title': task.title if task else 'Импорт расписания' if item['provider'] == 'context' else 'Общая сортировка'})
+                                'title': task.title if task else 'Расписание · Straus' if item['provider'] == 'context' else 'Общая сортировка'})
             state[group] = entries
     return state
 
@@ -94,21 +98,102 @@ async def agent_progress(task_id: int = 0, providers: str = 'context,codex'):
     if task_id:
         context.get_context(task_id)
     enabled = features()
-    names = [name for name in ('context', 'jev', 'codex') if name in providers.split(',') and enabled[name]]
+    allowed = {'context': enabled['context'] or (task_id == 0 and enabled['straus']),
+               'jev': enabled['ameba'], 'codex': enabled['codex']}
+    names = [name for name in allowed if name in providers.split(',') and allowed[name]]
 
     async def read(name):
         queued = scheduler.queued(name, task_id)
         try:
-            service = 'context' if name == 'jev' else name
-            path = '/ranking/progress' if name == 'jev' else '/progress'
             if name == 'context' and task_id == 0:
-                path = '/work/progress'
-            result = await call(service, f'{path}?task_id={task_id}', method='GET', timeout=2)
-            return {'provider': name, 'run': result, 'available': True, 'queued': queued}
+                operations = []
+                if enabled['context']:
+                    operations.append(call('context', '/work/progress', method='GET', timeout=2))
+                if enabled['straus']:
+                    operations.append(call('straus', '/progress', method='GET', timeout=2))
+                results = await asyncio.gather(*operations, return_exceptions=True)
+                runs = [run for run in results if isinstance(run, dict)]
+                result = max(runs, key=lambda run: (run['status'] == 'running', run['started_at'])) if runs else None
+                available = any(not isinstance(run, Exception) for run in results)
+            else:
+                service = 'ameba' if name == 'jev' else name
+                path = '/ranking/progress' if name == 'jev' else '/progress'
+                result = await call(service, f'{path}?task_id={task_id}', method='GET', timeout=2)
+                available = True
+            return {'provider': name, 'run': result, 'available': available, 'queued': queued}
         except (HTTPException, httpx.HTTPError):
             return {'provider': name, 'run': None, 'available': False, 'queued': queued}
 
     return await asyncio.gather(*(read(name) for name in names))
+
+
+@router.get('/progress/stream')
+async def agent_progress_stream(task_id: int = 0, providers: str = 'context,codex'):
+    if task_id < 0:
+        raise HTTPException(422, 'Некорректный номер задачи')
+    if task_id:
+        context.get_context(task_id)
+    enabled = features()
+    sources = []
+    requested = providers.split(',')
+    if 'context' in requested:
+        if enabled['context']:
+            sources.append(('context', 'context', 'agent', task_id == 0))
+        if task_id == 0 and enabled['straus']:
+            sources.append(('context', 'straus', 'agent', False))
+    if 'jev' in requested and enabled['ameba']:
+        sources.append(('jev', 'ameba', 'ranking', False))
+    if 'codex' in requested and enabled['codex']:
+        sources.append(('codex', 'codex', 'agent', False))
+
+    async def events():
+        changes = asyncio.Queue(maxsize=8)
+        states = {}
+
+        async def listen(provider, service, namespace, work):
+            host = 'lucheba' if service == 'context' else service
+            url = f'http://{host}:8000/progress/stream'
+            headers = {'X-Service-Token': internal_token(service), 'X-User-ID': str(user_id())}
+            while True:
+                try:
+                    async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=8)) as client:
+                        async with client.stream('GET', url, headers=headers,
+                            params={'task_id': task_id, 'namespace': namespace, 'work': str(work).lower()}) as response:
+                            response.raise_for_status()
+                            async for line in response.aiter_lines():
+                                if line.startswith('data: '):
+                                    await changes.put((provider, service, json.loads(line[6:]), True))
+                except (httpx.HTTPError, ValueError):
+                    pass
+                await changes.put((provider, service, None, False))
+                await asyncio.sleep(2)
+
+        tasks = [asyncio.create_task(listen(*source)) for source in sources]
+        try:
+            yield ': connected\n\n'
+            while sources:
+                try:
+                    provider, service, run, available = await asyncio.wait_for(changes.get(), timeout=15)
+                    states[service] = {'run': run, 'available': available}
+                    entries = []
+                    for name in dict.fromkeys(source[0] for source in sources):
+                        values = [states[source[1]] for source in sources if source[0] == name and source[1] in states]
+                        runs = [value['run'] for value in values if value['run']]
+                        current = max(runs, key=lambda item: (item['status'] == 'running', item['started_at'])) if runs else None
+                        entries.append({'provider': name, 'run': current,
+                                        'available': any(value['available'] for value in values),
+                                        'queued': scheduler.queued(name, task_id)})
+                    yield 'data: ' + json.dumps(entries, ensure_ascii=False) + '\n\n'
+                except TimeoutError:
+                    yield ': keepalive\n\n'
+            yield 'data: []\n\n'
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    return StreamingResponse(events(), media_type='text/event-stream',
+                             headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
 
 class TelegramConfig(BaseModel):
@@ -148,10 +233,15 @@ class ContextConfig(BaseModel):
     enabled: bool = True
     rewrite_title: bool = False
     base_url: Literal['https://lenec.tech/v1'] = 'https://lenec.tech/v1'
-    model: Literal['gpt-6-luna'] = 'gpt-6-luna'
+    model: str = Field(default='gpt-6-luna', min_length=1, max_length=200)
 
 
-CONFIG_MODELS = {'context': ContextConfig, 'notifications': NotificationsConfig, 'collector': CollectorConfig, 'telegram': TelegramConfig, 'gemini': GeminiConfig, 'codex': CodexConfig, 'jev': JebaConfig}
+class AgentConfig(BaseModel):
+    enabled: bool = True
+    model: str = Field(default='gpt-6-luna', min_length=1, max_length=200)
+
+
+CONFIG_MODELS = {'context': ContextConfig, 'ameba': AgentConfig, 'straus': AgentConfig, 'notifications': NotificationsConfig, 'collector': CollectorConfig, 'telegram': TelegramConfig, 'gemini': GeminiConfig, 'codex': CodexConfig, 'jev': JebaConfig}
 
 
 @router.get('')
@@ -164,7 +254,7 @@ async def settings():
 
 
 @router.patch('/{name}')
-async def configure(name: Literal['telegram', 'gemini', 'codex', 'jev', 'collector', 'notifications', 'context'], body: dict):
+async def configure(name: Literal['telegram', 'gemini', 'codex', 'jev', 'collector', 'notifications', 'context', 'ameba', 'straus'], body: dict):
     if body.get('enabled'):
         check_feature(name)
     allowed = set(CONFIG_MODELS[name].model_fields) | (SECRET_FIELDS[name] - {'session'})
@@ -195,6 +285,8 @@ async def configure(name: Literal['telegram', 'gemini', 'codex', 'jev', 'collect
                 raise HTTPException(409, 'Отключите Telegram перед сменой реквизитов аккаунта')
             await provider_call('telegram', telegram.close())
         save_settings(name, config=config, secrets=secrets if secrets else None)
+        if name == 'context' and current.get('model') != config.get('model'):
+            context.invalidate_file_contexts()
     return {'ok': True}
 
 
@@ -276,31 +368,33 @@ async def codex_check():
 @router.post('/jev/check')
 async def jev_check(background: bool = False):
     if background:
-        return jobs.start(lambda: provider_call('jev', jev.evaluate()))
-    return await provider_call('jev', jev.evaluate())
+        return jobs.start(lambda: provider_call('ameba', jev.evaluate()))
+    return await provider_call('ameba', jev.evaluate())
 
 
 @router.get('/jev/ranking')
 def jev_ranking():
-    check_feature('jev')
+    check_feature('ameba')
     return jev.ranking_status()
 
 
 @router.post('/jev/rank')
 async def jev_rank(background: bool = False):
+    check_feature('ameba')
+    await scheduler.interrupt_ranking(own_only=True)
     if background:
-        return jobs.start(lambda: provider_call('jev', jev.rank_all(force=True)))
-    return await provider_call('jev', jev.rank_all(force=True))
+        return jobs.start(lambda: provider_call('ameba', jev.rank_all(force=True)))
+    return await provider_call('ameba', jev.rank_all(force=True))
 
 
 @router.post('/tasks/{task_id}/jev')
 async def jev_score(task_id: int, background: bool = False):
-    config, _ = read_settings('jev')
+    config, _ = read_settings('ameba')
     if not config['enabled']:
-        raise HTTPException(400, 'Включите Jeba в настройках')
+        raise HTTPException(400, 'Включите Ameba в настройках')
     if background:
-        return jobs.start(lambda: provider_call('jev', jev.evaluate(task_id)))
-    return await provider_call('jev', jev.evaluate(task_id))
+        return jobs.start(lambda: provider_call('ameba', jev.evaluate(task_id)))
+    return await provider_call('ameba', jev.evaluate(task_id))
 
 
 @router.post('/tasks/{task_id}/codex', status_code=202)
@@ -402,7 +496,7 @@ async def collector_analyze():
 
 @router.api_route('/services/{name}/{path:path}', methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'])
 async def service_access(
-    name: Literal['telegram', 'gemini', 'codex', 'jev', 'collector', 'notifications', 'context'],
+    name: Literal['telegram', 'gemini', 'codex', 'jev', 'collector', 'notifications', 'context', 'ameba', 'straus'],
     path: str,
     request: Request,
 ):
@@ -412,7 +506,7 @@ async def service_access(
         headers['Content-Type'] = request.headers['content-type']
     try:
         async with httpx.AsyncClient(timeout=330) as client:
-            result = await client.request(request.method, f'http://{name}:8000/{quote(path, safe="/")}',
+            result = await client.request(request.method, f'http://{"lucheba" if name == "context" else name}:8000/{quote(path, safe="/")}',
                 params=request.query_params.multi_items(), headers=headers, content=await request.body())
     except httpx.HTTPError:
         raise HTTPException(502, 'Сервис недоступен или превышено время ожидания') from None
@@ -441,11 +535,11 @@ async def analyze_context(task_id: int, background: bool = False):
 async def answer_context(task_id: int, body: ContextAnswer, background: bool = False):
     check_feature('context')
     context.save_answer(task_id, body.subject, body.answer)
-    if not features()['jev']:
+    if not features()['ameba'] or not read_settings('ameba')[0]['enabled']:
         return {'status': 'saved'}
     if background:
-        return jobs.start(lambda: provider_call('jev', jev.evaluate(task_id)))
-    return await provider_call('jev', jev.evaluate(task_id))
+        return jobs.start(lambda: provider_call('ameba', jev.evaluate(task_id)))
+    return await provider_call('ameba', jev.evaluate(task_id))
 
 
 class ContextFile(BaseModel):
@@ -517,7 +611,7 @@ async def attach_context_file(task_id: int, body: ContextFile):
         raise HTTPException(413, 'Максимальный размер файла — 10 МБ')
     try:
         async with httpx.AsyncClient(timeout=90) as client:
-            result = await client.post(f'http://context:8000/tasks/{task_id}/files', params={'name': body.name},
+            result = await client.post(f'http://lucheba:8000/tasks/{task_id}/files', params={'name': body.name},
                 headers={'X-Service-Token': internal_token('context'), 'X-User-ID': str(user_id())}, content=content)
     except httpx.HTTPError:
         raise HTTPException(503, 'Хранилище файлов недоступно') from None
@@ -553,7 +647,7 @@ async def download_context_file(task_id: int, file_id: str):
         raise HTTPException(404, 'Файл не найден')
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            result = await client.get(f'http://context:8000/tasks/{task_id}/files/{file_id}',
+            result = await client.get(f'http://lucheba:8000/tasks/{task_id}/files/{file_id}',
                 headers={'X-Service-Token': internal_token('context'), 'X-User-ID': str(user_id())})
     except httpx.HTTPError:
         raise HTTPException(503, 'Хранилище файлов недоступно') from None
@@ -594,10 +688,11 @@ async def luna_screen(response: Response):
 
 @router.get('/context/browser/stream')
 async def luna_browser_stream():
-    check_feature('context')
-    client = httpx.AsyncClient(timeout=15)
+    if not (features()['context'] or features()['straus']):
+        check_feature('context')
+    client = httpx.AsyncClient(timeout=httpx.Timeout(None, connect=8))
     try:
-        upstream = await client.send(client.build_request('GET', 'http://browser:8000/stream',
+        upstream = await client.send(client.build_request('GET', 'http://browser:8000/screen/stream',
             headers={'X-Service-Token': internal_token('context'), 'X-User-ID': str(user_id())}), stream=True)
     except httpx.HTTPError:
         await client.aclose()
@@ -615,7 +710,7 @@ async def luna_browser_stream():
             await upstream.aclose()
             await client.aclose()
 
-    return StreamingResponse(frames(), media_type='multipart/x-mixed-replace; boundary=frame',
+    return StreamingResponse(frames(), media_type='text/event-stream',
                              headers={'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no'})
 
 

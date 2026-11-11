@@ -1,7 +1,8 @@
 import { useState } from 'react';
-import { Alert, Button, Collapse, Group, PasswordInput, Select, Stack, Text, TextInput } from '@mantine/core';
+import { Alert, Button, Collapse, Group, Modal, PasswordInput, Select, Stack, Text, TextInput } from '@mantine/core';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { request } from './api';
+import useBrowserScreen from './useBrowserScreen';
 
 export default function ContextBrowser({ taskId, disabled, initialSiteId = null }) {
   const client = useQueryClient();
@@ -11,6 +12,8 @@ export default function ContextBrowser({ taskId, disabled, initialSiteId = null 
   const [credentials, setCredentials] = useState({ name: '', url: '', username: '', password: '' });
   const [typing, setTyping] = useState('');
   const [screen, setScreen] = useState(null);
+  const [expanded, setExpanded] = useState(false);
+  const live = useBrowserScreen(opened && Boolean(screen));
   const path = `/integrations/tasks/${taskId}/context/browser`;
   const sitesPath = '/integrations/context/browser/sites';
   const sites = useQuery({ queryKey: ['context-browser-sites'], queryFn: () => request(sitesPath), enabled: opened });
@@ -49,6 +52,13 @@ export default function ContextBrowser({ taskId, disabled, initialSiteId = null 
   const available = sites.data?.some((site) => site.id === siteId);
   const error = sites.error || selected.error || select.error || save.error || forget.error || action.error;
   const field = (name) => (event) => setCredentials({ ...credentials, [name]: event.currentTarget.value });
+  function screenImage(large = false) {
+    return <img src={live.frame ? `data:${live.frame.mime};base64,${live.frame.image}` : `data:image/png;base64,${screen.image}`} alt="Браузер личного кабинета — нажми на нужный элемент" style={{ width: '100%', maxWidth: large ? 1100 : 360, display: 'block', cursor: busy ? 'wait' : 'crosshair', borderRadius: 8 }} onClick={(event) => {
+      if (busy) return;
+      const rect = event.currentTarget.getBoundingClientRect();
+      action.mutate({ action: 'click', x: Math.min(1099, Math.max(0, Math.floor((event.clientX - rect.left) * screen.width / rect.width))), y: Math.min(749, Math.max(0, Math.floor((event.clientY - rect.top) * screen.height / rect.height))) });
+    }} />;
+  }
   return <Stack gap="xs">
     <Button variant="default" onClick={() => setOpened(!opened)}>{opened ? 'Скрыть браузер ЛК' : 'Браузер личного кабинета'}</Button>
     <Collapse in={opened}><Stack gap="sm">
@@ -72,14 +82,13 @@ export default function ContextBrowser({ taskId, disabled, initialSiteId = null 
           }}>Забыть вход</Button>
         </Group>
         <Text size="xs" c="dimmed">Для 2FA и CAPTCHA используй снимок: нажми на поле, введи значение ниже и нажми «Ввести». Пароль и код не отправляются Lucheba.</Text>
+        {live.error && <Text size="xs" c="yellow">Переподключаем экран браузера…</Text>}
         {screen?.notice && <Alert>{screen.notice.reason}</Alert>}
         {screen?.image && <>
           <Text size="xs" c="dimmed">{screen.url}</Text>
-          <img src={`data:image/png;base64,${screen.image}`} alt="Браузер личного кабинета — нажми на нужный элемент" style={{ width: '100%', maxWidth: 1100, cursor: busy ? 'wait' : 'crosshair', borderRadius: 8 }} onClick={(event) => {
-            if (busy) return;
-            const rect = event.currentTarget.getBoundingClientRect();
-            action.mutate({ action: 'click', x: Math.min(1099, Math.max(0, Math.floor((event.clientX - rect.left) * screen.width / rect.width))), y: Math.min(749, Math.max(0, Math.floor((event.clientY - rect.top) * screen.height / rect.height))) });
-          }} />
+          {screenImage()}
+          <Button size="compact-xs" variant="subtle" onClick={() => setExpanded(true)}>Увеличить браузер ↗</Button>
+          <Modal opened={expanded} onClose={() => setExpanded(false)} title="Личный кабинет" size="xl" centered>{screenImage(true)}</Modal>
           <Group align="end">
             <PasswordInput label="Ввести в выбранное поле браузера" value={typing} onChange={(event) => setTyping(event.currentTarget.value)} autoComplete="off" />
             <Button disabled={busy || !typing} onClick={() => { const value = typing; setTyping(''); action.mutate({ action: 'type', text: value }); }}>Ввести</Button>

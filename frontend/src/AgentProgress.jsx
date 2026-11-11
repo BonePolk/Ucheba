@@ -1,10 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { Alert, Badge, Button, Collapse, Group, Loader, Paper, Stack, Text } from '@mantine/core';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { request } from './api';
 
 const names = { context: 'Lucheba', jev: 'Ameba', codex: 'Codex' };
-const statuses = { running: 'Работает', completed: 'Завершено', failed: 'Ошибка', interrupted: 'Прервано' };
+const statuses = { running: 'Работает', completed: 'Завершено', failed: 'Ошибка', interrupted: 'Прервано', blocked: 'Нужны данные или доступ', unchanged: 'Без изменений' };
 
 export default function AgentProgress({ taskId = 0, providers, active = false, children }) {
   const client = useQueryClient();
@@ -16,29 +15,42 @@ export default function AgentProgress({ taskId = 0, providers, active = false, c
     client.setQueryData(openKey, !opened);
     setOpened(!opened);
   }
+  const [streamError, setStreamError] = useState(false);
   const query = useQuery({
     queryKey: ['agent-progress', taskId, providerList],
-    queryFn: async () => {
-      const entries = await request(`/integrations/progress?task_id=${taskId}&providers=${providerList}`);
-      const previous = client.getQueryData(['agent-progress', taskId, providerList]) ?? [];
-      // Временная недоступность сервиса не стирает уже полученный журнал.
-      const result = entries.map((entry) => ({ ...entry, run: entry.run ?? previous.find((item) => item.provider === entry.provider)?.run ?? null }));
-      return result;
-    },
-    enabled: providers.length > 0,
+    queryFn: async () => [],
+    initialData: [],
+    enabled: false,
     gcTime: Infinity,
-    retry: false,
-    refetchInterval: (query) => active || opened || query.state.data?.some((entry) => entry.queued || entry.run?.status === 'running') ? 1000 : false,
   });
+  useEffect(() => {
+    if (!providerList) return;
+    const key = ['agent-progress', taskId, providerList];
+    const stream = new EventSource(`/api/integrations/progress/stream?task_id=${taskId}&providers=${encodeURIComponent(providerList)}`);
+    setStreamError(false);
+    stream.onmessage = (event) => {
+      try {
+        const entries = JSON.parse(event.data);
+        client.setQueryData(key, (previous = []) => entries.map((entry) => ({
+          ...entry,
+          // Обрыв сервиса не стирает журнал, который уже успел прийти.
+          run: entry.run ?? previous.find((item) => item.provider === entry.provider)?.run ?? null,
+        })));
+        setStreamError(false);
+      } catch {
+        setStreamError(true);
+      }
+    };
+    stream.onerror = () => setStreamError(true);
+    // EventSource сам восстанавливает соединение; при уходе со страницы закрываем его.
+    return () => stream.close();
+  }, [client, taskId, providerList]);
   useEffect(() => {
     if (active) {
       client.setQueryData(['agent-progress-open', taskId, providerList], true);
       setOpened(true);
     }
   }, [active, client, taskId, providerList]);
-  useEffect(() => {
-    if (active || opened) query.refetch();
-  }, [active, opened, query.refetch]);
   useEffect(() => {
     if (viewport.current) viewport.current.scrollTop = viewport.current.scrollHeight;
   }, [query.data, opened]);
@@ -48,7 +60,11 @@ export default function AgentProgress({ taskId = 0, providers, active = false, c
   const current = [...runs].sort((a, b) =>
     Number(b.run.status === 'running') - Number(a.run.status === 'running') ||
     (b.run.started_at ?? '').localeCompare(a.run.started_at ?? ''))[0];
-  const events = (current?.run.events ?? []).map((event) => ({ ...event,
+  const run = current?.run;
+  const lastActivity = run?.last_activity_at ?? run?.events?.at(-1)?.at ?? run?.started_at;
+  const quietMinutes = lastActivity ? Math.floor((Date.now() - Date.parse(lastActivity)) / 60000) : 0;
+  const events = (current?.run.events ?? []).filter((event) =>
+    !(run.status === 'running' && run.reasoning_text && event.kind === 'summary' && event.id > (run.response_event_start ?? Infinity))).map((event) => ({ ...event,
     provider: current.provider, key: `${current.run.id}:${event.id}` }));
   if (!providers.length) return null;
   return <Paper withBorder p="sm" radius="md">
@@ -58,7 +74,14 @@ export default function AgentProgress({ taskId = 0, providers, active = false, c
     </Button>
     {typeof children === 'function' ? children(query.data ?? []) : children}
     <Collapse in={opened}><Stack gap="xs" mt="xs">
-      <Group gap="xs">{(current ? [current] : []).map(({ provider, run }) => <Badge key={provider} color={run.status === 'failed' ? 'red' : run.status === 'running' ? 'purple' : 'gray'} variant="light">{run.agent ?? names[provider]} · {statuses[run.status]}</Badge>)}</Group>
+      <Group gap="xs">{(current ? [current] : []).map(({ provider, run }) => <Badge key={provider} color={run.status === 'failed' ? 'red' : run.status === 'blocked' ? 'yellow' : run.status === 'running' ? 'purple' : 'gray'} variant="light">{run.agent ?? names[provider]} · {statuses[run.status]}</Badge>)}</Group>
+      {run?.status === 'running' && run.model_waiting && <Text component="span" className="agent-thinking" aria-label="Модель отвечает">Думает</Text>}
+      <Text size="xs" c="dimmed">{run?.token_usage ? `Подтверждённые токены: вход ${run.token_usage.input_tokens ?? 'нет данных'} · выход ${run.token_usage.output_tokens ?? 'нет данных'}` : 'Токены: нет данных'}{run?.model_waiting && !run.current_usage_known && run.token_usage ? ' · текущий запрос: нет данных' : ''}</Text>
+      {run?.status === 'running' && run.reasoning_text && <Stack gap={4}>
+        <Text size="xs" c="dimmed">Размышления · публичные пояснения модели</Text>
+        <Text size="xs" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 240, overflowY: 'auto' }} aria-live="polite">{run.reasoning_text}</Text>
+      </Stack>}
+      {run?.status === 'running' && quietMinutes >= 2 && <Text size="xs" c="yellow">Новых данных нет {quietMinutes} мин. Операция ещё не завершена.</Text>}
       {events.length === 0 && <Text size="xs" c="dimmed">{running ? 'Ожидаем события агента…' : 'Журналов пока нет'}</Text>}
       <div ref={viewport} role="log" aria-live="polite" style={{ maxHeight: 280, overflowY: 'auto' }}>
         {events.map((event) => <Text key={event.key} size="xs" style={{ fontFamily: 'monospace', overflowWrap: 'anywhere', padding: '3px 0', whiteSpace: 'pre-wrap' }}>
@@ -66,7 +89,7 @@ export default function AgentProgress({ taskId = 0, providers, active = false, c
         </Text>)}
       </div>
       {(query.data ?? []).filter((entry) => !entry.available).map((entry) => <Text key={entry.provider} size="xs" c="yellow">{names[entry.provider]}: журнал пока недоступен</Text>)}
-      {query.error && <Alert color="red">{query.error.message}</Alert>}
+      {streamError && <Alert color="yellow">Соединение с журналом потеряно. Переподключаемся…</Alert>}
     </Stack></Collapse>
   </Paper>;
 }

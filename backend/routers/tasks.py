@@ -31,8 +31,8 @@ def list_tasks(
     if sort_by == 'ai_score':
         sort_by, order = 'jev', 'asc'
     if sort_by == 'jev':
-        jev = read_config('jev')
-        if not jev['enabled'] or not features()['jev'] or archived:
+        jev = read_config('ameba')
+        if not jev['enabled'] or not features()['ameba'] or archived:
             sort_by, order = 'priority', 'asc'
     overdue = (
         (Task.deadline < datetime.now(timezone.utc))

@@ -52,7 +52,7 @@ export default function AgentTimeline({ tasks = [], finished = false, schedule }
       <Tooltip multiline w={300} label={`${schedule?.rest_assumption ?? 'Время оценивается приблизительно'}${schedule?.start_at ? ` Начало: ${new Date(schedule.start_at).toLocaleString(undefined, { timeZone: schedule.timezone })}` : ''}`}><Text size="xs" c="dimmed">{finished ? 'Итоговый план' : 'План работы'}</Text></Tooltip>
       <Group gap={6}>{!finished && <Badge size="xs" variant="light" color="gray">Черновик</Badge>}<Text size="xs" fw={600}>{duration(schedule?.max_minutes ?? planned.reduce((sum, task) => sum + task.plan.max_minutes, 0))} работы</Text></Group>
     </Group>
-    {planned.length > 0 ? <div style={{ overflowX: 'auto', padding: '5px 0' }}>
+    {schedule?.timeline_error ? <Text size="xs" c="yellow">Шкала не построена: {schedule.timeline_error}. Порядок задач сохранён.</Text> : planned.length > 0 ? <div style={{ overflowX: 'auto', padding: '5px 0' }}>
       <div ref={chart} style={{ position: 'relative', minWidth: 760, height: visibleDays * 66 + 18 }}>
         {Array.from({ length: visibleDays }, (_, day) => <div key={day} style={{ position: 'absolute', top: day * 66, width: '100%' }}>
           <Text size="xs" c="dimmed">День {day + 1}</Text>

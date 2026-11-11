@@ -10,11 +10,13 @@ from fastapi.responses import JSONResponse
 from common.accounts import bootstrap
 from common.database import init_db
 from common.identity import current_user_id
+from common.http import hide_health_logs
 from common.runtime import for_users
 from common.security import session_user
 from integrations import codex, worker
 from routers.integrations import inbox, router as integrations
 from routers.tasks import router as tasks
+from routers.calendar import router as calendar
 from routers.users import admin, router as users
 
 
@@ -60,6 +62,7 @@ async def user_session(request: Request, call_next):
 app.include_router(users)
 app.include_router(admin)
 app.include_router(tasks)
+app.include_router(calendar)
 app.include_router(integrations)
 app.include_router(inbox)
 

@@ -1,8 +1,12 @@
-"""Одна Lucheba на аккаунт; Jeba ждёт освобождения всех Lucheba."""
+"""Lucheba и Straus делят браузер и имеют приоритет перед Ameba."""
 import asyncio
 from contextlib import asynccontextmanager
+from uuid import uuid4
+
+from fastapi import HTTPException
 
 from common.identity import user_id
+from common.rpc import call
 
 condition = asyncio.Condition()
 waiting = []
@@ -10,6 +14,42 @@ running = []
 planned = {}
 active_users = set()
 jeba_running = False
+ranking_request = None
+
+
+async def interrupt_ranking(own_only=False):
+    request = ranking_request
+    if request and (not own_only or request['owner'] == user_id()):
+        # Отменяем только запрос Ameba, не фоновый worker целиком.
+        if not request['task'].cancelling():
+            request['task'].cancel()
+        await asyncio.gather(request['task'], return_exceptions=True)
+
+
+async def run_ranking(body):
+    global ranking_request
+    run_id = uuid4().hex
+
+    async def request():
+        try:
+            return await call('ameba', '/rank', body | {'run_id': run_id}, timeout=None)
+        except asyncio.CancelledError:
+            # Сначала останавливаем модель в отдельном сервисе, затем отдаём очередь.
+            await call('ameba', '/cancel', {'run_id': run_id}, timeout=None)
+            raise
+
+    task = asyncio.create_task(request())
+    entry = {'owner': user_id(), 'task': task}
+    ranking_request = entry
+    try:
+        return await task
+    except asyncio.CancelledError:
+        if asyncio.current_task().cancelling():
+            raise
+        raise HTTPException(409, 'Ameba остановлена. Последний порядок сохранён; сортировку можно запустить заново.') from None
+    finally:
+        if ranking_request is entry:
+            ranking_request = None
 
 
 @asynccontextmanager
@@ -19,29 +59,33 @@ async def slot(provider, task_id=0):
     entry = {'owner': owner, 'provider': provider, 'task_id': task_id}
     async with condition:
         waiting.append(entry)
-        try:
+    try:
+        if provider == 'context':
+            await interrupt_ranking()
+        async with condition:
             def available():
-                if jeba_running:
+                if jeba_running or active_users:
                     return False
+                browser_waiting = [item for item in waiting if item['provider'] == 'context']
                 if provider == 'context':
-                    # FIFO внутри аккаунта; разные аккаунты могут работать одновременно.
-                    first = next(item for item in waiting
-                                 if item['provider'] == 'context' and item['owner'] == owner)
-                    return owner not in active_users and first is entry
-                return not active_users and not any(planned.values()) and not any(item['provider'] == 'context' for item in waiting)
+                    return bool(browser_waiting) and browser_waiting[0] is entry
+                ranking_waiting = [item for item in waiting if item['provider'] != 'context']
+                return not browser_waiting and not any(planned.values()) and ranking_waiting[0] is entry
 
             await condition.wait_for(available)
-        finally:
-            # Удаляем именно этот запрос, даже если в очереди есть такой же.
+            waiting.remove(entry)
+            if provider == 'context':
+                active_users.add(owner)
+                if owner in planned:
+                    planned[owner] = [value for value in planned[owner] if value != task_id]
+            else:
+                jeba_running = True
+            running.append(entry)
+    except BaseException:
+        async with condition:
             waiting[:] = [item for item in waiting if item is not entry]
             condition.notify_all()
-        if provider == 'context':
-            active_users.add(owner)
-            if owner in planned:
-                planned[owner] = [task_id for task_id in planned[owner] if task_id != entry['task_id']]
-        else:
-            jeba_running = True
-        running.append(entry)
+        raise
     try:
         yield
     finally:
@@ -74,6 +118,8 @@ def queue_state():
     pending.extend({'owner': owner, 'provider': 'context', 'task_id': task_id}
                    for task_id in planned.get(owner, []) if task_id not in visible)
     return {'active': active, 'waiting': pending,
+            'browser_busy': bool(active_users or any(item['provider'] == 'context' for item in waiting) or any(planned.values())),
+            'ameba_running': any(item['provider'] == 'jev' for item in active),
             'busy': bool(active_users or jeba_running or waiting or any(planned.values()))}
 
 

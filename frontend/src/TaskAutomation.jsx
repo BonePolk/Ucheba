@@ -64,11 +64,13 @@ export default function TaskAutomation({ task, features = {} }) {
   const client = useQueryClient();
   const [notice, setNotice] = useState('');
   const queue = useQuery({ queryKey: ['agent-queue'], queryFn: () => request('/integrations/queue'),
-    enabled: features.jev !== false, refetchInterval: 1000 });
+    enabled: features.ameba !== false, refetchInterval: 1000 });
   const context = useQuery({ queryKey: ['context', task.id], queryFn: () => request(`/integrations/tasks/${task.id}/context`), refetchInterval: 5000, enabled: features.context !== false });
   const runs = useQuery({ queryKey: ['integrations', 'runs', task.id], queryFn: () => request(`/integrations/tasks/${task.id}/runs`), refetchInterval: 5000, retry: false, enabled: features.codex !== false });
   const action = useMutation({
-    mutationFn: (provider) => (provider === 'jev' ? agentRequest : request)(`/integrations/tasks/${task.id}/${provider}`, { method: 'POST' }),
+    mutationFn: (provider) => (provider === 'jev' ? agentRequest : request)(
+      provider === 'jev' && queue.data?.ameba_running ? '/integrations/jev/rank' : `/integrations/tasks/${task.id}/${provider}`,
+      { method: 'POST' }),
     onSuccess: async (data, provider) => {
       setNotice(provider === 'codex' ? 'Задача передана Codex' : data.metrics?.status === 'needs_context' ? `Lucheba: недостаточно контекста. ${data.metrics.reason}` : data.rank != null ? `Порядок Ameba: ${data.rank} из ${data.ranked_count}` : 'Порядок Ameba обновлён');
       await client.invalidateQueries({ queryKey: ['jev-ranking'] });
@@ -79,7 +81,7 @@ export default function TaskAutomation({ task, features = {} }) {
     },
   });
   return <Stack>
-    <Title order={2}>{task.title}</Title>
+    <Group justify="space-between"><Title order={2}>{task.title}</Title><Button component="a" href={`/calendar?add_task=${task.id}`} variant="light" size="xs">В календарь</Button></Group>
     {task.description && <Text style={{ whiteSpace: 'pre-wrap' }}>{task.description}</Text>}
     {task.category && <Badge variant="light">{task.category}</Badge>}
     {features.context !== false && (context.data?.full_markdown || context.data?.summary) && <Paper withBorder p="md"><Stack>
@@ -88,9 +90,9 @@ export default function TaskAutomation({ task, features = {} }) {
       <TaskMarkdown>{context.data.full_markdown || context.data.summary}</TaskMarkdown>
     </Stack></Paper>}
     <Text size="sm" c="dimmed">Сначала подключите провайдеров в разделе «Интеграции». Задача уже сохранена и не зависит от доступности ИИ.</Text>
-    <Group>{features.codex !== false && <Button disabled={action.isPending} onClick={() => action.mutate('codex')}>Поручить Codex</Button>}{features.jev !== false && features.context !== false && <Button variant="light" disabled={action.isPending || queue.data?.busy} onClick={() => action.mutate('jev')}>Обновить порядок Ameba</Button>}</Group>
+    <Group>{features.codex !== false && <Button disabled={action.isPending} onClick={() => action.mutate('codex')}>Поручить Codex</Button>}{features.ameba !== false && <Button variant="light" disabled={(action.isPending && !queue.data?.ameba_running) || queue.data?.browser_busy} onClick={() => action.mutate('jev')}>{queue.data?.ameba_running ? 'Перезапустить Ameba' : 'Обновить порядок Ameba'}</Button>}</Group>
     {features.codex !== false && <AgentProgress taskId={task.id} providers={['codex']} active={(action.isPending && action.variables === 'codex') || runs.data?.some((run) => ['queued', 'running'].includes(run.status))} />}
-    {features.context !== false && <ContextForm key={task.id} taskId={task.id} jevEnabled={features.jev !== false} jevBusy={action.isPending && action.variables === 'jev'} context={context} />}
+    {features.context !== false && <ContextForm key={task.id} taskId={task.id} jevEnabled={features.ameba !== false} jevBusy={action.isPending && action.variables === 'jev'} context={context} />}
     {notice && <Alert color="purple">{notice}</Alert>}
     {(action.error || runs.error) && <Alert color="red">{(action.error || runs.error).message}</Alert>}
     {features.codex !== false && runs.data?.map((run) => <Paper key={run.id} withBorder p="md"><Stack gap="sm">

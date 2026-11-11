@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from dataclasses import dataclass, field
 from common.identity import user_id
+from common.progress import timestamp
 
 from fastapi import HTTPException
 from openai_codex import ApprovalMode, AsyncCodex, CodexConfig, ExternalMessage, Sandbox
@@ -141,13 +142,49 @@ async def execute(run_id, payload, progress):
 Разрешены подготовка файлов и поиск встроенным web search. Не отправляй сообщения,
 не публикуй информацию, не меняй внешние системы, не запрашивай секреты.
 Если выполнить задачу нельзя, подготовь полезный план или справочную информацию.
-Никогда не отмечай задачу выполненной: результат проверит владелец.'''
+Никогда не отмечай задачу выполненной: результат проверит владелец.
+По желанию можешь давать короткие публичные пояснения текущего действия в commentary.
+Скрытые рассуждения не раскрывай; пояснения необязательны.'''
         thread = await current.thread_start(cwd=str(path), sandbox=Sandbox.workspace_write,
             ephemeral=True, approval_mode=ApprovalMode.deny_all, developer_instructions=instructions)
+        summary = None
+        fallback = None
+        commentary = set()
+        completed = False
+        progress.begin_response()
         async with asyncio.timeout(300):
-            progress.add('Codex готовит материалы. Ожидает результат')
-            result = await thread.run(ExternalMessage(tool_name='task_manager', content=json.dumps(payload, ensure_ascii=False)))
-        summary = result.final_response
+            turn = await thread.turn(ExternalMessage(tool_name='task_manager', content=json.dumps(payload, ensure_ascii=False)))
+            async for event in turn.stream():
+                progress.update(last_activity_at=timestamp())
+                data = event.payload
+                if event.method in ('item/started', 'item/completed'):
+                    item = data.item.root if hasattr(data.item, 'root') else data.item
+                    phase = getattr(getattr(item, 'phase', None), 'value', None)
+                    if event.method == 'item/started':
+                        progress.update(model_waiting=item.type in ('reasoning', 'agentMessage'))
+                        if item.type == 'agentMessage' and phase == 'commentary':
+                            commentary.add(item.id)
+                    elif item.type == 'agentMessage':
+                        if phase == 'final_answer':
+                            summary = item.text
+                        elif phase is None:
+                            fallback = item.text
+                    else:
+                        progress.update(model_waiting=True)
+                elif event.method == 'item/agentMessage/delta' and data.item_id in commentary:
+                    progress.summary(data.delta, ('commentary', data.item_id))
+                elif event.method == 'item/reasoning/summaryTextDelta':
+                    progress.summary(data.delta, (data.item_id, data.summary_index))
+                elif event.method == 'thread/tokenUsage/updated':
+                    usage = data.token_usage.total
+                    progress.update(token_usage={'input_tokens': usage.input_tokens, 'output_tokens': usage.output_tokens},
+                                    current_usage_known=True)
+                elif event.method == 'turn/completed':
+                    completed = data.turn.status.value == 'completed'
+        progress.update(model_waiting=False)
+        if not completed:
+            raise HTTPException(502, 'Codex не завершил работу')
+        summary = summary or fallback
         if not summary:
             raise HTTPException(502, 'Codex не вернул результат')
         progress.add('Сохраняет подготовленные материалы')

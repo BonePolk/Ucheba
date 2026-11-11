@@ -75,6 +75,8 @@ def slots_for_date(week, day):
     slots = [dict(slot) for slot in week['days'][day.weekday()]
              if slot.get('week_pattern', 'all') in ('all', parity)]
     slots += [dict(slot) for slot in week.get('events', []) if slot['date'] == day.isoformat()]
+    from common.calendar import occurs
+    slots += [dict(event) for event in week.get('calendar_events', []) if occurs(event, day)]
     occupied = [slot for slot in slots if slot['kind'] != 'work']
     work = []
     for slot in (slot for slot in slots if slot['kind'] == 'work'):

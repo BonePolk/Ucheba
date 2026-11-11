@@ -1,6 +1,5 @@
 import os
 
-from common.schedule import Week, default_week, read_week, save_week
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
@@ -27,17 +26,6 @@ def authenticate(response, row):
                         max_age=43200, secure=os.getenv('COOKIE_SECURE', 'false').lower() == 'true', path='/')
     response.delete_cookie('owner_session', path='/')
     return public_user(row)
-
-
-@router.get('/schedule', dependencies=[Depends(require_user)])
-def get_schedule():
-    saved = read_week()
-    return {'schedule': saved or default_week(), 'configured': saved is not None}
-
-
-@router.put('/schedule', dependencies=[Depends(require_user)])
-def update_schedule(body: Week):
-    return save_week(body)
 
 
 @router.get('/registration')
@@ -129,3 +117,24 @@ def feature_update(name: str, body: FeatureUpdate):
         session.add(row)
         session.commit()
     return {'ok': True}
+
+
+@router.get('/agent-history')
+def agent_history_list(request: Request, before: int | None = None):
+    require_user(request)
+    from agent_history import read
+    return read(before)
+
+
+@router.api_route('/agent-history/internal', methods=['POST', 'PATCH'])
+async def agent_history_internal(request: Request):
+    from common.rpc import require_service
+    from common.identity import current_user_id
+    from agent_history import start, finish
+    owner = require_service(request, 'context')
+    token = current_user_id.set(owner)
+    try:
+        body = await request.json()
+        return start(body) if request.method == 'POST' else finish(body)
+    finally:
+        current_user_id.reset(token)

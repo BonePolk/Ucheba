@@ -115,3 +115,13 @@ class TaskContext(SQLModel, table=True):
     task_snapshot: str = ''
     usage: str = '{}'
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class AgentHistory(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    agent: str
+    request: str = '{}'
+    result: str = '{}'
+    status: str = 'running'
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    finished_at: datetime | None = None

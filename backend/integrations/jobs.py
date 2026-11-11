@@ -12,9 +12,11 @@ from common.identity import user_id
 jobs = OrderedDict()
 
 
-def start(operation):
+def start(operation, kind=None):
+    if kind and active(kind):
+        raise HTTPException(409, 'Straus уже работает. Сначала остановите текущее поручение.')
     job_id = uuid4().hex
-    record = {'owner': user_id(), 'status': 'running'}
+    record = {'owner': user_id(), 'status': 'running', 'kind': kind}
     jobs[job_id] = record
 
     async def run():
@@ -23,10 +25,11 @@ def start(operation):
             record['status'] = 'completed'
         except HTTPException as exc:
             record.update(status='failed', detail=exc.detail, code=exc.status_code)
-        except httpx.HTTPError:
+        except httpx.HTTPError as exc:
+            logging.getLogger('uvicorn.error').warning('agent job: %s', type(exc).__name__)
             record.update(status='failed', detail='Сервис анализа недоступен', code=502)
         except asyncio.CancelledError:
-            record.update(status='failed', detail='Анализ прерван перезапуском сервиса', code=503)
+            record.update(status='failed', detail='Операция остановлена', code=409)
             raise
         except Exception as exc:
             logging.getLogger('uvicorn.error').error('agent job: %s', type(exc).__name__)
@@ -41,6 +44,32 @@ def start(operation):
         if jobs[key]['status'] != 'running':
             del jobs[key]
     return {'job_id': job_id}
+
+
+def active(kind):
+    return next((record for record in jobs.values()
+                 if record['owner'] == user_id() and record.get('kind') == kind
+                 and record['status'] == 'running'), None)
+
+
+def last(kind):
+    records = [record for record in jobs.values()
+               if record['owner'] == user_id() and record.get('kind') == kind]
+    return records[-1] if records else None
+
+
+async def stop(kind):
+    record = active(kind)
+    if record:
+        task = record.get('task')
+        if task:
+            if not task.cancelling():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        # Задача могла быть отменена до первого запуска её coroutine.
+        record.update(status='failed', detail='Операция остановлена', code=409)
+        record.pop('task', None)
+    return {'running': False}
 
 
 def result(job_id):

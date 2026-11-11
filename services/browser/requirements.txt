@@ -1,2 +1,6 @@
 # Версия пакета должна совпадать с образом в Dockerfile.
 playwright==1.64.1
+
+pypdf>=6,<8
+pypdfium2>=5,<6
+Pillow>=12,<13

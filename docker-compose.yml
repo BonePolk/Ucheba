@@ -156,10 +156,10 @@ services:
         - action: rebuild
           path: ./services/jev/Dockerfile
 
-  context:
+  lucheba:
     build:
       context: .
-      dockerfile: services/context/Dockerfile
+      dockerfile: services/lucheba/Dockerfile
     healthcheck: *health
     environment:
       INTERNAL_SECRET: ${INTEGRATION_ENCRYPTION_KEY:-}
@@ -172,7 +172,7 @@ services:
     develop:
       watch:
         - action: sync+restart
-          path: ./services/context
+          path: ./services/lucheba
           target: /app
           ignore: [Dockerfile, requirements.txt, __pycache__]
         - action: sync+restart
@@ -180,11 +180,67 @@ services:
           target: /app/common
           ignore: [requirements.txt, __pycache__]
         - action: rebuild
-          path: ./services/context/requirements.txt
+          path: ./services/lucheba/requirements.txt
         - action: rebuild
           path: ./common/requirements.txt
         - action: rebuild
-          path: ./services/context/Dockerfile
+          path: ./services/lucheba/Dockerfile
+
+  ameba:
+    build:
+      context: .
+      dockerfile: services/ameba/Dockerfile
+    healthcheck: *health
+    environment:
+      INTERNAL_SECRET: ${INTEGRATION_ENCRYPTION_KEY:-}
+    networks:
+      default:
+      context-egress:
+        gw_priority: 1
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./services/ameba
+          target: /app
+          ignore: [Dockerfile, requirements.txt, __pycache__]
+        - action: sync+restart
+          path: ./common
+          target: /app/common
+          ignore: [requirements.txt, __pycache__]
+        - action: rebuild
+          path: ./services/ameba/requirements.txt
+        - action: rebuild
+          path: ./common/requirements.txt
+        - action: rebuild
+          path: ./services/ameba/Dockerfile
+
+  straus:
+    build:
+      context: .
+      dockerfile: services/straus/Dockerfile
+    healthcheck: *health
+    environment:
+      INTERNAL_SECRET: ${INTEGRATION_ENCRYPTION_KEY:-}
+    networks:
+      default:
+      context-egress:
+        gw_priority: 1
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./services/straus
+          target: /app
+          ignore: [Dockerfile, requirements.txt, __pycache__]
+        - action: sync+restart
+          path: ./common
+          target: /app/common
+          ignore: [requirements.txt, __pycache__]
+        - action: rebuild
+          path: ./services/straus/requirements.txt
+        - action: rebuild
+          path: ./common/requirements.txt
+        - action: rebuild
+          path: ./services/straus/Dockerfile
 
   browser:
     build:

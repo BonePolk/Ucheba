@@ -2,6 +2,7 @@ import json
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session
 
 from common.database import get_engine
@@ -15,19 +16,47 @@ DEFAULTS = {
     'gemini': {'enabled': False, 'model': 'gemini-3.8-flash', 'interval_seconds': 300,
                'confidence_threshold': 0.9, 'timezone': 'UTC', 'owner_context': ''},
     'context': {'enabled': True, 'base_url': 'https://lenec.tech/v1', 'model': 'gpt-6-luna', 'rewrite_title': False},
+    'ameba': {'enabled': False, 'model': 'gpt-6-luna'},
+    'straus': {'enabled': True, 'model': 'gpt-6-luna'},
     'codex': {'enabled': False, 'auto_prepare': False},
     'jev': {'enabled': False, 'account_id': '', 'model': 'typesafe/jev'},
 }
 SECRET_FIELDS = {
     'notifications': {'bot_token'}, 'collector': {'bot_token'},
     'telegram': {'api_id', 'api_hash', 'phone', 'session'},
-    'gemini': {'api_key'}, 'context': {'api_key'}, 'codex': set(), 'jev': {'api_token'},
+    'gemini': {'api_key'}, 'context': {'api_key'}, 'ameba': {'api_key'}, 'straus': {'api_key'}, 'codex': set(), 'jev': {'api_token'},
 }
+
+
+def inherit_agent_settings(name):
+    # Одноразовый перенос прежних общих настроек в независимые записи.
+    if name not in ('ameba', 'straus'):
+        return
+    with Session(get_engine()) as session:
+        if session.get(IntegrationSetting, name):
+            return
+        context = session.get(IntegrationSetting, 'context')
+        old = session.get(IntegrationSetting, 'jev') if name == 'ameba' else context
+        config = json.loads(old.config) if old else {}
+        inherited = dict(DEFAULTS[name], enabled=config.get('enabled', DEFAULTS[name]['enabled']))
+        if context:
+            inherited['model'] = json.loads(context.config).get('model', 'gpt-6-luna')
+        private = json.loads(decrypt(context.secrets)) if context and context.secrets else {}
+        row = IntegrationSetting(name=name, config=json.dumps(inherited),
+                                 secrets=encrypt(json.dumps({'api_key': private['api_key']})) if private.get('api_key') else '')
+        session.add(row)
+        try:
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+            if not session.get(IntegrationSetting, name):
+                raise
 
 
 def read_settings(name):
     if name not in DEFAULTS:
         raise HTTPException(404, 'Неизвестная интеграция')
+    inherit_agent_settings(name)
     with Session(get_engine()) as session:
         row = session.get(IntegrationSetting, name)
         stored = json.loads(row.config) if row else {}
@@ -66,6 +95,8 @@ def report(name, error=None, success=False):
 
 
 def public_settings():
+    for name in ('ameba', 'straus'):
+        inherit_agent_settings(name)
     from common.accounts import features
     enabled = features()
     result = {}
@@ -87,6 +118,7 @@ def public_settings():
 
 
 def read_config(name):
+    inherit_agent_settings(name)
     with Session(get_engine()) as session:
         row = session.get(IntegrationSetting, name)
         stored = json.loads(row.config) if row else {}
