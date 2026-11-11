@@ -1,5 +1,8 @@
+from common.agent_api import stream_model_response
+from common.browser_tools import BROWSER_TOOLS, BROWSER_NAMES, VISUAL_ACTIONS, run_browser_tool
+from common.agent_issues import ISSUE_TOOL, ISSUE_INSTRUCTION, report_problem
 from common.agent_memory import MEMORY_TOOLS, MEMORY_NAMES, MEMORY_INSTRUCTION, memory_tool
-from common.file_tools import FILE_TOOLS, FILE_NAMES, FILE_INSTRUCTION
+from common.file_tools import FILE_TOOLS, FILE_NAMES, FILE_INSTRUCTION, run_file_tool
 from common.agent_history import with_history
 import asyncio
 import base64
@@ -27,7 +30,7 @@ import workspace
 from browser_client import browser_request
 
 app = private_app('context')
-agent_routes(app, 'Lucheba')
+agent_routes(app, 'Monocle')
 
 
 @app.get('/work/progress')
@@ -87,87 +90,11 @@ TOOL_MESSAGES = {
 }
 
 TOOLS = [
-    {'type': 'function', 'name': 'list_user_files',
-     'description': 'Дерево личных папок и текстовых файлов владельца. Выбери подходящие документы по имени и пути и прочитай через read_user_file.',
-     'parameters': {'type': 'object', 'properties': {}, 'required': [], 'additionalProperties': False}, 'strict': True},
-    {'type': 'function', 'name': 'read_user_file',
-     'description': 'Прочитать личный текстовый файл владельца по path из list_user_files.',
-     'parameters': {'type': 'object', 'properties': {'path': {'type': 'string', 'maxLength': 500}}, 'required': ['path'], 'additionalProperties': False}, 'strict': True},
-    {'type': 'function', 'name': 'list_memory',
-     'description': 'Список файлов памяти текущего пользователя. Файлы названы по номерам задач.',
-     'parameters': {'type': 'object', 'properties': {}, 'required': [], 'additionalProperties': False},
-     'strict': True},
-    {'type': 'function', 'name': 'read_memory',
-     'description': 'Прочитать файл памяти текущего пользователя.',
-     'parameters': {'type': 'object', 'properties': {'filename': {'type': 'string'}},
-                    'required': ['filename'], 'additionalProperties': False},
-     'strict': True},
-    {'type': 'function', 'name': 'list_saved_files',
-     'description': 'Найти сохранённые файлы текущего пользователя во всех его задачах по имени или тексту. Пустой query показывает список. Возвращает task_id, id, имя, краткий preview, наличие текста и число страниц PDF. По этим данным выбери нужные документы для read_file.',
-     'parameters': {'type': 'object', 'properties': {'query': {'type': 'string', 'maxLength': 200}}, 'required': ['query'], 'additionalProperties': False}, 'strict': True},
-    {'type': 'function', 'name': 'read_file',
-     'description': 'Открыть выбранный файл текущего пользователя из каталога вложений или list_saved_files. source_task_id — task_id из каталога. Вернёт текст, изображение либо первую страницу PDF. Прикреплять сохранённый файл к текущей задаче вручную не требуется.',
-     'parameters': {'type': 'object', 'properties': {'source_task_id': {'type': 'integer', 'minimum': 1}, 'file_id': {'type': 'string'}},
-                    'required': ['source_task_id', 'file_id'], 'additionalProperties': False}, 'strict': True},
-    {'type': 'function', 'name': 'reuse_file',
+{'type': 'function', 'name': 'reuse_file',
      'description': 'Прикрепить уже сохранённый файл из другой задачи пользователя к текущей и прочитать его. Используй task_id и id из list_saved_files. Повторно скачивать из ЛК не нужно.',
      'parameters': {'type': 'object', 'properties': {'source_task_id': {'type': 'integer', 'minimum': 1}, 'file_id': {'type': 'string'}},
-                    'required': ['source_task_id', 'file_id'], 'additionalProperties': False}, 'strict': True},
-    {'type': 'function', 'name': 'view_pdf_page',
-     'description': 'Посмотреть выбранную страницу любого сохранённого PDF пользователя. source_task_id и file_id берутся из каталога. page начинается с 1. Используй для сканов, таблиц, схем и формул; прикрепление к текущей задаче не требуется.',
-     'parameters': {'type': 'object', 'properties': {'source_task_id': {'type': 'integer', 'minimum': 1}, 'file_id': {'type': 'string'}, 'page': {'type': 'integer', 'minimum': 1}},
-                    'required': ['source_task_id', 'file_id', 'page'], 'additionalProperties': False}, 'strict': True},
+                    'required': ['source_task_id', 'file_id'], 'additionalProperties': False}, 'strict': True}
 ]
-
-VISUAL_ACTIONS = {
-    'browser_screenshot': 'screenshot', 'browser_click': 'click',
-    'browser_type': 'type', 'browser_press': 'press', 'browser_scroll': 'scroll',
-    'browser_navigate': 'open', 'browser_view_image': 'image',
-}
-
-# Небольшие отдельные инструменты проще вызывать, чем один с десятком лишних полей.
-def visual_tool(name, description, properties):
-    return {'type': 'function', 'name': name, 'description': description,
-            'parameters': {'type': 'object', 'properties': properties, 'required': list(properties),
-                           'additionalProperties': False}, 'strict': True}
-
-
-BROWSER_TOOLS = [
-    visual_tool('browser_screenshot', 'Получить снимок текущего браузера. full_page=true показывает всю страницу, false — видимую область 1100×750.',
-                {'full_page': {'type': 'boolean'}}),
-    visual_tool('browser_click', 'Нажать элемент. Предпочитай target=element по id из последнего elements (id передай в name), либо role + точное name. text — точный текст. css — CSS-селектор HTML-элемента, например #submit, button.download или a[href$=".pdf"]. xpath — XPath, например //button[@type="submit"]. Выражение передай в selector. selector — прежний CSS/Playwright-вариант. coordinates — запасной вариант. Для неиспользуемых строк передай пустую строку, x/y=0.',
-                {'target': {'type': 'string', 'enum': ['element', 'role', 'text', 'css', 'xpath', 'selector', 'coordinates']},
-                 'role': {'type': 'string', 'maxLength': 40}, 'name': {'type': 'string', 'maxLength': 500},
-                 'selector': {'type': 'string', 'maxLength': 1000},
-                 'x': {'type': 'integer', 'minimum': 0, 'maximum': 1099}, 'y': {'type': 'integer', 'minimum': 0, 'maximum': 749}}),
-    visual_tool('browser_type', 'Ввести обычный текст в выбранное поле, например поиск. Пароли вводит browser_login, коды 2FA — владелец.',
-                {'text': {'type': 'string', 'maxLength': 2000}}),
-    visual_tool('browser_press', 'Нажать клавишу в браузере.',
-                {'key': {'type': 'string', 'enum': ['Enter', 'Tab', 'Escape', 'Backspace', 'Control+A', 'ArrowDown', 'ArrowUp']}}),
-    visual_tool('browser_scroll', 'Прокрутить текущую страницу и получить новый снимок. Положительное delta — вниз.',
-                {'delta': {'type': 'integer', 'minimum': -1500, 'maximum': 1500}}),
-    visual_tool('browser_navigate', 'Открыть URL либо перейти назад/вперёд. Для back/forward передай пустой url.',
-                {'action': {'type': 'string', 'enum': ['open', 'back', 'forward']}, 'url': {'type': 'string', 'maxLength': 2000}}),
-    visual_tool('browser_view_image', 'Посмотреть изображение целиком: index из списка images на странице. Либо открой прямой URL изображения (index=0). Для текущей страницы url пустой. Вложения и PDF также доступны через read_file/view_pdf_page.',
-                {'index': {'type': 'integer', 'minimum': 0, 'maximum': 99}, 'url': {'type': 'string', 'maxLength': 2000}}),
-    {'type': 'function', 'name': 'browser_sites', 'description': 'Список сохранённых личных кабинетов текущего пользователя: номера, названия и адреса без паролей. Сам выбери подходящий ЛК для задачи.',
-     'parameters': {'type': 'object', 'properties': {}, 'required': [], 'additionalProperties': False}, 'strict': True},
-    {'type': 'function', 'name': 'browser_login', 'description': 'Войти в личный кабинет по site_id из browser_sites. Браузер сам подставляет сохранённые данные, пароли модели недоступны.',
-     'parameters': {'type': 'object', 'properties': {'site_id': {'type': 'string'}}, 'required': ['site_id'], 'additionalProperties': False}, 'strict': True},
-    {'type': 'function', 'name': 'browser_read', 'description': 'Прочитать текущую страницу личного кабинета по site_id из browser_sites и список ссылок с номерами. Если требуется вход, используй browser_login.',
-     'parameters': {'type': 'object', 'properties': {'site_id': {'type': 'string'}}, 'required': ['site_id'], 'additionalProperties': False}, 'strict': True},
-    {'type': 'function', 'name': 'browser_follow', 'description': 'Прочитать страницу по номеру ссылки из последнего browser_read. Только чтение условий задач; не выбирай выход, удаление, отправку или изменение данных.',
-     'parameters': {'type': 'object', 'properties': {'site_id': {'type': 'string'}, 'index': {'type': 'integer', 'minimum': 0, 'maximum': 99}},
-                    'required': ['site_id', 'index'], 'additionalProperties': False}, 'strict': True},
-    {'type': 'function', 'name': 'browser_download', 'description': 'Скачать документ по номеру ссылки из последнего browser_read с авторизацией выбранного ЛК. Файл будет сохранён во вложениях задачи; инструмент вернёт текст для анализа. До 10 МБ, PDF/DOCX/текст/изображения.',
-     'parameters': {'type': 'object', 'properties': {'site_id': {'type': 'string'}, 'index': {'type': 'integer', 'minimum': 0, 'maximum': 99}},
-                    'required': ['site_id', 'index'], 'additionalProperties': False}, 'strict': True},
-    {'type': 'function', 'name': 'web_search', 'description': 'Поиск общедоступной информации через Google. Не включай в запрос пароли, личные переписки и приватное содержимое ЛК.',
-     'parameters': {'type': 'object', 'properties': {'query': {'type': 'string', 'maxLength': 500}}, 'required': ['query'], 'additionalProperties': False}, 'strict': True},
-    {'type': 'function', 'name': 'web_read', 'description': 'Открыть страницу в общем браузере владельца и прочитать текст. Сессии ЛК сохраняются.',
-     'parameters': {'type': 'object', 'properties': {'url': {'type': 'string', 'maxLength': 2000}}, 'required': ['url'], 'additionalProperties': False}, 'strict': True},
-]
-
 
 @app.get('/tasks/{task_id}/files')
 async def files(task_id: int):
@@ -269,7 +196,7 @@ async def luna_screen():
 @app.exception_handler(StorageConnectionError)
 async def storage_error(request: Request, exc):
     logging.getLogger('uvicorn.error').error('Silo: %s', type(exc).__name__)
-    return JSONResponse(status_code=503, content={'detail': 'Память Lucheba недоступна. Проверьте Silo и настройки доступа.'})
+    return JSONResponse(status_code=503, content={'detail': 'Память Monocle недоступна. Проверьте Silo и настройки доступа.'})
 
 
 @app.exception_handler(APIConnectionError)
@@ -278,11 +205,11 @@ async def storage_error(request: Request, exc):
 async def provider_error(request: Request, exc):
     code = getattr(exc, 'status_code', None)
     cause = type(exc.__cause__).__name__ if exc.__cause__ else 'unknown'
-    logging.getLogger('uvicorn.error').error('Lucheba: %s (API %s, transport %s)', type(exc).__name__, code or 'unknown', cause)
+    logging.getLogger('uvicorn.error').error('Monocle: %s (API %s, transport %s)', type(exc).__name__, code or 'unknown', cause)
     if isinstance(exc, APITimeoutError):
-        detail = 'Lucheba: превышено время ожидания соединения или ответа шлюза.'
+        detail = 'Monocle: превышено время ожидания соединения или ответа шлюза.'
     elif isinstance(exc, APIConnectionError):
-        detail = 'Lucheba: не удалось подключиться к шлюзу. Проверьте доступ к lenec.tech из контейнера context.'
+        detail = 'Monocle: не удалось подключиться к шлюзу. Проверьте доступ к lenec.tech из контейнера context.'
     elif isinstance(exc, ValidationError):
         # Не выводим str(exc): Pydantic включает туда содержимое ответа модели.
         errors = []
@@ -290,16 +217,16 @@ async def provider_error(request: Request, exc):
             field = next((part for part in error['loc'] if part in ('status', 'summary', 'questions')), 'JSON')
             errors.append(f"{field}: {error['type']}")
         reason = '; '.join(errors)
-        logging.getLogger('uvicorn.error').error('Lucheba: invalid context (%s)', reason)
-        detail = f'Lucheba: неверный формат итогового контекста ({reason}).'
+        logging.getLogger('uvicorn.error').error('Monocle: invalid context (%s)', reason)
+        detail = f'Monocle: неверный формат итогового контекста ({reason}).'
     else:
         detail = {
-            401: 'Lucheba: шлюз отклонил API-ключ. Обновите ключ в профиле.',
-            402: 'Lucheba: шлюз требует пополнения баланса.',
-            403: 'Lucheba: шлюз запретил доступ к модели.',
-            404: 'Lucheba: шлюз не нашёл модель или Responses API.',
-            429: 'Lucheba: превышен лимит запросов или квота шлюза.',
-        }.get(code, f'Lucheba: шлюз отклонил запрос (API {code}).')
+            401: 'Monocle: шлюз отклонил API-ключ. Обновите ключ в профиле.',
+            402: 'Monocle: шлюз требует пополнения баланса.',
+            403: 'Monocle: шлюз запретил доступ к модели.',
+            404: 'Monocle: шлюз не нашёл модель или Responses API.',
+            429: 'Monocle: превышен лимит запросов или квота шлюза.',
+        }.get(code, f'Monocle: шлюз отклонил запрос (API {code}).')
     return JSONResponse(status_code=502, content={'detail': detail})
 
 
@@ -315,16 +242,16 @@ class ContextResult(BaseModel):
 
 
 @app.post('/analyze')
-@with_history('Lucheba')
+@with_history('Monocle')
 async def analyze(body: dict):
     key = body.pop('api_key', None)
     body['_model'] = body.pop('config', {}).get('model', 'gpt-6-luna')
     if not key:
-        raise HTTPException(503, 'Сохраните личный API-ключ Lucheba в профиле')
+        raise HTTPException(503, 'Сохраните личный API-ключ Monocle в профиле')
     task_id = body.get('task_id')
     if type(task_id) is not int or task_id <= 0:
         raise HTTPException(422, 'Некорректный номер задачи')
-    with Progress('Lucheba', task_id) as progress:
+    with Progress('Monocle', task_id) as progress:
         return await analyze_task(key, task_id, body, progress)
 
 
@@ -351,14 +278,15 @@ async def run_agent(client, memory, task_id, body, progress):
     # Агент сам завершает работу итоговым ответом; число шагов не ограничиваем.
     while True:
         progress.begin_response()
-        async with client.responses.stream(
+        response = await stream_model_response(client, progress,
             model=model, reasoning={'effort': 'medium', 'summary': 'auto'}, max_output_tokens=8000,
-            instructions=MEMORY_INSTRUCTION + FILE_INSTRUCTION + NOTE_INSTRUCTION + (
+            instructions=ISSUE_INSTRUCTION + MEMORY_INSTRUCTION + FILE_INSTRUCTION + NOTE_INSTRUCTION + (
                 'Если передан review_request, Ameba просит перепроверить конкретные факты для приоритизации. '
                 'Используй previous_context как прошлую оценку, проверь причину запроса и обнови полный контекст. '
                 'Текущая дата и состояние дедлайна переданы в current_clock: используй их, а не даты старых проверок. '
                 'Даты день.месяц.год: 12.10 — 12 октября. Если deadline_passed=true, срок уже прошёл. '
-                'Ты Lucheba, агент сбора минимально достаточного контекста для последующей общей сортировки задач. Отвечай по-русски. '
+                'owner_notes — единое поле владельца: дополнительные поручения по сбору контекста, сведения и ответы на твои вопросы. Учитывай всё вместе с задачей. '
+                'Ты Monocle, агент сбора минимально достаточного контекста для последующей общей сортировки задач. Отвечай по-русски. '
                 'Твоя единственная цель — понять, что влияет на порядок выполнения: смысл задачи, срок, '
                 'последствия откладывания, обязательства и зависимости. Не выполняй задачу и не готовь план её решения. '
                 'Обычно названия, описания и уже известных фактов достаточно: тогда сразу status=ready и questions=[]. '
@@ -374,7 +302,7 @@ async def run_agent(client, memory, task_id, body, progress):
                 'Память относится к разным задачам: переноси только явно связанные факты, не переноси чужие сроки и условия. '
                 'Конфликт сведений уточняй лишь если он влияет на приоритизацию. '
                 'summary — краткие известные факты с источниками, не более 2000 символов. '
-                'Не выставляй приоритет: общий порядок определяется отдельным запросом Lucheba. '
+                'Не выставляй приоритет: общий порядок определяется отдельным запросом Monocle. '
                 'full_markdown — полный контекст для приоритизации в Markdown до 24000 символов: '
                 'исходное поручение, подтверждённые условия, сроки, последствия, обязательства, '
                 'зависимости, известный объём и готовность. Сохраняй полезные факты владельца и источников, '
@@ -434,7 +362,7 @@ async def run_agent(client, memory, task_id, body, progress):
                 'Не меняй данные ЛК, не удаляй их, не оплачивай, не сдавай работы и не отправляй сообщения. '
                 'При 2FA, CAPTCHA или недоступном входе попроси владельца завершить вход через браузер в интерфейсе. '
                 'Итог — только JSON с полями status, summary, time_estimate, effort, impact, full_markdown, questions и task_update. Не оборачивай JSON в Markdown; Markdown используй только внутри full_markdown.'),
-            input=messages, tools=TOOLS + BROWSER_TOOLS + FILE_TOOLS + MEMORY_TOOLS + [NOTE_TOOL],
+            input=messages, tools=TOOLS + BROWSER_TOOLS + FILE_TOOLS + MEMORY_TOOLS + [NOTE_TOOL, ISSUE_TOOL],
             text={'format': {
                 'type': 'json_schema', 'name': 'context_result', 'strict': True,
                 'schema': ContextResult.model_json_schema() | {'additionalProperties': False},
@@ -442,22 +370,19 @@ async def run_agent(client, memory, task_id, body, progress):
             include=['reasoning.encrypted_content'],
             tool_choice='none' if repaired else 'auto',
             parallel_tool_calls=False, store=False,
-        ) as stream:
-            async for event in stream:
-                progress.model_event(event)
-            response = await stream.get_final_response()
+        )
         progress.finish_response(response)
         if response.usage:
             usage['input_tokens'] += response.usage.input_tokens
             usage['output_tokens'] += response.usage.output_tokens
         calls = [item for item in response.output if item.type == 'function_call']
         if response.status == 'incomplete':
-            raise HTTPException(502, 'Lucheba: ответ не завершён. Возможно, исчерпан лимит токенов.')
+            raise HTTPException(502, 'Monocle: ответ не завершён. Возможно, исчерпан лимит токенов.')
         if not calls:
             if any(part.type == 'refusal' for item in response.output if item.type == 'message' for part in item.content):
-                raise HTTPException(502, 'Lucheba отказалась обрабатывать этот запрос.')
+                raise HTTPException(502, 'Monocle отказалась обрабатывать этот запрос.')
             if not response.output_text:
-                raise HTTPException(502, 'Lucheba не вернула структурированный контекст')
+                raise HTTPException(502, 'Monocle не вернула структурированный контекст')
             # Промежуточный текст рядом с вызовом инструмента не является итогом.
             text = response.output_text.strip().lstrip('\ufeff')
             if text.startswith('```') and text.endswith('```'):
@@ -468,7 +393,7 @@ async def run_agent(client, memory, task_id, body, progress):
                 if repaired:
                     raise
                 repaired = True
-                logging.getLogger('uvicorn.error').warning('Lucheba: retrying invalid final JSON')
+                logging.getLogger('uvicorn.error').warning('Monocle: retrying invalid final JSON')
                 messages.extend(response.output)
                 messages.append({'role': 'user', 'content':
                     'Исправь формат последнего ответа. Верни только JSON: '
@@ -493,83 +418,28 @@ async def run_agent(client, memory, task_id, body, progress):
         messages.extend(response.output)
         extra_content = []
         for call in calls:
-            if call.name != 'agent_note':
-                progress.add(TOOL_MESSAGES.get(call.name, 'Проверяет запрошенный инструмент'))
+            if call.name != 'agent_note' and call.name not in BROWSER_NAMES:
+                progress.add(TOOL_MESSAGES.get(call.name, 'Проверяет запрошенный инструмент'), description='Собирает сведения, влияющие на сроки, объём работы и последствия задачи.')
             try:
                 args = json.loads(call.arguments)
                 if call.name == 'agent_note':
                     output = progress.note(call.arguments)
+                elif call.name == 'report_tool_problem':
+                    progress.add('Сообщает администратору о технической проблеме', description='Передаёт категорию сбоя для диагностики; само поручение этим не завершается.')
+                    output = await report_problem(args, 'Monocle')
                 elif call.name in MEMORY_NAMES:
-                    output = await memory_tool(call.name, args, 'Lucheba')
+                    progress.add('Читает общую память' if call.name == 'read_user_memory' else 'Запоминает факт о владельце', description='Использует или сохраняет подтверждённые факты владельца для следующих поручений.')
+                    output = await memory_tool(call.name, args, 'Monocle')
                 elif call.name in FILE_NAMES:
-                    progress.add({'download_file': 'Скачивает файл через Python', 'python_http_request': 'Отправляет HTTP-запрос через Python',
-                                  'read_download': 'Читает сохранённый файл', 'list_downloads': 'Просматривает сохранённые загрузки',
-                                  'python_binary': 'Разбирает бинарный файл через Python'}[call.name])
-                    output = await browser_request('/files', {'action': call.name, **args})
-                    image = output.pop('image', None)
-                    if image:
-                        extra_content.append({'type': 'input_image', 'image_url': f"data:{output.get('mime', 'image/jpeg')};base64,{image}", 'detail': 'high'})
-                elif call.name == 'list_user_files':
-                    output = await asyncio.to_thread(workspace.tree, memory, False)
-                elif call.name == 'read_user_file':
-                    path = args.get('path')
-                    workspace.personal_path(path)
-                    output = await asyncio.to_thread(workspace.read, memory, path)
-                    output = {'path': path, 'content': output['content'][:materials.TEXT_LIMIT],
-                              'truncated': len(output['content']) > materials.TEXT_LIMIT}
-                    progress.add(f'Читает личный файл: {path}')
-                elif call.name == 'list_memory':
-                    output = await asyncio.to_thread(memory.list_files)
-                elif call.name == 'read_memory':
-                    output = await asyncio.to_thread(memory.read, args.get('filename'))
-                elif call.name == 'list_saved_files':
-                    output = await asyncio.to_thread(materials.saved_files, memory, args.get('query', ''))
-                elif call.name == 'read_file':
-                    source_task_id, file_id = args.get('source_task_id'), args.get('file_id')
-                    info = await asyncio.to_thread(materials.get_info, memory, source_task_id, file_id)
-                    progress.add(f"Читает файл: {info['name']}")
-                    extra_content.extend(await asyncio.to_thread(materials.file_input, memory, source_task_id, file_id))
-                    output = {'status': 'read_file', 'file': materials.public_info(info),
-                              'url': f'/api/integrations/context/files/{source_task_id}/{file_id}'}
+                    output, content = await run_file_tool(call.name, args, browser_request, progress)
+                    extra_content.extend(content)
                 elif call.name == 'reuse_file':
                     file = await asyncio.to_thread(materials.reuse, memory, task_id, args.get('source_task_id'), args.get('file_id'))
                     extra_content.extend(await asyncio.to_thread(materials.file_input, memory, task_id, file['id']))
                     output = {'status': 'saved_file', 'file': file,
                               'url': f"/api/integrations/tasks/{task_id}/context/files/{file['id']}"}
-                elif call.name == 'view_pdf_page':
-                    source_task_id, file_id, page_number = args.get('source_task_id'), args.get('file_id'), args.get('page')
-                    info = await asyncio.to_thread(materials.get_info, memory, source_task_id, file_id)
-                    if type(page_number) is int:
-                        progress.add(f"PDF: {info['name']}, страница {page_number}")
-                    extra_content.extend(await asyncio.to_thread(materials.pdf_page, memory, source_task_id, file_id, page_number))
-                    output = {'status': 'page_image', 'page': page_number, 'file_id': file_id,
-                              'file': materials.public_info(info),
-                              'url': f'/api/integrations/context/files/{source_task_id}/{file_id}'}
-                elif call.name == 'browser_sites':
-                    output = await browser_request('/sites', method='GET')
-                elif call.name in ('browser_login', 'browser_read', 'browser_follow', 'browser_download'):
-                    action = {'browser_login': 'login', 'browser_read': 'read', 'browser_follow': 'follow', 'browser_download': 'download'}[call.name]
-                    output = await browser_request('/agent', {'site_id': args.get('site_id'), 'action': action,
-                                                              'index': args.get('index', 0)})
-                elif call.name in VISUAL_ACTIONS:
-                    values = dict(args)
-                    action = values.pop('action', VISUAL_ACTIONS[call.name])
-                    if call.name == 'browser_press':
-                        values['text'] = values.pop('key')
-                    if call.name == 'browser_click':
-                        if args.get('target') == 'element':
-                            target = browser_elements.get(args.get('name'), 'элемент #' + str(args.get('name')))
-                        elif args.get('target') in ('selector', 'css', 'xpath'):
-                            target = args.get('selector') or 'элемент по селектору'
-                        else:
-                            target = args.get('name') or f"координаты ({args.get('x')}, {args.get('y')})"
-                        progress.add(f'Нажимает: {target[:500]}')
-                    output = await browser_request('/visual', {'action': action, **values})
-                    if output.get('clicked'):
-                        progress.add(f"Нажат элемент: {output['clicked']}")
-                elif call.name in ('web_search', 'web_read'):
-                    output = await browser_request('/web', {'action': 'search' if call.name == 'web_search' else 'read',
-                                                            'query': args.get('query', ''), 'url': args.get('url', '')})
+                elif call.name in BROWSER_NAMES:
+                    output = await run_browser_tool(call.name, args, browser_request, progress, browser_elements)
                 else:
                     output = {'error': 'Неизвестный инструмент'}
                 if isinstance(output, dict) and 'elements' in output:
@@ -602,3 +472,9 @@ async def run_agent(client, memory, task_id, body, progress):
                              'output': json.dumps(output, ensure_ascii=False)})
         if extra_content:
             messages.append({'role': 'user', 'content': extra_content})
+
+
+@app.post('/library/tool')
+async def library_tool(body: dict):
+    from library import run
+    return await run(body['name'], body['arguments'])

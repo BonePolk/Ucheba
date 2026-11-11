@@ -49,7 +49,7 @@ def tree(memory, include_attachments=True):
                        'folder': path.endswith('/'), 'editable': not path.endswith('/'), 'size': item.size})
     if not include_attachments:
         return result
-    # Показываем все вложения, включая убранные из задачи, без лимита поиска Lucheba.
+    # Показываем все вложения, включая убранные из задачи, без лимита поиска Monocle.
     for item in memory.client.list_objects(memory.bucket, prefix=memory.prefix + 'attachments/', recursive=True):
         match = re.fullmatch(r'attachments/task-([1-9][0-9]*)/([a-f0-9]{32})\.json', item.object_name[len(memory.prefix):])
         if not match:

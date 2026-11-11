@@ -19,7 +19,7 @@ export const statuses = [
   { value: 'done', label: 'Выполнено' },
 ];
 
-export default function TaskForm({ task, onClose, onSubmit, pending, error, allowAutomation = false }) {
+export default function TaskForm({ task, onClose, onSubmit, pending, error, allowAutomation = false, allowContext = false }) {
   const [openAutomation, setOpenAutomation] = useState(false);
   const form = useForm({
     initialValues: {
@@ -29,6 +29,7 @@ export default function TaskForm({ task, onClose, onSubmit, pending, error, allo
       priority: task?.priority ?? 'medium',
       status: task?.status ?? 'todo',
       category: task?.category ?? '',
+      ...(!task && allowContext ? { agent_notes: '' } : {}),
     },
     validate: { title: (value) => value.trim() ? null : 'Укажите название' },
   });
@@ -45,6 +46,7 @@ export default function TaskForm({ task, onClose, onSubmit, pending, error, allo
         <Stack>
           <TextInput label="Название" required {...form.getInputProps('title')} />
           <Textarea label="Описание" autosize minRows={3} {...form.getInputProps('description')} />
+          {!task && allowContext && <Textarea label="Заметки для Monocle" placeholder="Что проверить, где искать сведения, что учесть" autosize minRows={2} maxLength={12000} {...form.getInputProps('agent_notes')} />}
           <DateTimePicker label="Дедлайн" placeholder="Выберите дату и время" valueFormat="DD.MM.YYYY HH:mm" clearable {...form.getInputProps('deadline')} />
           <Select label="Приоритет" data={priorities} allowDeselect={false} {...form.getInputProps('priority')} />
           <Select label="Статус" data={statuses} allowDeselect={false} {...form.getInputProps('status')} />

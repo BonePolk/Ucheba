@@ -1,9 +1,10 @@
+import AgentProblemReport from './AgentProblemReport';
 import { useEffect, useRef, useState } from 'react';
 import { Alert, Anchor, Badge, Button, Group, Modal, NumberInput, Paper, Select, Stack, Text, Textarea, TextInput, Title, Tooltip } from '@mantine/core';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { agentRequest, request } from './api';
 import AgentProgress from './AgentProgress';
-import LuchebaBrowser from './LuchebaBrowser';
+import MonocleBrowser from './LuchebaBrowser';
 
 const colors = { task: '#7f49b4', busy: '#326b94', sleep: '#42465d', meal: '#8a6737', break: '#367567', work: '#45513e' };
 const names = { task: 'Задача', busy: 'Занятость', sleep: 'Сон', meal: 'Еда', break: 'Отдых', work: 'Рабочее время' };
@@ -142,8 +143,9 @@ export default function Calendar({ features = {} }) {
       <Textarea label="Поручение Straus" placeholder="Например: найди расписание моей группы в ЛК и добавь пары на следующие две недели" value={command} onChange={(change) => setCommand(change.currentTarget.value)} autosize minRows={2} maxLength={12000} disabled={busy} />
       <Group><Button variant="light" size="xs" disabled={!command.trim() || busy || status.isPending || status.isError} onClick={() => { stop.reset(); editAgent.mutate(); }}>Изменить календарь</Button>{status.data?.running && <Button size="xs" color="red" variant="light" loading={stop.isPending} onClick={() => stop.mutate()}>Остановить Straus</Button>}<Anchor size="xs" href="/profile">Личные кабинеты и настройки агента</Anchor></Group>
       {editAgent.isSuccess && (editAgent.data?.changed ? <Text size="xs" c="green">Календарь обновлён.</Text> : <Alert color={editAgent.data?.status === 'blocked' ? 'yellow' : 'gray'} title={editAgent.data?.status === 'blocked' ? 'Изменения не внесены' : 'Изменения не нужны'}>{editAgent.data?.reason}</Alert>)}
+      {(editAgent.error || (editAgent.isSuccess && editAgent.data?.status === 'blocked')) && <AgentProblemReport agent="Straus" toolName="calendar_edit" />}
       {status.data?.error && !busy && <Alert color="yellow">{status.data.error}</Alert>}
-      <AgentProgress providers={['context']} active={busy} /><LuchebaBrowser active={busy} />
+      <AgentProgress providers={['context']} active={busy} /><MonocleBrowser active={busy} />
     </>}
     {(save.error || editAgent.error || stop.error) && !editor && <Alert color="red">{(save.error || editAgent.error || stop.error).message}</Alert>}
     <Modal opened={Boolean(editor)} onClose={() => setEditor(null)} title="Событие" centered>

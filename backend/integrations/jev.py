@@ -63,7 +63,7 @@ def ranking_status():
 
 async def request_ranking(tasks, task_id=0, checked_contexts=()):
     # Старый вариант через локальную Jeba сохранён для возврата к нему.
-    # Чтобы включить его, раскомментируй этот return и отключи код Lucheba ниже.
+    # Чтобы включить его, раскомментируй этот return и отключи код Monocle ниже.
     # return await call('jev', '/rank', {
     #     'tasks': [{key: task[key] for key in ('id', 'ranking_summary', 'deadline', 'priority')}
     #               for task in tasks],
@@ -152,7 +152,7 @@ async def evaluate(task_id=None):
 
 
 async def check_model():
-    # Проверка подключения по кнопке в профиле, без обращений к Lucheba.
+    # Проверка подключения по кнопке в профиле, без обращений к Monocle.
     now = datetime.now(timezone.utc)
     result = await request_ranking([
         {'id': 1, 'title': 'Обновить оформление внутренней презентации',
@@ -176,7 +176,7 @@ async def evaluate_task(task_id):
             raise HTTPException(404, 'Задача не найдена')
         original = snapshot(task)
     context = await prepare(task_id)
-    # Lucheba могла уточнить поля задачи. Дальше сравниваем уже с её результатом.
+    # Monocle могла уточнить поля задачи. Дальше сравниваем уже с её результатом.
     original = context['task_snapshot']
     if context['status'] != 'ready':
         metrics = {'version': 24, 'status': 'needs_context', 'reason': ' '.join(context['questions'])}

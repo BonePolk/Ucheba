@@ -15,11 +15,27 @@ subscribers = {}
 
 NOTE_TOOL = {
     'type': 'function', 'name': 'agent_note', 'strict': True,
-    'description': 'По желанию сообщить владельцу короткое публичное пояснение: что сейчас проверяешь или собираешься сделать. Это не скрытые рассуждения.',
+    'description': 'Кратко объяснить владельцу действие и его цель. При неудаче: что не получилось, почему (если известно) и что может сделать владелец. Пиши по-русски. Это не скрытые рассуждения.',
     'parameters': {'type': 'object', 'properties': {'text': {'type': 'string'}},
                    'required': ['text'], 'additionalProperties': False},
 }
-NOTE_INSTRUCTION = 'По желанию используй agent_note для короткого публичного сообщения о текущем шаге. Не раскрывай скрытые рассуждения. Это необязательно и не заменяет работу инструментами. '
+NOTE_INSTRUCTION = (
+    'Описывай работу через agent_note: перед первым действием коротко сообщи план, '
+    'при смене подхода — что проверяешь и зачем, в конце — результат или препятствие. '
+    'Если инструмент не сработал, не ограничивайся технической записью: объясни владельцу '
+    'простыми словами, какое действие не удалось, что поэтому осталось несделанным и что '
+    'ты попробуешь дальше. Подтверждённую причину отделяй от предположения; если причина '
+    'неизвестна, прямо скажи это. Не утверждай, что действие выполнено, если оно не удалось. '
+    'Когда владелец может помочь, назови конкретное действие: завершить вход/2FA, '
+    'уточнить группу или ссылку, приложить файл, прислать другой формат или ответить на вопрос. '
+    'Не отправляй его к администратору, если достаточно такого действия. '
+    'Сообщение администратору не заменяет объяснение владельцу. Не повторяй одну ошибку '
+    'без новых данных и не обещай исправление, которого не было. '
+    'Пиши кратко по-русски, не дублируй каждую строку технического журнала. '
+    'Поясняй свой выбор применительно к текущему поручению, не давай справку о том, как работают команды или инструменты. '
+    'Это публичные пояснения действий, не скрытые рассуждения; секреты не раскрывай. '
+)
+
 
 
 def timestamp():
@@ -62,7 +78,9 @@ class Progress:
     def __init__(self, agent, task_id=0, namespace='agent'):
         self.key = (user_id(), task_id, namespace)
         self.record = {'id': uuid4().hex, 'agent': agent, 'task_id': task_id,
-                       'status': 'running', 'started_at': timestamp(), 'events': []}
+                       'status': 'running', 'started_at': timestamp(), 'events': [],
+                       'current_action': 'Подготавливает поручение',
+                       'action_description': 'Собирает входные сведения и настройки для начала работы.'}
         self.sequence = 0
         self.summary_key = None
         self.usage_totals = {'input_tokens': None, 'output_tokens': None}
@@ -80,16 +98,25 @@ class Progress:
                 if records[key]['status'] != 'running':
                     del records[key]
         notify(self.key[0])
-        if self.record['agent'] not in ('Lucheba', 'Jeba', 'Ameba'):
+        if self.record['agent'] not in ('Monocle', 'Jeba', 'Ameba'):
             self.add('Начало работы')
         return self
 
-    def add(self, message):
+    def add(self, message, current=True, description=None, kind=None):
         with records_lock:
             self.sequence += 1
-            self.record['events'].append({'id': self.sequence, 'at': timestamp(), 'message': message})
+            event = {'id': self.sequence, 'at': timestamp(), 'message': message}
+            if description:
+                event['description'] = description
+            if kind:
+                event['kind'] = kind
+            self.record['events'].append(event)
             self.record['events'] = self.record['events'][-100:]
             self.record['last_activity_at'] = timestamp()
+            if current:
+                self.record['current_action'] = message
+                self.record['action_description'] = description
+                self.record['action_started_at'] = timestamp()
         notify(self.key[0])
 
     def update(self, **values):
@@ -100,14 +127,15 @@ class Progress:
     def begin_response(self):
         self.response_number += 1
         self.reasoning_key = None
-        self.update(model_waiting=True, current_usage_known=False,
+        self.update(model_waiting=True, current_action=None, action_description=None, action_started_at=None, current_usage_known=False,
                     reasoning_text='', response_event_start=self.sequence, last_activity_at=timestamp())
 
     def note(self, arguments):
         text = json.loads(arguments).get('text')
         if not isinstance(text, str) or not text.strip() or len(text) > 500:
             return {'error': 'Нужно краткое текстовое пояснение до 500 символов'}
-        self.add(text.strip())
+        self.update(agent_comment=text.strip())
+        self.add(text.strip(), current=False, kind='note')
         return {'ok': True}
 
     def finish_response(self, response):
@@ -122,7 +150,7 @@ class Progress:
                     self.usage_totals[name] = value if previous is None else previous + value
             if any(type(getattr(usage, name, None)) is int for name in self.usage_totals):
                 self.update(token_usage=dict(self.usage_totals), current_usage_known=True)
-        self.update(model_waiting=False)
+        self.update(model_waiting=False, current_action='Обрабатывает ответ модели', action_description='Проверяет ответ и готовит следующий шаг или итог.', action_started_at=timestamp())
 
     def model_event(self, event):
         self.update(last_activity_at=timestamp())
@@ -155,10 +183,11 @@ class Progress:
     def __exit__(self, kind, error, traceback):
         status = self.record.get('outcome', 'completed') if kind is None else 'failed' if isinstance(error, Exception) else 'interrupted'
         message = {'completed': 'Работа завершена', 'failed': 'Операция завершилась ошибкой', 'interrupted': 'Работа прервана', 'blocked': 'Нужны данные или доступ', 'unchanged': 'Календарь уже соответствует поручению'}[status]
-        if self.record['agent'] not in ('Lucheba', 'Jeba', 'Ameba'):
+        if self.record['agent'] not in ('Monocle', 'Jeba', 'Ameba'):
             self.add(message)
         with records_lock:
             self.record['model_waiting'] = False
+            self.record['current_action'] = None
             self.record['status'] = status
             self.record['finished_at'] = timestamp()
         notify(self.key[0])

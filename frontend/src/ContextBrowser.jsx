@@ -62,15 +62,15 @@ export default function ContextBrowser({ taskId, disabled, initialSiteId = null 
   return <Stack gap="xs">
     <Button variant="default" onClick={() => setOpened(!opened)}>{opened ? 'Скрыть браузер ЛК' : 'Браузер личного кабинета'}</Button>
     <Collapse in={opened}><Stack gap="sm">
-      <Text size="sm">Lucheba сама выбирает подходящий кабинет из сохранённых и может искать информацию в Google. Здесь можно выбрать ЛК для ручного просмотра и как подсказку агенту. Пароль подставляет браузер; модель его не получает.</Text>
-      <Select label="Личный кабинет для просмотра / подсказки Lucheba" placeholder="Lucheba выберет кабинет сама" clearable value={available ? siteId : null} data={(sites.data ?? []).map((site) => ({ value: site.id, label: site.name }))} disabled={busy || sites.isPending} onChange={(id) => select.mutate(id)} />
+      <Text size="sm">Monocle сама выбирает подходящий кабинет из сохранённых и может искать информацию в Google. Здесь можно выбрать ЛК для ручного просмотра и как подсказку агенту. Пароль подставляет браузер; модель его не получает.</Text>
+      <Select label="Личный кабинет для просмотра / подсказки Monocle" placeholder="Monocle выберет кабинет сама" clearable value={available ? siteId : null} data={(sites.data ?? []).map((site) => ({ value: site.id, label: site.name }))} disabled={busy || sites.isPending} onChange={(id) => select.mutate(id)} />
       <Button variant="subtle" disabled={busy} onClick={() => setFormOpened(!formOpened)}>Добавить личный кабинет</Button>
       {formOpened && <Stack gap="xs">
         <TextInput label="Название" placeholder="Например: ЛК университета" value={credentials.name} onChange={field('name')} maxLength={100} />
         <TextInput label="Адрес страницы входа" placeholder="http://ibks.spbstu.ru:3508" value={credentials.url} onChange={field('url')} autoComplete="off" />
         <TextInput label="Логин ЛК" value={credentials.username} onChange={field('username')} autoComplete="off" />
         <PasswordInput label="Пароль ЛК" value={credentials.password} onChange={field('password')} autoComplete="new-password" />
-        <Button disabled={busy || !credentials.name || !credentials.url || !credentials.username || !credentials.password} onClick={() => save.mutate()}>Сохранить и разрешить Lucheba вход</Button>
+        <Button disabled={busy || !credentials.name || !credentials.url || !credentials.username || !credentials.password} onClick={() => save.mutate()}>Сохранить и разрешить Monocle вход</Button>
       </Stack>}
       {available && <>
         <Group>
@@ -81,7 +81,7 @@ export default function ContextBrowser({ taskId, disabled, initialSiteId = null 
             if (window.confirm('Удалить сохранённый вход? Все браузерные сессии твоего аккаунта будут очищены.')) forget.mutate();
           }}>Забыть вход</Button>
         </Group>
-        <Text size="xs" c="dimmed">Для 2FA и CAPTCHA используй снимок: нажми на поле, введи значение ниже и нажми «Ввести». Пароль и код не отправляются Lucheba.</Text>
+        <Text size="xs" c="dimmed">Для 2FA и CAPTCHA используй снимок: нажми на поле, введи значение ниже и нажми «Ввести». Пароль и код не отправляются Monocle.</Text>
         {live.error && <Text size="xs" c="yellow">Переподключаем экран браузера…</Text>}
         {screen?.notice && <Alert>{screen.notice.reason}</Alert>}
         {(screen?.image || live.frame?.image) && <>

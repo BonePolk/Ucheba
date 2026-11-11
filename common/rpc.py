@@ -36,7 +36,7 @@ async def call(service, path, body=None, method='POST', timeout=90):
                 check_feature('context')
         else:
             check_feature(service)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(timeout=timeout, transport=httpx.AsyncHTTPTransport(retries=1)) as client:
         host = 'lucheba' if service == 'context' else service
         try:
             response = await client.request(method, f'http://{host}:8000{path}',
@@ -44,7 +44,7 @@ async def call(service, path, body=None, method='POST', timeout=90):
         except httpx.HTTPError as exc:
             # Не выводим тело запроса: в нём могут быть ключи и личные данные.
             logging.getLogger('uvicorn.error').warning('%s: %s', host, type(exc).__name__)
-            label = {'straus': 'Straus', 'context': 'Lucheba', 'ameba': 'Ameba'}.get(service, service)
+            label = {'straus': 'Straus', 'context': 'Monocle', 'ameba': 'Ameba'}.get(service, service)
             if isinstance(exc, httpx.TimeoutException):
                 detail = f'{label}: истекло время ожидания сервиса. Повторите запрос.'
             elif isinstance(exc, httpx.ConnectError):

@@ -70,7 +70,7 @@ function IntegrationForms({ data, features }) {
     {error && <Alert color="red">{error.message}</Alert>}
     {notice && <Alert color="purple" withCloseButton onClose={() => setNotice('')}>{notice}</Alert>}
     <SimpleGrid cols={{ base: 1, md: 2 }}>
-      {features.context !== false && <AgentSettings name="context" title="Lucheba" description="Собирает контекст задачи. Отдельный сервис, ключ и модель." data={data.context} />}
+      {features.context !== false && <AgentSettings name="context" title="Monocle" description="Собирает контекст задачи. Отдельный сервис, ключ и модель." data={data.context} />}
       {features.ameba !== false && data.ameba && <AgentSettings name="ameba" title="Ameba" description="Планирует время и результат, расставляет задачи по важности." data={data.ameba} />}
       {features.straus !== false && data.straus && <AgentSettings name="straus" title="Straus" description="Изменяет календарь по твоему поручению, сам выбирает ЛК и ищет сведения в интернете." data={data.straus} />}
 

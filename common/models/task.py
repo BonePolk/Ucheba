@@ -19,6 +19,7 @@ class TaskCreate(SQLModel):
     priority: Priority = "medium"
     status: TaskStatus = "todo"
     category: str | None = None
+    agent_notes: str = Field(default="", max_length=12000)
 
     @field_validator("deadline")
     @classmethod

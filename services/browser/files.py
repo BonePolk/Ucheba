@@ -16,6 +16,7 @@ from pypdf import PdfReader
 import pypdfium2 as pdfium
 
 from common.identity import user_id
+from common.office import spreadsheet_text
 
 LIMIT = 10 * 1024 * 1024
 
@@ -51,6 +52,7 @@ def archive(content):
         result.close()
         raise ValueError('Слишком большой распакованный архив')
     return result
+
 
 
 def read(file_id, page=1):
@@ -89,13 +91,17 @@ def read(file_id, page=1):
     elif suffix in ('.docx', '.xlsx', '.pptx', '.zip') or content.startswith(b'PK\x03\x04'):
         with archive(content) as zipped:
             result['members'] = zipped.namelist()[:200]
-            texts = []
-            for member in zipped.namelist():
-                if member.endswith('.xml') and member.startswith(('word/', 'xl/', 'ppt/')):
-                    texts.append(member + '\n' + ' '.join(ElementTree.fromstring(zipped.read(member)).itertext()))
-                    if sum(map(len, texts)) > 40000:
-                        break
-            result['text'] = '\n'.join(texts)[:40000]
+            if suffix == '.xlsx' or 'xl/workbook.xml' in zipped.namelist():
+                result['text'] = spreadsheet_text(zipped)
+                result['notice'] = 'Формулы не выполняются; показаны сохранённые значения. Числа дат/времени могут быть в исходном представлении Excel.'
+            else:
+                texts = []
+                for member in zipped.namelist():
+                    if re.fullmatch(r'word/(document|header[0-9]+|footer[0-9]+|footnotes|endnotes)\.xml|ppt/slides/slide[0-9]+\.xml', member):
+                        texts.append(member + '\n' + ' '.join(ElementTree.fromstring(zipped.read(member)).itertext()))
+                        if sum(map(len, texts)) > 40000:
+                            break
+                result['text'] = '\n'.join(texts)[:40000]
     elif content.startswith(bytes.fromhex('d0cf11e0a1b11ae1')):
         result['notice'] = ('Старый бинарный Office OLE (например DOC/XLS). Этот формат здесь не декодируется. '
                             'Не пытайся разбирать его повторными hex/struct-вызовами: найди PDF/DOCX/XLSX '
@@ -120,7 +126,7 @@ async def request_file(args, tab, validate_url, safe_url):
     mime = args.get('content_type', '')
     if len(body) > 40000 or mime not in ('', 'application/json', 'application/x-www-form-urlencoded', 'text/plain'):
         raise ValueError('Недопустимые параметры HTTP')
-    async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
+    async with httpx.AsyncClient(timeout=30, follow_redirects=False, transport=httpx.AsyncHTTPTransport(retries=1)) as client:
         for _ in range(6):
             await validate_url(url)
             cookies = await tab.context.cookies(url)

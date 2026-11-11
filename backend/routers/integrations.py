@@ -536,7 +536,9 @@ async def answer_context(task_id: int, body: ContextAnswer, background: bool = F
     check_feature('context')
     context.save_answer(task_id, body.subject, body.answer)
     if not features()['ameba'] or not read_settings('ameba')[0]['enabled']:
-        return {'status': 'saved'}
+        if background:
+            return jobs.start(lambda: provider_call('context', context.prepare(task_id, force=True)))
+        return await provider_call('context', context.prepare(task_id, force=True))
     if background:
         return jobs.start(lambda: provider_call('ameba', jev.evaluate(task_id)))
     return await provider_call('ameba', jev.evaluate(task_id))

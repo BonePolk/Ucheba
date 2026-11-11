@@ -110,12 +110,14 @@ def get_task(task_id: int):
 @router.post("", response_model=Task, status_code=201)
 def create_task(data: TaskCreate):
     with Session(get_engine()) as session:
-        task = Task.model_validate(data)
+        task = Task.model_validate(data.model_dump(exclude={'agent_notes'}))
         session.add(task)
-        session.commit()
-        session.refresh(task)
+        session.flush()
+        if data.agent_notes.strip():
+            session.add(TaskContext(task_id=task.id, owner_notes=data.agent_notes.strip()))
         session.add(TaskAction(task_id=task.id, action='create'))
         session.commit()
+        session.refresh(task)
         return task
 
 
@@ -126,6 +128,14 @@ def update_task(task_id: int, data: TaskUpdate):
         if task is None:
             raise HTTPException(404, "Задача не найдена")
         changes = data.model_dump(exclude_unset=True)
+        notes = changes.pop('agent_notes', None)
+        if notes is not None:
+            row = session.get(TaskContext, task_id) or TaskContext(task_id=task_id)
+            row.owner_notes = notes.strip()
+            row.status = 'new'
+            row.updated_at = datetime.now(timezone.utc)
+            task.ai_score = task.ai_details = task.ai_scored_at = None
+            session.add(row)
         task.sqlmodel_update(changes)
         if set(changes) & {'title', 'description', 'deadline', 'priority', 'status', 'category'}:
             task.ai_score = task.ai_details = task.ai_scored_at = None

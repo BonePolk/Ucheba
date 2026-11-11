@@ -82,7 +82,7 @@ def rank_local(tasks, now, progress):
                 # system_one сообщает об обрезании: такой результат использовать нельзя.
                 if result['usage'].get('truncated'):
                     raise HTTPException(422, 'Сводки не поместились в окно Jeba. '
-                                        'Повторите проверку Lucheba с просьбой сделать сводку короче.')
+                                        'Повторите проверку Monocle с просьбой сделать сводку короче.')
                 result = result['answers']['first']
             finally:
                 hook.remove()

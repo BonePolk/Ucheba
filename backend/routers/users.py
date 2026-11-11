@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from agent_memory import FactInput
+from agent_issues import IssueInput
 
 from common.accounts import account, check_feature, features, passwords, public_user
 from common.database import engine, user_engine
@@ -173,8 +174,39 @@ async def agent_memory_internal(request: Request):
         if request.method == 'GET':
             return read()
         body = await request.json()
-        if body.get('agent') not in ('Straus', 'Lucheba', 'Ameba'):
+        if body.get('agent') not in ('Straus', 'Monocle', 'Lucheba', 'Ameba'):
             raise HTTPException(422, 'Неизвестный агент')
         return save(body, body['agent'])
     finally:
         current_user_id.reset(token)
+
+
+@router.post('/agent-issues/internal')
+async def report_agent_issue(request: Request):
+    from common.rpc import require_service
+    from common.identity import current_user_id
+    from agent_issues import IssueInput, report
+    token = current_user_id.set(require_service(request, 'context'))
+    try:
+        return report(IssueInput.model_validate(await request.json()))
+    finally:
+        current_user_id.reset(token)
+
+
+@admin.get('/agent-issues')
+def admin_agent_issues():
+    from agent_issues import list_issues
+    return list_issues()
+
+
+@admin.post('/agent-issues/{issue_id}/resolve')
+def resolve_agent_issue(issue_id: int):
+    from agent_issues import resolve
+    return resolve(issue_id)
+
+
+@router.post('/agent-issues')
+def report_own_agent_issue(body: IssueInput, request: Request):
+    require_user(request)
+    from agent_issues import report
+    return report(body)

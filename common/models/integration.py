@@ -132,3 +132,14 @@ class AgentFact(SQLModel, table=True):
     text: str
     agent: str
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class AgentIssue(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    owner_id: int = Field(index=True)
+    agent: str
+    tool_name: str
+    category: str
+    occurrences: int = 1
+    resolved: bool = False
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

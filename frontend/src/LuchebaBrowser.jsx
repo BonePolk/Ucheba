@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Alert, Button, Collapse, Group, Modal, Paper, Stack, Text } from '@mantine/core';
 import useBrowserScreen from './useBrowserScreen';
 
-export default function LuchebaBrowser({ active = false }) {
+export default function MonocleBrowser({ active = false }) {
   const [opened, setOpened] = useState(() => new URLSearchParams(window.location.search).get('browser') === '1');
   const [expanded, setExpanded] = useState(false);
   useEffect(() => { if (active) setOpened(true); }, [active]);

@@ -138,7 +138,7 @@ async def prepare_task(task_id, force=False, review_request=""):
                                'owner_notes': item.owner_notes[:6000]})
     config, secrets = read_settings('context')
     if not config['enabled'] or not secrets.get('api_key'):
-        raise HTTPException(400, 'В профиле включите Lucheba и сохраните API-ключ')
+        raise HTTPException(400, 'В профиле включите Monocle и сохраните API-ключ')
     result = await call('context', '/analyze', {
         'config': config, 'api_key': secrets['api_key'],
         'task_id': task_id, 'task': json.loads(task_state), 'subject': subject,
@@ -179,7 +179,7 @@ async def prepare_task(task_id, force=False, review_request=""):
             'time_estimate': result['time_estimate'], 'effort': result['effort'], 'impact': result['impact'],
         })
         row.updated_at = datetime.now(timezone.utc)
-        # Старое «ждёт ответов» больше не описывает свежую проверку Lucheba.
+        # Старое «ждёт ответов» больше не описывает свежую проверку Monocle.
         task.ai_score = task.ai_details = task.ai_scored_at = None
         session.add(task)
         session.add(row)

@@ -8,6 +8,8 @@ import re
 from threading import Lock
 from uuid import uuid4
 from zipfile import ZipFile
+from xml.etree import ElementTree
+from common.office import spreadsheet_text
 
 from docx import Document
 from fastapi import HTTPException
@@ -176,6 +178,21 @@ def extract(name, content):
             for table in document.tables:
                 parts.extend(' | '.join(cell.text for cell in row.cells) for row in table.rows)
             return 'text', '\n'.join(parts)[:TEXT_LIMIT], 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        if suffix in ('.xlsx', '.pptx'):
+            with ZipFile(stream) as archive:
+                if len(archive.infolist()) > 2000 or sum(item.file_size for item in archive.infolist()) > 20 * 1024 * 1024:
+                    raise ValueError()
+                if suffix == '.xlsx':
+                    text = spreadsheet_text(archive)
+                    mime = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                else:
+                    parts = []
+                    for member in sorted(archive.namelist()):
+                        if re.fullmatch(r'ppt/slides/slide[0-9]+\.xml', member):
+                            parts.append(' '.join(ElementTree.fromstring(archive.read(member)).itertext()))
+                    text = '\n'.join(parts)[:TEXT_LIMIT]
+                    mime = 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+            return 'text', text, mime
         if suffix in ('.png', '.jpg', '.jpeg', '.webp'):
             with Image.open(stream) as image:
                 if image.format not in ('PNG', 'JPEG', 'WEBP') or image.width * image.height > 20000000:
@@ -187,7 +204,7 @@ def extract(name, content):
             return 'text', content.decode('utf-8-sig')[:TEXT_LIMIT], 'text/plain'
     except Exception:
         raise HTTPException(422, 'Не удалось прочитать файл. Проверьте документ; текст сохраните в UTF-8.') from None
-    raise HTTPException(422, 'Поддерживаются PDF, DOCX, текст, PNG, JPG и WEBP')
+    raise HTTPException(422, 'Поддерживаются PDF, DOCX, XLSX, PPTX, текст, PNG, JPG и WEBP')
 
 
 def upload(memory, task_id, name, content, deduplicate=False):

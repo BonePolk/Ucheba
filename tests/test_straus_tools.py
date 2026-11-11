@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 import agent
 from common.identity import current_user_id
-from common.file_tools import FILE_NAMES
+from common.file_tools import FILE_NAMES, LIBRARY_NAMES
 
 
 EVENT = {'id': '', 'title': 'Fixture event', 'summary': 'Fixture', 'task_id': None,
@@ -49,18 +49,22 @@ class StrausTools(unittest.IsolatedAsyncioTestCase):
         client = Client(calls)
         browser = AsyncMock(return_value=remote or {'status': 'page', 'text': 'Fixture text',
                             'image': 'aW1hZ2U=', 'mime': 'image/png', 'elements': [{'id': '1', 'name': 'Button'}]})
+        library = AsyncMock(return_value={'output': {'status': 'read_file'}, 'content': [{'type': 'input_image', 'image_url': 'data:image/png;base64,aW1hZ2U='}]})
+        browser.library_client = library
         body = {'api_key': 'fixture-key', 'config': {'model': 'fixture'}, 'instruction': 'Fixture instruction',
                 'calendar': calendar or {'events': [], 'timezone': 'UTC'}, 'tasks': []}
-        with patch.object(agent, 'AsyncOpenAI', return_value=client), patch.object(agent, 'browser_request', browser), patch.object(agent, 'memory_tool', new=AsyncMock(return_value={'ok': True})):
+        with patch.object(agent, 'AsyncOpenAI', return_value=client), patch.object(agent, 'browser_request', browser), patch.object(agent, 'memory_tool', new=AsyncMock(return_value={'ok': True})), patch.object(agent, 'report_problem', new=AsyncMock(return_value={'reported': True})), patch('common.library_client.library_request', library):
             result = await asyncio.wait_for(agent.run.__wrapped__(body), 3)
         return result, browser, client
 
     async def test_every_tool_routes_and_returns_results(self):
         arguments = {
             'agent_note': {'text': 'Fixture note'},
+            'report_tool_problem': {'tool_name': 'read_download', 'category': 'unsupported_file'},
             'read_user_memory': {}, 'remember_user_fact': {'key': 'group', 'text': 'Fixture group'},
             'calendar_list': {},
-            'browser_sites': {}, 'browser_login': {'site_id': 'fixture'}, 'browser_read': {'site_id': ''},
+            'browser_sites': {},
+            'browser_follow': {'site_id': '', 'index': 0}, 'browser_download': {'site_id': '', 'index': 0}, 'browser_login': {'site_id': 'fixture'}, 'browser_read': {'site_id': ''},
             'read_page': {'site_id': '', 'action': 'read', 'url': '', 'index': 0},
             'web_search': {'query': 'fixture'}, 'web_read': {'url': 'https://fixture.example'},
             'browser_screenshot': {'full_page': True},
@@ -70,7 +74,12 @@ class StrausTools(unittest.IsolatedAsyncioTestCase):
             'browser_view_image': {'index': 0, 'url': ''},
             'download_file': {'url': 'https://fixture.example/file'},
             'python_http_request': {'url': 'https://fixture.example/api', 'method': 'GET', 'body': '', 'content_type': ''},
-            'list_downloads': {}, 'read_download': {'file_id': 'fixture', 'page': 1},
+            'list_downloads': {},
+            'list_user_files': {}, 'read_user_file': {'path': 'notes.txt'},
+            'list_memory': {}, 'read_memory': {'filename': 'task-1.json'},
+            'list_saved_files': {'query': ''},
+            'read_file': {'source_task_id': 1, 'file_id': 'fixture'},
+            'view_pdf_page': {'source_task_id': 1, 'file_id': 'fixture', 'page': 1}, 'read_download': {'file_id': 'fixture', 'page': 1},
             'python_binary': {'file_id': 'fixture', 'mode': 'hex', 'format': '', 'member': '', 'offset': 0},
             'calendar_save_events': {'events': [EVENT]}, 'calendar_remove_events': {'ids': ['existing']},
             'calendar_timezone': {'timezone': 'Europe/Moscow'},
@@ -88,8 +97,8 @@ class StrausTools(unittest.IsolatedAsyncioTestCase):
                     calls.append(('calendar_finish', {'status': 'changed' if changed else 'unchanged', 'reason': 'Fixture result'}))
                 result, browser, client = await self.execute(calls, calendar)
                 self.assertEqual(result['status'], 'changed' if changed else 'unchanged')
-                if name in agent.VISUAL_ACTIONS or name in FILE_NAMES or name in ('browser_login', 'browser_sites', 'browser_read', 'read_page', 'web_read', 'web_search'):
-                    self.assertEqual(browser.await_count, 1)
+                if name in agent.VISUAL_ACTIONS or name in FILE_NAMES or name in ('browser_login', 'browser_sites', 'browser_read', 'browser_follow', 'browser_download', 'read_page', 'web_read', 'web_search'):
+                    self.assertEqual(browser.library_client.await_count if name in LIBRARY_NAMES else browser.await_count, 1)
                     self.assertTrue(any(isinstance(item, dict) and item.get('type') == 'function_call_output' for item in client.inputs[-1]))
                     self.assertTrue(any(isinstance(item, dict) and item.get('role') == 'user' and isinstance(item.get('content'), list) and item['content'][0].get('type') == 'input_image' for item in client.inputs[-1]))
 
@@ -118,3 +127,63 @@ class StrausTools(unittest.IsolatedAsyncioTestCase):
 
     async def test_no_javascript_tool(self):
         self.assertNotIn('browser_javascript', {item['name'] for item in agent.TOOLS})
+
+
+class SharedBrowserContract(unittest.TestCase):
+    def test_straus_uses_shared_tools_and_dispatch(self):
+        from common.browser_tools import BROWSER_TOOLS, BROWSER_NAMES, run_browser_tool
+        self.assertIs(agent.run_browser_tool, run_browser_tool)
+        self.assertEqual([tool for tool in agent.TOOLS if tool['name'] in BROWSER_NAMES], BROWSER_TOOLS)
+        from common.file_tools import FILE_TOOLS, FILE_NAMES, run_file_tool
+        self.assertIs(agent.run_file_tool, run_file_tool)
+        self.assertEqual([tool for tool in agent.TOOLS if tool['name'] in FILE_NAMES], FILE_TOOLS)
+
+
+class ModelReconnect(unittest.IsolatedAsyncioTestCase):
+    async def test_retries_connection_error_once(self):
+        import httpx
+        from common.agent_api import stream_model_response
+        from common.progress import Progress
+        class RetryClient(Client):
+            def __init__(self):
+                super().__init__([('calendar_list', {})])
+                self.attempts = 0
+            def stream(self, **kwargs):
+                self.attempts += 1
+                if self.attempts == 1:
+                    raise httpx.ReadError('fixture connection failure')
+                return super().stream(**kwargs)
+        token = current_user_id.set(900002)
+        try:
+            client = RetryClient()
+            with Progress('Straus') as progress:
+                progress.begin_response()
+                result = await stream_model_response(client, progress, input=[])
+                self.assertEqual(result.status, 'completed')
+                self.assertEqual(client.attempts, 2)
+                self.assertTrue(any('повторяет' in event['message'] for event in progress.record['events']))
+        finally:
+            current_user_id.reset(token)
+
+
+class ModelReconnectLimit(unittest.IsolatedAsyncioTestCase):
+    async def test_connection_failure_does_not_retry_forever(self):
+        import httpx
+        from fastapi import HTTPException
+        from common.agent_api import stream_model_response
+        from common.progress import Progress
+        class Unavailable:
+            def __init__(self):
+                self.responses = self
+                self.attempts = 0
+            def stream(self, **arguments):
+                self.attempts += 1
+                raise httpx.ConnectError('fixture unavailable')
+        token = current_user_id.set(900002)
+        try:
+            client = Unavailable()
+            with self.assertRaises(HTTPException), Progress('Straus') as progress:
+                await stream_model_response(client, progress, input=[])
+            self.assertEqual(client.attempts, 2)
+        finally:
+            current_user_id.reset(token)

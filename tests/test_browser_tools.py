@@ -116,6 +116,21 @@ class BrowserTools(unittest.IsolatedAsyncioTestCase):
         finally:
             gate.set()
 
+    async def test_link_roles_and_missing_click_return_fresh_elements(self):
+        items = await browser.elements(self.tab)
+        link = next(item for item in items if item['name'] == 'Next')
+        self.assertEqual(link['tag'], 'a')
+        self.assertEqual(link['role'], 'link')
+        result = await asyncio.wait_for(self.visual('click', target='text', name='a'), 1)
+        self.assertEqual(result['status'], 'choose_element')
+        self.assertTrue(any(item['name'] == 'Next' and item['role'] == 'link' for item in result['elements']))
+        result = await self.visual('click', target='role', role='a', name='Next')
+        self.assertEqual(result['clicked'], 'Next')
+        self.assertTrue(self.tab.url.endswith('/second'))
+        result = await self.visual('click', target='css', selector='button')
+        self.assertEqual(result['status'], 'choose_element')
+        self.assertIn('несколькими', result['reason'])
+
     async def test_type_press_scroll_navigate_image(self):
         await self.visual('click', target='selector', selector='input')
         await self.visual('type', text='query')
@@ -211,7 +226,8 @@ class BrowserTools(unittest.IsolatedAsyncioTestCase):
         def handler(request):
             return httpx.Response(200, content=b'HTTP contents', headers={'content-type': 'text/plain'})
         def client(**kwargs):
-            return real_client(transport=httpx.MockTransport(handler), **kwargs)
+            kwargs['transport'] = httpx.MockTransport(handler)
+            return real_client(**kwargs)
         with patch.object(files.httpx, 'AsyncClient', side_effect=client):
             for method in ('GET', 'POST'):
                 result = await browser.run_file_action({'action': 'python_http_request', 'url': 'https://fixture.example/api', 'method': method, 'body': '', 'content_type': ''})
@@ -284,3 +300,126 @@ class SharedMemory(unittest.TestCase):
                     self.assertEqual(agent_memory.read()[0]['key'], 'work')
             finally:
                 current_user_id.reset(token)
+
+
+class StandardFiles(unittest.TestCase):
+    def setUp(self):
+        self.folder = tempfile.TemporaryDirectory()
+        self.patch = patch.object(files, 'root', return_value=Path(self.folder.name))
+        self.patch.start()
+    def tearDown(self):
+        self.patch.stop(); self.folder.cleanup()
+
+    def test_xlsx_resolves_shared_inline_numeric_cells(self):
+        stream = io.BytesIO()
+        with ZipFile(stream, 'w') as zipped:
+            zipped.writestr('xl/workbook.xml', '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Расписание" sheetId="1" r:id="r1"/></sheets></workbook>')
+            zipped.writestr('xl/_rels/workbook.xml.rels', '<Relationships><Relationship Id="r1" Target="worksheets/sheet1.xml"/></Relationships>')
+            zipped.writestr('xl/sharedStrings.xml', '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>Группа</t></si></sst>')
+            zipped.writestr('xl/worksheets/sheet1.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="inlineStr"><is><t>Начало</t></is></c></row><row r="2"><c r="A2"><v>513</v></c><c r="B2"><f>6+6</f><v>12</v></c></row></sheetData></worksheet>')
+        result = files.read(files.save('schedule.xlsx', stream.getvalue())['file_id'])
+        for value in ('Лист: Расписание', 'A1: Группа', 'B1: Начало', 'A2: 513', 'B2: 12'):
+            self.assertIn(value, result['text'])
+        self.assertIn('сохранённое значение', result['text'])
+
+    def test_pdf_text_and_page_image(self):
+        from pypdf.generic import DictionaryObject, NameObject, DecodedStreamObject
+        writer = PdfWriter()
+        page = writer.add_blank_page(width=200, height=100)
+        font = DictionaryObject({NameObject('/Type'): NameObject('/Font'), NameObject('/Subtype'): NameObject('/Type1'), NameObject('/BaseFont'): NameObject('/Helvetica')})
+        page[NameObject('/Resources')] = DictionaryObject({NameObject('/Font'): DictionaryObject({NameObject('/F1'): font})})
+        content = DecodedStreamObject(); content.set_data(b'BT /F1 12 Tf 10 50 Td (Fixture PDF text) Tj ET')
+        page[NameObject('/Contents')] = writer._add_object(content)
+        stream = io.BytesIO(); writer.write(stream)
+        result = files.read(files.save('sample.pdf', stream.getvalue())['file_id'])
+        self.assertIn('Fixture PDF text', result['text'])
+        self.assertTrue(base64.b64decode(result['image']))
+        self.assertEqual(result['pages'], 1)
+
+    def test_docx_pptx_text_and_plain_files(self):
+        for suffix, member in [('docx','word/document.xml'), ('pptx','ppt/slides/slide1.xml')]:
+            stream = io.BytesIO()
+            with ZipFile(stream, 'w') as zipped:
+                zipped.writestr(member, '<root>Document content</root>')
+            self.assertIn('Document content', files.read(files.save('sample.'+suffix, stream.getvalue())['file_id'])['text'])
+        for suffix in ('txt','csv','json','md','ics'):
+            self.assertIn('Текст', files.read(files.save('sample.'+suffix, 'Текст'.encode())['file_id'])['text'])
+        for suffix, fmt in [('png','PNG'), ('jpg','JPEG'), ('webp','WEBP')]:
+            stream = io.BytesIO(); Image.new('RGB',(20,20)).save(stream,format=fmt)
+            self.assertTrue(files.read(files.save('sample.'+suffix, stream.getvalue())['file_id'])['image'])
+
+
+class AdminReports(unittest.TestCase):
+    def test_report_deduplication_and_resolve(self):
+        import agent_issues
+        from sqlmodel import create_engine
+        with tempfile.TemporaryDirectory() as folder:
+            target = create_engine(f'sqlite:///{folder}/reports.db')
+            token = current_user_id.set(1)
+            try:
+                with patch.object(agent_issues, 'engine', target):
+                    body = agent_issues.IssueInput(agent='Monocle', tool_name='read_download', category='unsupported_file')
+                    first = agent_issues.report(body)
+                    self.assertEqual(agent_issues.report(body)['id'], first['id'])
+                    self.assertEqual(agent_issues.list_issues()[0].occurrences, 2)
+                    current_user_id.set(2)
+                    agent_issues.report(body)
+                    self.assertEqual(len(agent_issues.list_issues()), 2)
+                    agent_issues.resolve(first['id'])
+                    self.assertEqual(len(agent_issues.list_issues()), 1)
+            finally:
+                current_user_id.reset(token)
+
+
+    def test_report_accepts_only_known_tool_names(self):
+        import agent_issues
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            agent_issues.IssueInput(agent='Monocle', tool_name='arbitrary_private_text', category='other')
+
+
+class TaskNotes(unittest.TestCase):
+    def test_creation_saves_notes_in_context_and_update_keeps_them(self):
+        from sqlmodel import SQLModel, Session, create_engine
+        from routers import tasks
+        from common.models.integration import TaskContext
+        from common.models.task import TaskCreate, TaskUpdate
+        with tempfile.TemporaryDirectory() as folder:
+            target = create_engine(f'sqlite:///{folder}/tasks.db')
+            SQLModel.metadata.create_all(target)
+            with patch.object(tasks, 'get_engine', return_value=target):
+                row = tasks.create_task(TaskCreate(title='Fixture task', agent_notes='Проверь вложения и сроки'))
+                self.assertEqual(row.title, 'Fixture task')
+                self.assertNotIn('agent_notes', row.model_dump())
+                with Session(target) as session:
+                    self.assertEqual(session.get(TaskContext, row.id).owner_notes, 'Проверь вложения и сроки')
+                tasks.update_task(row.id, TaskUpdate(title='Updated task'))
+                with Session(target) as session:
+                    self.assertEqual(session.get(TaskContext, row.id).owner_notes, 'Проверь вложения и сроки')
+
+
+class AgentActivity(unittest.TestCase):
+    def test_thinking_and_actual_action_are_separate(self):
+        from common.progress import Progress
+        from types import SimpleNamespace
+        token = current_user_id.set(900003)
+        try:
+            with Progress('Monocle') as progress:
+                progress.add('Читает страницу')
+                self.assertEqual(progress.record['current_action'], 'Читает страницу')
+                progress.begin_response()
+                self.assertTrue(progress.record['model_waiting'])
+                self.assertIsNone(progress.record['current_action'])
+                progress.finish_response(SimpleNamespace(usage=None))
+                self.assertFalse(progress.record['model_waiting'])
+                progress.add('Скачивает документ', description='Чтобы прочитать условия задания')
+                progress.note('{"text":"Ищу нужное расписание"}')
+                self.assertEqual(progress.record['current_action'], 'Скачивает документ')
+                self.assertEqual(progress.record['action_description'], 'Чтобы прочитать условия задания')
+                self.assertEqual(progress.record['agent_comment'], 'Ищу нужное расписание')
+                self.assertEqual(progress.record['events'][-1]['kind'], 'note')
+                self.assertEqual(progress.record['events'][-2]['description'], 'Чтобы прочитать условия задания')
+                self.assertIn('action_started_at', progress.record)
+            self.assertIsNone(progress.record['current_action'])
+        finally:
+            current_user_id.reset(token)

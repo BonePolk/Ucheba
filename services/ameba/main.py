@@ -1,3 +1,5 @@
+from common.agent_api import stream_model_response
+from common.agent_issues import ISSUE_TOOL, ISSUE_INSTRUCTION, report_problem
 from common.agent_memory import MEMORY_TOOLS, MEMORY_NAMES, MEMORY_INSTRUCTION, memory_tool
 from common.agent_history import with_history
 import asyncio
@@ -102,7 +104,7 @@ async def rank_tasks(body: dict):
 
 CONTEXT_TOOL = {
     'type': 'function', 'name': 'request_context_check',
-    'description': 'Остановить сортировку и попросить Lucheba перепроверить контекст выбранных задач.',
+    'description': 'Остановить сортировку и попросить Monocle перепроверить контекст выбранных задач.',
     'strict': True,
     'parameters': {'type': 'object', 'properties': {
         'task_ids': {'type': 'array', 'items': {'type': 'integer'}},
@@ -141,13 +143,13 @@ async def rank(body: dict):
                 progress.update(stage='sorting' if set(plans) == set(expected) else 'planning',
                                 total=0 if set(plans) == set(expected) else len(expected))
                 progress.begin_response()
-                async with client.responses.stream(
+                response = await stream_model_response(client, progress,
                     model=model, reasoning={'effort': 'medium', 'summary': 'auto'}, max_output_tokens=8000,
-                    instructions=MEMORY_INSTRUCTION + NOTE_INSTRUCTION + (
+                    instructions=ISSUE_INSTRUCTION + MEMORY_INSTRUCTION + NOTE_INSTRUCTION + (
                         'Если контекст существенно устарел, противоречив или не хватает фактов для приоритизации, '
                         'вызови request_context_check с ID и краткой причиной. Ameba остановится, '
-                        'Lucheba проверит контекст, затем сортировка начнётся заново. '
-                        'Не запрашивай повторно ID из checked_contexts: Lucheba уже проверила их в этой сортировке; '
+                        'Monocle проверит контекст, затем сортировка начнётся заново. '
+                        'Не запрашивай повторно ID из checked_contexts: Monocle уже проверила их в этой сортировке; '
                         'при оставшихся неизвестных используй явные допущения. '
                         'Ты Ameba, агент планирования и сортировки. Расставь ВСЕ переданные задачи в порядке выполнения одним общим списком. '
                         'Учитывай текущую дату now (UTC), сроки, последствия задержки, обязательства, '
@@ -227,16 +229,13 @@ async def rank(body: dict):
                         'обязательства и зависимости из переданных данных. Не выдумывай причины. '
                         'Если задачи равноценны, явно укажи сохранение исходного порядка. '
                         'Пиши кратко: explanation до 400 символов; effort и impact — короткая выжимка. Не пересказывай контекст. По-русски, без Markdown.'),
-                    input=messages, tools=[planning.TOOL, planning.ORDER_TOOL, CONTEXT_TOOL, NOTE_TOOL, *MEMORY_TOOLS],
+                    input=messages, tools=[planning.TOOL, planning.ORDER_TOOL, CONTEXT_TOOL, NOTE_TOOL, ISSUE_TOOL, *MEMORY_TOOLS],
                     tool_choice='none' if repaired else 'required' if set(plans) != set(expected) or schedule is None else 'auto',
                     parallel_tool_calls=False,
                     text={'format': {'type': 'json_schema', 'name': 'task_ranking', 'strict': True,
                                      'schema': RankingResult.model_json_schema() | {'additionalProperties': False}}},
                     include=['reasoning.encrypted_content'], store=False,
-                ) as stream:
-                    async for event in stream:
-                        progress.model_event(event)
-                    response = await stream.get_final_response()
+                )
                 progress.finish_response(response)
                 calls = [item for item in response.output if item.type == 'function_call']
                 if response.status != 'completed':
@@ -268,7 +267,11 @@ async def rank(body: dict):
                     try:
                         if call.name == 'agent_note':
                             output = progress.note(call.arguments)
+                        elif call.name == 'report_tool_problem':
+                            progress.add('Сообщает администратору о технической проблеме', description='Передаёт категорию сбоя для диагностики; само поручение этим не завершается.')
+                            output = await report_problem(json.loads(call.arguments), 'Ameba')
                         elif call.name in MEMORY_NAMES:
+                            progress.add('Читает общую память' if call.name == 'read_user_memory' else 'Запоминает факт о владельце', description='Использует или сохраняет подтверждённые сведения для планирования следующих поручений.')
                             output = await memory_tool(call.name, json.loads(call.arguments), 'Ameba')
                         elif call.name == 'request_context_check':
                             arguments = json.loads(call.arguments)
@@ -277,11 +280,12 @@ async def rank(body: dict):
                             if not ids or len(ids) != len(set(ids)) or any(value not in expected or value in checked for value in ids):
                                 raise ValueError('Invalid context IDs')
                             titles = [task['title'] for task in tasks if task['id'] in ids]
-                            progress.add('Просит Lucheba перепроверить: ' + ', '.join(titles))
-                            progress.add(str(arguments['reason'])[:400])
+                            progress.add('Просит Monocle перепроверить: ' + ', '.join(titles), description=str(arguments['reason'])[:400])
+                            progress.add(str(arguments['reason'])[:400], current=False)
                             progress.update(stage='context', context_requests=ids)
                             return {'context_requests': ids, 'context_reason': str(arguments['reason'])[:1000]}
                         elif call.name == 'plan_tasks':
+                            progress.add('Рассчитывает время и нагрузку задач', description='Оценивает оставшуюся работу, чтобы сравнить выполнимость и пользу задач.')
                             calculated = planning.calculate(call.arguments, expected)
                             plans.update(calculated)
                             schedule = None
@@ -290,6 +294,7 @@ async def rank(body: dict):
                                 progress.add(f"План: {title} — {plan['time_estimate']}")
                             output = {'plans': list(calculated.values())}
                         elif call.name == 'reorder_tasks':
+                            progress.add('Переставляет задачи и пересчитывает календарный план', description='Проверяет порядок с учётом доступного времени, занятости и отдыха.')
                             schedule = planning.reorder(call.arguments, plans, expected, body.get('weekly_schedule'), body.get('now'))
                             order = schedule['task_ids']
                             if schedule.get('timeline_error'):

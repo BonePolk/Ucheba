@@ -1,14 +1,15 @@
 import { useState } from 'react';
-import { Alert, Anchor, Badge, Button, Group, Paper, Stack, Text, TextInput, Textarea, Title } from '@mantine/core';
+import { Alert, Anchor, Badge, Button, Group, Paper, Stack, Text, Textarea, Title } from '@mantine/core';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { agentRequest, request } from './api';
 import ContextFiles from './ContextFiles';
+import AgentProblemReport from './AgentProblemReport';
 import ContextBrowser from './ContextBrowser';
 import AgentProgress from './AgentProgress';
 import JebaProgress from './JebaProgress';
 import RankingAssessment from './RankingAssessment';
 import TaskMarkdown from './TaskMarkdown';
-import LuchebaBrowser from './LuchebaBrowser';
+import MonocleBrowser from './LuchebaBrowser';
 
 function RunFiles({ run }) {
   const files = useQuery({ queryKey: ['integrations', 'files', run.id], queryFn: () => request(`/integrations/codex/runs/${run.id}/files`), enabled: run.status === 'succeeded' });
@@ -17,7 +18,6 @@ function RunFiles({ run }) {
 
 function ContextForm({ taskId, jevEnabled, jevBusy, context }) {
   const client = useQueryClient();
-  const [subject, setSubject] = useState(null);
   const [answer, setAnswer] = useState(null);
   const analyze = useMutation({
     mutationFn: () => agentRequest(`/integrations/tasks/${taskId}/context/analyze`, { method: 'POST' }),
@@ -29,7 +29,7 @@ function ContextForm({ taskId, jevEnabled, jevBusy, context }) {
     onSettled: () => client.invalidateQueries({ queryKey: ['context-files', taskId] }),
   });
   const save = useMutation({
-    mutationFn: () => agentRequest(`/integrations/tasks/${taskId}/context`, { method: 'POST', body: JSON.stringify({ subject: subject ?? context.data?.subject ?? '', answer: answer ?? context.data?.owner_notes ?? '' }) }),
+    mutationFn: () => agentRequest(`/integrations/tasks/${taskId}/context`, { method: 'POST', body: JSON.stringify({ subject: context.data?.subject ?? '', answer: answer ?? context.data?.owner_notes ?? '' }) }),
     onSuccess: async () => {
       await client.invalidateQueries({ queryKey: ['context', taskId] });
       await client.invalidateQueries({ queryKey: ['tasks'] });
@@ -37,26 +37,28 @@ function ContextForm({ taskId, jevEnabled, jevBusy, context }) {
     },
     onSettled: () => client.invalidateQueries({ queryKey: ['context-files', taskId] }),
   });
-  return <Paper withBorder p="md"><Stack gap="sm">
-    <Title order={5}>Контекст · Lucheba</Title>
-    <Text size="sm">Lucheba собирает только контекст для порядка выполнения: сроки, последствия и зависимости. Краткое описание и категория владельца сохраняются. Переписывание названия можно разрешить в профиле.</Text>
-    <ContextFiles taskId={taskId} disabled={analyze.isPending || save.isPending} />
-    <LuchebaBrowser active={analyze.isPending || save.isPending || jevBusy} />
-    <ContextBrowser taskId={taskId} disabled={analyze.isPending || save.isPending} />
-    <Button variant="light" loading={analyze.isPending} disabled={save.isPending} onClick={() => analyze.mutate()}>Проверить контекст через Lucheba</Button>
+  return <Paper withBorder p="sm"><Stack gap="xs">
+    <Title order={5}>Контекст · Monocle</Title>
+    <Textarea label="Что ещё сделать Monocle по задаче" placeholder="Что проверить, где искать сведения, уточнения или ответы на вопросы ниже" autosize minRows={2} maxRows={6} maxLength={12000} value={answer ?? context.data?.owner_notes ?? ''} onChange={(event) => setAnswer(event.currentTarget.value)} />
+    <Group gap="xs">
+      <Button size="xs" loading={save.isPending} disabled={analyze.isPending || !(answer ?? context.data?.owner_notes ?? '').trim()} onClick={() => save.mutate()}>Передать Monocle</Button>
+      <Button size="xs" variant="subtle" loading={analyze.isPending} disabled={save.isPending} onClick={() => analyze.mutate()}>Обновить контекст</Button>
+    </Group>
+    <MonocleBrowser active={analyze.isPending || save.isPending || jevBusy} />
+    <details><summary style={{ cursor: 'pointer', fontSize: 13 }}>Файлы и управление браузером</summary><Stack gap="xs" mt="xs">
+      <ContextFiles taskId={taskId} disabled={analyze.isPending || save.isPending} />
+      <ContextBrowser taskId={taskId} disabled={analyze.isPending || save.isPending} />
+    </Stack></details>
     {jevEnabled ? <JebaProgress taskId={taskId} active={analyze.isPending || save.isPending || jevBusy} /> : <AgentProgress taskId={taskId} providers={['context']} active={analyze.isPending || save.isPending} />}
-    {analyze.isSuccess && <Text size="sm">{analyze.data.status === 'ready' ? 'Контекста достаточно для оценки Ameba.' : 'Lucheba запросила уточнения — ответь на вопросы ниже.'}</Text>}
-    {context.data?.usage && <Text size="xs" c="dimmed">Последняя проверка: вход {context.data.usage.input_tokens ?? 0}, выход {context.data.usage.output_tokens ?? 0} токенов</Text>}
+    {analyze.isSuccess && <Text size="sm">{analyze.data.status === 'ready' ? 'Контекста достаточно для оценки Ameba.' : 'Monocle запросила уточнения — ответь на вопросы ниже.'}</Text>}
+    {context.data?.usage && <Text size="xs" c="dimmed">Последняя проверка: вход {context.data.usage.input_tokens ?? 'нет данных'}, выход {context.data.usage.output_tokens ?? 'нет данных'} токенов</Text>}
     {context.data?.questions?.length > 0 && <Alert color="yellow"><Stack gap="xs">{context.data.questions.map((question, i) => <Text key={i} size="sm">{question}</Text>)}</Stack></Alert>}
-    {context.data?.usage?.updated_fields?.length > 0 && <Text size="sm" c="dimmed">Lucheba обновила: {context.data.usage.updated_fields.map((name) => ({ title: 'название', description: 'описание', category: 'категорию' })[name]).join(', ')}.</Text>}
+    {context.data?.usage?.updated_fields?.length > 0 && <Text size="sm" c="dimmed">Monocle обновила: {context.data.usage.updated_fields.map((name) => ({ title: 'название', description: 'описание', category: 'категорию' })[name]).join(', ')}.</Text>}
     {context.data?.usage?.sources?.length > 0 && <Stack gap="xs"><Text size="sm" fw={500}>Использованные страницы</Text>{context.data.usage.sources.map((source) => <Anchor key={source.url} href={source.url} target="_blank" rel="noreferrer" size="sm">{source.title}</Anchor>)}</Stack>}
-    <TextInput label="Предмет / область контекста" placeholder="Например: операционные системы" value={subject ?? context.data?.subject ?? ''} onChange={(event) => setSubject(event.currentTarget.value)} />
-    <Textarea label="Ответы и известные факты" description="Сохрани полезные прошлые ответы; допиши новые уточнения. Данные отправляются в настроенный шлюз Lucheba." autosize minRows={3} value={answer ?? context.data?.owner_notes ?? ''} onChange={(event) => setAnswer(event.currentTarget.value)} />
-    <Button loading={save.isPending} disabled={analyze.isPending || !(answer ?? context.data?.owner_notes ?? '').trim()} onClick={() => save.mutate()}>{jevEnabled ? 'Сохранить контекст и обновить порядок' : 'Сохранить контекст'}</Button>
     {save.data?.metrics?.status === 'needs_context' && <Text c="yellow">Нужны дополнительные уточнения — см. вопросы выше.</Text>}
     {save.data?.rank != null && <Text>Порядок Ameba: {save.data.rank} из {save.data.ranked_count}</Text>}
     <RankingAssessment assessment={save.data?.reasons?.find((item) => item.task_id === taskId)} />
-    {(save.error || analyze.error || context.error) && <Alert color="red">{(save.error || analyze.error || context.error).message}</Alert>}
+    {(save.error || analyze.error || context.error) && <Alert color="red">{(save.error || analyze.error || context.error).message}<AgentProblemReport agent="Monocle" toolName="context_analysis" /></Alert>}
   </Stack></Paper>;
 }
 
@@ -72,7 +74,7 @@ export default function TaskAutomation({ task, features = {} }) {
       provider === 'jev' && queue.data?.ameba_running ? '/integrations/jev/rank' : `/integrations/tasks/${task.id}/${provider}`,
       { method: 'POST' }),
     onSuccess: async (data, provider) => {
-      setNotice(provider === 'codex' ? 'Задача передана Codex' : data.metrics?.status === 'needs_context' ? `Lucheba: недостаточно контекста. ${data.metrics.reason}` : data.rank != null ? `Порядок Ameba: ${data.rank} из ${data.ranked_count}` : 'Порядок Ameba обновлён');
+      setNotice(provider === 'codex' ? 'Задача передана Codex' : data.metrics?.status === 'needs_context' ? `Monocle: недостаточно контекста. ${data.metrics.reason}` : data.rank != null ? `Порядок Ameba: ${data.rank} из ${data.ranked_count}` : 'Порядок Ameba обновлён');
       await client.invalidateQueries({ queryKey: ['jev-ranking'] });
       await client.invalidateQueries({ queryKey: ['tasks'] });
       await client.invalidateQueries({ queryKey: ['context', task.id] });
@@ -85,11 +87,10 @@ export default function TaskAutomation({ task, features = {} }) {
     {task.description && <Text style={{ whiteSpace: 'pre-wrap' }}>{task.description}</Text>}
     {task.category && <Badge variant="light">{task.category}</Badge>}
     {features.context !== false && (context.data?.full_markdown || context.data?.summary) && <Paper withBorder p="md"><Stack>
-      <Title order={3}>Полная версия задачи</Title>
-      {context.data.status === 'new' && <Text size="sm" c="yellow">Контекст изменился. Полную версию нужно обновить через Lucheba.</Text>}
+      <Title order={4}>Полная версия задачи</Title>
+      {context.data.status === 'new' && <Text size="sm" c="yellow">Контекст изменился. Полную версию нужно обновить через Monocle.</Text>}
       <TaskMarkdown>{context.data.full_markdown || context.data.summary}</TaskMarkdown>
     </Stack></Paper>}
-    <Text size="sm" c="dimmed">Сначала подключите провайдеров в разделе «Интеграции». Задача уже сохранена и не зависит от доступности ИИ.</Text>
     <Group>{features.codex !== false && <Button disabled={action.isPending} onClick={() => action.mutate('codex')}>Поручить Codex</Button>}{features.ameba !== false && <Button variant="light" disabled={(action.isPending && !queue.data?.ameba_running) || queue.data?.browser_busy} onClick={() => action.mutate('jev')}>{queue.data?.ameba_running ? 'Перезапустить Ameba' : 'Обновить порядок Ameba'}</Button>}</Group>
     {features.codex !== false && <AgentProgress taskId={task.id} providers={['codex']} active={(action.isPending && action.variables === 'codex') || runs.data?.some((run) => ['queued', 'running'].includes(run.status))} />}
     {features.context !== false && <ContextForm key={task.id} taskId={task.id} jevEnabled={features.ameba !== false} jevBusy={action.isPending && action.variables === 'jev'} context={context} />}

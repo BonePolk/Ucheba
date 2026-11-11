@@ -45,12 +45,12 @@ export default function ContextFiles({ taskId, disabled }) {
   const error = files.error || library.error || upload.error || remove.error || reuse.error;
   return <Stack gap="xs">
     <Text fw={500}>Файлы для оценки контекста</Text>
-    <Text size="xs" c="dimmed">До 5 вложений по 10 МБ: PDF, DOCX, текст и изображения. Lucheba сама выбирает подходящие документы из вложений и сохранённой библиотеки, открывает их и нужные страницы PDF. Ручной выбор из библиотеки необязателен.</Text>
+    <Text size="xs" c="dimmed">До 5 вложений по 10 МБ: PDF, DOCX, XLSX, PPTX, текст и изображения. Monocle сама выбирает подходящие документы из вложений и сохранённой библиотеки, открывает их и нужные страницы PDF. Ручной выбор из библиотеки необязателен.</Text>
     {files.data?.map((file) => <Group key={file.id} justify="space-between">
       <Anchor href={`/api${path}/${file.id}`} download>{file.name}{file.pages ? ` · ${file.pages} стр.` : ''}</Anchor>
       <Button size="xs" variant="subtle" color="red" disabled={busy} onClick={() => remove.mutate(file.id)}>Убрать из задачи</Button>
     </Group>)}
-    <FileButton resetRef={reset} onChange={(file) => { if (file) upload.mutate(file); }} accept=".pdf,.docx,.txt,.md,.csv,.json,.py,.js,.c,.cpp,.h,.java,.sql,.png,.jpg,.jpeg,.webp">
+    <FileButton resetRef={reset} onChange={(file) => { if (file) upload.mutate(file); }} accept=".pdf,.docx,.xlsx,.pptx,.txt,.md,.csv,.json,.py,.js,.c,.cpp,.h,.java,.sql,.png,.jpg,.jpeg,.webp">
       {(props) => <Button {...props} variant="default" loading={upload.isPending} disabled={busy || files.isPending || files.data?.length >= 5}>Прикрепить файл</Button>}
     </FileButton>
     <Select label="Из сохранённых файлов" placeholder="Найти файл по названию" searchable clearable value={saved} onChange={setSaved} disabled={busy || library.isPending} data={(library.data ?? []).filter((file) => file.task_id !== taskId || !files.data?.some((attached) => attached.id === file.id)).map((file) => ({ value: `${file.task_id}:${file.id}`, label: `${file.name} · задача #${file.task_id}` }))} />

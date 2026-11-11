@@ -20,7 +20,7 @@ def bootstrap():
                 raise RuntimeError('Для первоначального аккаунта admin задайте ADMIN_PASSWORD не короче 16 символов')
             session.add(User(id=1, username='admin', password_hash=passwords.hash(password), is_admin=True))
             session.commit()
-    # Перенос старого ключа Lucheba только владельцу, с шифрованием в его настройках.
+    # Перенос старого ключа Monocle только владельцу, с шифрованием в его настройках.
     from common.settings import save_settings
     from common.models.integration import IntegrationSetting
     token = current_user_id.set(1)

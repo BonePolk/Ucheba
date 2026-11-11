@@ -10,10 +10,10 @@ import sys
 
 root = Path(__file__).resolve().parents[1]
 service = sys.argv[1]
-if service not in ('browser', 'straus'):
-    raise SystemExit('Выберите browser или straus')
+if service not in ('browser', 'straus', 'lucheba'):
+    raise SystemExit('Выберите browser, straus или lucheba')
 paths = list((root / 'common').rglob('*.py')) + list((root / 'services' / service).glob('*.py'))
-paths += [root / 'backend/agent_memory.py', root / 'backend/integrations/scheduler.py', root / 'tests' / f'test_{service}_tools.py']
+paths += list((root / 'backend').rglob('*.py')) + [root / 'tests' / f'test_{service}_tools.py']
 files = {}
 for path in paths:
     name = str(path.relative_to(root))

@@ -1,4 +1,4 @@
-"""Lucheba и Straus делят браузер и имеют приоритет перед Ameba."""
+"""Monocle и Straus делят браузер и имеют приоритет перед Ameba."""
 import asyncio
 from contextlib import asynccontextmanager
 from uuid import uuid4

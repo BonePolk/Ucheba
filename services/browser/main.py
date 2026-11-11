@@ -56,7 +56,7 @@ def browser_failure(exc):
     # Полный текст Playwright может содержать URL с токенами и поля формы.
     text = str(exc)
     if isinstance(exc, BrowserTimeoutError):
-        return 'timeout', 'Браузер не дождался страницы или элемента. Повторите действие после загрузки страницы.'
+        return 'timeout', 'Действие браузера не завершилось. Проверьте точный элемент и его доступность; полная загрузка страницы не требуется.'
     if 'Download is starting' in text:
         return 'download_navigation', 'Ссылка открывает скачивание файла вместо страницы.'
     network = re.search(r'net::(ERR_[A-Z_]+)', text)
@@ -81,6 +81,8 @@ def changing_document(exc):
 async def browser_error(request, exc):
     from fastapi.responses import JSONResponse
     category, detail = browser_failure(exc)
+    if category == 'download_navigation':
+        return JSONResponse(status_code=200, content={'status': 'downloading', 'downloads': download_status(), 'notice': 'Началось скачивание. Проверь list_downloads; повторять нажатие не нужно.'})
     logging.getLogger('uvicorn.error').error('browser: %s (%s)', category, request.url.path)
     return JSONResponse(status_code=502, content={'detail': detail})
 
@@ -395,7 +397,8 @@ async def elements(tab):
                 return {id, tag: el.tagName.toLowerCase(),
                     css: el.id ? '#' + CSS.escape(el.id) : '[data-luna-element="' + id + '"]',
                     xpath: '//*[@data-luna-element="' + id + '"]',
-                    role: el.getAttribute('role') || el.tagName.toLowerCase(),
+                    role: el.getAttribute('role') || ({A:'link',BUTTON:'button',TEXTAREA:'textbox',SELECT:'combobox'}[el.tagName]) ||
+                        (el.tagName === 'INPUT' ? ({submit:'button',button:'button',reset:'button',checkbox:'checkbox',radio:'radio',number:'spinbutton',range:'slider'}[el.type] || 'textbox') : ''),
                     name: (el.getAttribute('aria-label') || el.innerText || el.getAttribute('placeholder') || el.getAttribute('title') || '').slice(0, 250)};
             });
         }''')
@@ -416,6 +419,15 @@ def redact_result(value, secrets):
         for secret in secrets:
             value = value.replace(secret, '[скрыто]')
     return value
+
+
+async def click_issue(tab, reason):
+    snapshot = await schedule_snapshot(tab)
+    result = {'status': 'choose_element', 'reason': reason,
+              'notice': 'Не повторяй тот же вызов. Выбери точный element/css/xpath из свежего elements. Если нужного элемента пока нет, перечитай страницу.',
+              'text': snapshot['text'], 'ready_state': snapshot['ready_state'],
+              'elements': await elements(tab)}
+    return redact_result(result, [site['password'] for site in vault().values() if site['password']])
 
 
 @app.post('/visual')
@@ -439,7 +451,8 @@ async def run_visual_action(body):
                 await tab.mouse.click(body.x, body.y)
             else:
                 if body.target == 'role':
-                    target = tab.get_by_role(body.role, name=body.name, exact=True)
+                    role = {'a': 'link', 'textarea': 'textbox', 'select': 'combobox'}.get(body.role, body.role)
+                    target = tab.get_by_role(role, name=body.name, exact=True)
                 elif body.target == 'text':
                     target = tab.get_by_text(body.name, exact=True)
                     # Надпись может быть вложенным div/span, смещённым внутри кнопки.
@@ -458,11 +471,19 @@ async def run_visual_action(body):
                     target = tab.locator(body.target + '=' + expression)
                 else:
                     target = tab.locator(body.selector)
-                if await target.count() > 1:
-                    raise HTTPException(409, 'Найдено несколько элементов. Уточни selector или id из elements')
+                count = await target.count()
+                if count == 0:
+                    return await click_issue(tab, 'Элемент с такими параметрами не найден. Возможно, перепутаны тег, роль и название либо устарел селектор.')
+                if count > 1:
+                    return await click_issue(tab, 'Селектор совпал с несколькими элементами. Выбери конкретный ID или селектор.')
+                if not await target.is_visible():
+                    return await click_issue(tab, 'Найденный элемент скрыт. Выбери видимую кнопку или раскрой нужный раздел.')
                 clicked = await target.evaluate('(el) => (el.getAttribute("aria-label") || el.innerText || el.getAttribute("title") || el.tagName).slice(0, 250)')
                 # Locator сам прокручивает, ждёт видимость и проверяет перекрытие.
-                await target.click(no_wait_after=True)
+                try:
+                    await target.click(no_wait_after=True)
+                except BrowserTimeoutError:
+                    return await click_issue(tab, 'Не удалось нажать: элемент перекрыт, движется или недоступен. Обнови выбор элемента; не повторяй тот же клик.')
             clicked = redact_result(clicked, [site['password'] for site in vault().values() if site['password']])
         elif body.action == 'type':
             secret_field = await tab.locator('input[type="password"]:focus, input[autocomplete="one-time-code"]:focus').count()
@@ -733,7 +754,7 @@ class Action(BaseModel):
 async def download_link(tab, site, url, image_mode=False):
     max_size = 10 * 1024 * 1024
     try:
-        async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=False, transport=httpx.AsyncHTTPTransport(retries=1)) as client:
             for _ in range(6):
                 await public_url(url)
                 # Cookie используются только здесь и только для подходящего домена.
@@ -763,6 +784,8 @@ async def download_link(tab, site, url, image_mode=False):
                     name = header.get_filename() or unquote(urlsplit(url).path.rsplit('/', 1)[-1]) or 'document'
                     if not Path(name).suffix:
                         name += {'application/pdf': '.pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
+                                 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
+                                 'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx',
                                  'text/plain': '.txt', 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp'}.get(mime, '')
                     logging.getLogger('uvicorn.error').info('browser: file downloaded (%d bytes)', len(content))
                     if image_mode and mime in ('image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/bmp', 'image/tiff'):
@@ -834,7 +857,7 @@ async def agent_action(body):
             raise HTTPException(400, 'Ссылка больше не доступна. Перечитайте страницу.')
         url = links[body.index]['href']
         await public_url(url)
-        if body.action == 'download' or Path(urlsplit(url).path).suffix.lower() in ('.pdf', '.docx', '.txt', '.md', '.csv', '.png', '.jpg', '.jpeg', '.webp'):
+        if body.action == 'download' or Path(urlsplit(url).path).suffix.lower() in ('.pdf', '.docx', '.xlsx', '.pptx', '.txt', '.md', '.csv', '.json', '.zip', '.png', '.jpg', '.jpeg', '.webp'):
             return await download_link(tab, site, url)
         try:
             await tab.goto(url, wait_until='commit')
