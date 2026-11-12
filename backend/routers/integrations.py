@@ -597,9 +597,19 @@ class WorkspaceUpload(BaseModel):
     content: str = Field(max_length=14 * 1024 * 1024)
 
 
+class WorkspaceArchive(BaseModel):
+    paths: list[str] = Field(min_length=2, max_length=50)
+    output_path: str = Field(min_length=1, max_length=500)
+
+
 @router.post('/context/workspace/upload')
 async def upload_workspace_file(body: WorkspaceUpload):
     return await call('context', '/workspace/upload', body.model_dump())
+
+
+@router.post('/context/workspace/archive')
+async def workspace_archive(body: WorkspaceArchive):
+    return await call('context', '/workspace/archive', body.model_dump())
 
 
 @router.get('/context/workspace/preview')

@@ -96,6 +96,9 @@
 .file-toolbar .mantine-Breadcrumbs-root { flex-wrap: wrap; gap: 0; }
 .file-items { padding: 16px; gap: 10px; }
 .file-items-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(135px, 1fr)); align-content: start; }
+.file-entry { position: relative; min-width: 0; }
+.file-entry .file-item { width: 100%; height: 100%; }
+.file-entry-select { position: absolute; z-index: 2; top: 8px; right: 8px; }
 .file-item { color: var(--mantine-color-text); text-align: left; background: var(--mantine-color-body); border: 1px solid var(--mantine-color-default-border); border-radius: 0; padding: 14px; cursor: pointer; min-width: 0; transition: background 150ms, border-color 150ms; }
 .file-item:hover { background: var(--mantine-color-default-hover); border-color: var(--mantine-color-purple-6); }
 .file-item.is-selected { border-color: var(--mantine-color-purple-6); background: var(--mantine-color-purple-light); }
@@ -115,6 +118,8 @@
 .file-items-list .file-icon { width: 30px; height: 34px; }
 .file-items-list .file-item-name, .file-items-list .file-item-meta { margin: 0; }
 .file-items-list .file-item-meta { text-align: right; }
+.file-items-list .file-entry-select { top: 50%; right: auto; left: 8px; transform: translateY(-50%); }
+.file-items-list .file-item { padding-left: 44px; }
 .file-empty { min-height: 360px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 20px; text-align: center; }
 .file-preview { min-width: 0; padding: 16px; border-left: 1px solid var(--mantine-color-default-border); background: var(--mantine-color-body); }
 .file-preview-image { display: block; width: 100%; max-height: 650px; object-fit: contain; border-radius: 0; background: #fff; }

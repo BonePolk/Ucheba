@@ -57,6 +57,11 @@ class WorkspaceUpload(BaseModel):
     content: str = Field(max_length=14 * 1024 * 1024)
 
 
+class WorkspaceArchive(BaseModel):
+    paths: list[str] = Field(min_length=2, max_length=50)
+    output_path: str = Field(min_length=1, max_length=500)
+
+
 @app.post('/workspace/upload')
 def upload_workspace_file(body: WorkspaceUpload):
     try:
@@ -64,6 +69,11 @@ def upload_workspace_file(body: WorkspaceUpload):
     except ValueError:
         raise HTTPException(422, 'Некорректный файл') from None
     return workspace.save_binary(Memory(), body.path, content)
+
+
+@app.post('/workspace/archive')
+def workspace_archive(body: WorkspaceArchive):
+    return workspace.zip_files(Memory(), body.paths, body.output_path)
 
 
 @app.get('/workspace/preview')

@@ -1,11 +1,13 @@
 """Личные файлы и вложения задач внутри префикса текущего пользователя."""
 import hashlib
+from io import BytesIO
 import json
 from pathlib import Path
 from urllib.parse import quote
 import re
 from threading import Lock
 from datetime import datetime, timezone
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from fastapi import HTTPException
 from minio.error import S3Error
@@ -162,6 +164,25 @@ def save_binary(memory, path, content, version=None):
             raise HTTPException(409, 'Файл уже существует или изменился. Прочитайте его версию перед заменой')
         memory.put_bytes(key, content, 'application/octet-stream')
     return {'path': path, 'size': len(content), 'version': hashlib.sha256(content).hexdigest(), 'status': 'saved'}
+
+
+def zip_files(memory, paths, output_path):
+    if not 2 <= len(paths) <= 50 or len(set(paths)) != len(paths):
+        raise HTTPException(422, 'Выберите от 2 до 50 разных файлов')
+    paths = [personal_path(path) for path in paths]
+    output_path = personal_path(output_path)
+    if Path(output_path).suffix.lower() != '.zip' or output_path in paths:
+        raise HTTPException(422, 'Укажите новый путь архива с расширением .zip')
+    archive = BytesIO()
+    size = 0
+    with ZipFile(archive, 'w', ZIP_DEFLATED) as zipped:
+        for path in paths:
+            content, _ = read_binary(memory, path)
+            size += len(content)
+            if size > 20 * 1024 * 1024:
+                raise HTTPException(413, 'Общий размер файлов для архива превышает 20 МБ')
+            zipped.writestr(path, content)
+    return save_binary(memory, output_path, archive.getvalue())
 
 
 def delete_file(memory, path):

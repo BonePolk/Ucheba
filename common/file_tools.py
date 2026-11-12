@@ -50,7 +50,9 @@ FILE_INSTRUCTION = ('Скачивание кнопкой/JavaScript перехв
     'Silo — постоянная общая библиотека текущего аккаунта: list_user_files показывает файлы, '
     'read_silo_file читает документ и возвращает version, save_file_to_silo сохраняет оригинал '
     'загрузки браузера, write_silo_file сохраняет текст/Markdown/CSV/JSON. Сохраняй полезные '
-    'источники и результаты для повторного использования, затем сообщай путь. Не сохраняй секреты. '
+    'источники и результаты для повторного использования, затем сообщай путь. zip_files объединяет '
+    'от 2 до 50 личных файлов по точным путям в новый ZIP, исходники остаются без изменений. '
+    'Не сохраняй секреты. '
     'Удаляй через delete_silo_file только личные файлы по точному path и только по прямой просьбе владельца; '
     'файлы задач и память этим инструментом не удаляются. '
     'Для нового пути version пустая; существующий файл меняй только по просьбе владельца '
@@ -108,6 +110,10 @@ FILE_TOOLS = [
          {'file_id': {'type': 'string'}, 'mode': {'type': 'string', 'enum': ['hex', 'struct', 'zip']}, 'format': {'type': 'string'}, 'member': {'type': 'string'}, 'offset': {'type': 'integer', 'minimum': 0}}),
 ]
 LIBRARY_TOOLS = [
+    tool('zip_files', 'Создать новый ZIP-архив из 2–50 личных файлов Silo по точным путям из list_user_files. Архив сохранится в output_path; исходники не изменяются. Суммарный размер исходников до 20 МБ, готовый архив до 10 МБ. Укажи новый путь с расширением .zip.', {
+        'paths': {'type': 'array', 'minItems': 2, 'maxItems': 50, 'items': {'type': 'string', 'maxLength': 500}},
+        'output_path': {'type': 'string', 'maxLength': 500, 'pattern': '[.][zZ][iI][pP]$'},
+    }),
     tool('read_silo_file', 'Прочитать личный файл Silo по path из list_user_files: текст/Office, изображение или страница PDF. Возвращает version для безопасного сохранения. page начинается с 1.', {'path': {'type': 'string', 'maxLength': 500}, 'page': {'type': 'integer', 'minimum': 1}}),
     tool('delete_silo_file', 'Удалить личный файл Silo по точному path из list_user_files. Удаляет файл без возможности восстановления; не принимает папки, вложения задач или файлы памяти. Используй только по прямой просьбе владельца.', {'path': {'type': 'string', 'maxLength': 500}}),
     tool('write_silo_file', 'Создать или изменить личный текстовый файл в Silo: заметку, Markdown, CSV, JSON. version пустая для нового файла, иначе версия из read_silo_file/read_user_file. Существующий файл без правильной версии не заменяется.', {'path': {'type': 'string', 'maxLength': 500}, 'text': {'type': 'string', 'maxLength': 100000}, 'version': {'type': 'string', 'pattern': '^([a-f0-9]{64})?$'}}),
@@ -171,7 +177,7 @@ async def run_file_tool(name, args, browser_request, progress):
         return await file_result(name, output | result['output'], progress)
     if name in LIBRARY_NAMES:
         from common.library_client import library_request
-        progress.add({'write_silo_file': 'Сохраняет текстовый файл в Silo', 'delete_silo_file': 'Удаляет личный файл из Silo', 'list_user_files': 'Просматривает личные папки и файлы', 'read_user_file': 'Читает личный файл',
+        progress.add({'zip_files': 'Собирает выбранные файлы в ZIP-архив', 'write_silo_file': 'Сохраняет текстовый файл в Silo', 'delete_silo_file': 'Удаляет личный файл из Silo', 'list_user_files': 'Просматривает личные папки и файлы', 'read_user_file': 'Читает личный файл',
                       'list_memory': 'Просматривает сохранённые записи задач', 'read_memory': 'Читает сохранённую запись задачи',
                       'list_saved_files': 'Ищет сохранённые документы', 'read_file': 'Читает выбранный документ',
                       'view_pdf_page': 'Просматривает страницу PDF'}[name])

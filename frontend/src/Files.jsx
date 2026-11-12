@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Alert, Badge, Breadcrumbs, Button, FileButton, Group, Loader, Modal, Paper, SegmentedControl, Select, Stack, Text, Textarea, TextInput, Title } from '@mantine/core';
+import { Alert, Badge, Breadcrumbs, Button, Checkbox, FileButton, Group, Loader, Modal, Paper, SegmentedControl, Select, Stack, Text, Textarea, TextInput, Title } from '@mantine/core';
 import { useMediaQuery } from '@mantine/hooks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { request } from './api';
@@ -71,6 +71,9 @@ export default function Files() {
   const [offset, setOffset] = useState(0);
   const [notice, setNotice] = useState('');
   const [dragging, setDragging] = useState(false);
+  const [selectedPaths, setSelectedPaths] = useState([]);
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [archivePath, setArchivePath] = useState('');
   const dirty = editor?.editable && editor.content !== editor.original;
   useEffect(() => { client.setQueryData(['file-editor'], editor); }, [client, editor]);
   useEffect(() => {
@@ -110,6 +113,7 @@ export default function Files() {
     mutationFn: (file) => request(`/integrations/context/workspace/file?path=${encodeURIComponent(file.path)}`, { method: 'DELETE' }),
     onSuccess: (_, file) => {
       setEditor((current) => current?.path === file.path ? null : current);
+      setSelectedPaths((paths) => paths.filter((path) => path !== file.path));
       setNotice(`Файл «${file.name}» удалён`);
       refresh();
     },
@@ -117,6 +121,13 @@ export default function Files() {
   const createFolder = useMutation({
     mutationFn: (path) => request(`/integrations/context/workspace/folder?path=${encodeURIComponent(path)}`, { method: 'POST' }),
     onSuccess: () => { setCreating(null); setName(''); refresh(); },
+  });
+  const archive = useMutation({
+    mutationFn: (body) => request('/integrations/context/workspace/archive', { method: 'POST', body: JSON.stringify(body) }),
+    onSuccess: (result) => {
+      setNotice(`Архив сохранён: ${result.path}`);
+      setSelectedPaths([]); setArchiveOpen(false); refresh();
+    },
   });
   const upload = useMutation({
     mutationFn: async ({ files, target }) => {
@@ -134,7 +145,7 @@ export default function Files() {
     event.preventDefault(); event.stopPropagation(); setDragging(false);
     if (!busy && event.dataTransfer.files.length) upload.mutate({ files: Array.from(event.dataTransfer.files), target });
   }
-  const busy = open.isPending || save.isPending || deleteFile.isPending || createFolder.isPending || upload.isPending;
+  const busy = open.isPending || save.isPending || deleteFile.isPending || createFolder.isPending || upload.isPending || archive.isPending;
   function select(file) {
     if (busy) return;
     if (file.folder) { setFolder(file.path); setSearch(''); return; }
@@ -152,7 +163,7 @@ export default function Files() {
   }
   const data = preview.data;
   const columns = [...new Set((data?.table?.rows ?? []).flatMap((row) => Object.keys(row.cells)))];
-  const error = tree.error || open.error || save.error || deleteFile.error || createFolder.error || upload.error;
+  const error = tree.error || open.error || save.error || deleteFile.error || createFolder.error || upload.error || archive.error;
   return <Stack gap="md">
     <Group justify="space-between"><div><Title order={2}>Мои файлы</Title><Text c="dimmed" size="sm">{total.length} файлов · {sizeLabel(total.reduce((sum, file) => sum + (file.size ?? 0), 0))}</Text></div><Button variant="subtle" loading={tree.isFetching} onClick={refresh}>Обновить</Button></Group>
     {error && <Alert color="red">{error.message}</Alert>}
@@ -165,11 +176,11 @@ export default function Files() {
       </>} </aside>
       <section className="file-main">
         <div className="file-toolbar"><Group justify="space-between" gap="xs"><Breadcrumbs separator="/" style={{ minWidth: 0 }}><Button size="compact-xs" variant="subtle" onClick={() => setFolder('')}>Файлы</Button>{folder.split('/').filter(Boolean).map((part, index, parts) => <Button key={index} size="compact-xs" variant="subtle" onClick={() => setFolder(parts.slice(0, index + 1).join('/'))}>{part === '@tasks' ? 'Файлы задач' : part}</Button>)}</Breadcrumbs>
-          <Group gap={6}><FileButton multiple onChange={(files) => { if (files.length) upload.mutate({ files, target: folder }); }}>{(props) => <Button {...props} size="compact-xs" variant="default" loading={upload.isPending} disabled={busy || folder.startsWith('@')}>Загрузить</Button>}</FileButton><Button size="compact-xs" variant="light" disabled={busy || folder.startsWith('@')} onClick={() => { setName(''); setCreating('folder'); }}>Создать папку</Button><Button size="compact-xs" disabled={busy || folder.startsWith('@')} onClick={() => { setName(''); setCreating('file'); }}>Создать файл</Button></Group>
+          <Group gap={6}><FileButton multiple onChange={(files) => { if (files.length) upload.mutate({ files, target: folder }); }}>{(props) => <Button {...props} size="compact-xs" variant="default" loading={upload.isPending} disabled={busy || folder.startsWith('@')}>Загрузить</Button>}</FileButton><Button size="compact-xs" variant="light" disabled={busy || folder.startsWith('@')} onClick={() => { setName(''); setCreating('folder'); }}>Создать папку</Button><Button size="compact-xs" disabled={busy || folder.startsWith('@')} onClick={() => { setName(''); setCreating('file'); }}>Создать файл</Button>{selectedPaths.length > 0 && <Button size="compact-xs" variant="light" disabled={busy || selectedPaths.length < 2} onClick={() => { setArchivePath(`${folder && !folder.startsWith('@') ? folder + '/' : ''}archive.zip`); setArchiveOpen(true); }}>В ZIP ({selectedPaths.length})</Button>}</Group>
         </Group><Group gap="xs" mt="sm"><TextInput aria-label="Поиск файлов" placeholder="Поиск по имени…" value={search} onChange={(event) => setSearch(event.currentTarget.value)} style={{ flex: 1, minWidth: 140 }} /><Select aria-label="Сортировка файлов" value={sort} onChange={setSort} data={[{ value: 'name', label: 'По имени' }, { value: 'recent', label: 'Сначала новые' }, { value: 'size', label: 'По размеру' }]} w={145} /><SegmentedControl size="xs" aria-label="Вид файлов" value={view} onChange={setView} data={[{ value: 'grid', label: 'Плитки' }, { value: 'list', label: 'Список' }]} /></Group></div>
-        {tree.isPending ? <div className="file-empty"><Loader /></div> : rows.length ? <div className={`file-items file-items-${view}`}>{rows.map((file) => <button key={file.path} disabled={busy} className={`file-item ${editor?.path === file.path ? 'is-selected' : ''}`} onClick={() => select(file)} onDragOver={(event) => { if (file.folder) event.preventDefault(); }} onDrop={(event) => { if (file.folder) dropFiles(event, file.path); }} title={file.path}>
+        {tree.isPending ? <div className="file-empty"><Loader /></div> : rows.length ? <div className={`file-items file-items-${view}`}>{rows.map((file) => <div key={file.path} className="file-entry">{!file.folder && !file.path.startsWith('@tasks/') && <Checkbox className="file-entry-select" aria-label={`Добавить ${file.name} в архив`} checked={selectedPaths.includes(file.path)} disabled={busy} onChange={(event) => { const checked = event.currentTarget.checked; setSelectedPaths((paths) => checked ? [...paths, file.path] : paths.filter((path) => path !== file.path)); }} />}<button disabled={busy} className={`file-item ${editor?.path === file.path || selectedPaths.includes(file.path) ? 'is-selected' : ''}`} onClick={() => select(file)} onDragOver={(event) => { if (file.folder) event.preventDefault(); }} onDrop={(event) => { if (file.folder) dropFiles(event, file.path); }} title={file.path}>
           <FileIcon file={file} /><span className="file-item-name">{file.name}</span><span className="file-item-meta">{file.folder ? 'Папка' : sizeLabel(file.size)}{view === 'grid' && !file.folder && <span> · {file.name.includes('.') ? file.name.split('.').at(-1).toUpperCase() : 'Файл'}</span>}</span>
-        </button>)}</div> : <div className="file-empty"><FileIcon file={{ folder: true }} /><Text fw={600}>{search ? 'Ничего не найдено' : 'Пока пусто'}</Text><Text size="sm" c="dimmed">{search ? 'Попробуйте другое имя файла.' : 'Создайте файл или попросите агента скачать документ.'}</Text></div>}
+        </button></div>)}</div> : <div className="file-empty"><FileIcon file={{ folder: true }} /><Text fw={600}>{search ? 'Ничего не найдено' : 'Пока пусто'}</Text><Text size="sm" c="dimmed">{search ? 'Попробуйте другое имя файла.' : 'Создайте файл или попросите агента скачать документ.'}</Text></div>}
       </section>
       {editor && <aside className="file-preview"><Group justify="space-between" wrap="nowrap"><Group gap="xs" wrap="nowrap"><FileIcon file={editor} /><Text fw={600} size="sm" style={{ overflowWrap: 'anywhere' }}>{editor.name}</Text></Group><Button variant="subtle" size="compact-xs" disabled={busy} aria-label="Закрыть просмотр" onClick={() => { if (!dirty || window.confirm('Закрыть без сохранения изменений?')) setEditor(null); }}>✕</Button></Group>
         <Text size="xs" c="dimmed" mt="xs" style={{ overflowWrap: 'anywhere' }}>{editor.path}</Text>
@@ -185,6 +196,7 @@ export default function Files() {
         </Stack>}
       </aside>}
     </Paper>
+    <Modal opened={archiveOpen} onClose={() => setArchiveOpen(false)} title="Создать ZIP-архив" size="sm"><Stack><Text size="sm">Выбрано файлов: {selectedPaths.length}. Исходники останутся без изменений.</Text><TextInput label="Путь нового архива" value={archivePath} onChange={(event) => setArchivePath(event.currentTarget.value)} maxLength={500} autoFocus /><Button loading={archive.isPending} disabled={selectedPaths.length < 2 || !archivePath.trim()} onClick={() => archive.mutate({ paths: selectedPaths, output_path: archivePath.trim() })}>Создать архив</Button></Stack></Modal>
     <Modal opened={Boolean(creating)} onClose={() => setCreating(null)} title={creating === 'folder' ? 'Новая папка' : 'Новый файл'} size="sm"><Stack><Text size="xs" c="dimmed">/{folder || 'Мои файлы'}</Text><TextInput label="Название" placeholder={creating === 'folder' ? 'Например: Учёба' : 'Например: заметки.md'} value={name} onChange={(event) => setName(event.currentTarget.value)} maxLength={200} autoFocus /><Button loading={createFolder.isPending} disabled={!name.trim() || name.includes('/') || name.includes('\\')} onClick={create}>Создать</Button></Stack></Modal>
   </Stack>;
 }
