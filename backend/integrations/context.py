@@ -136,10 +136,10 @@ async def prepare_task(task_id, force=False, review_request=""):
                 memory.append({'task_id': source.id, 'subject': item.subject,
                                'title': source.title, 'description': (source.description or '')[:3000],
                                'owner_notes': item.owner_notes[:6000]})
-    config, secrets = read_settings('context')
+    config, secrets = read_settings('monocle')
     if not config['enabled'] or not secrets.get('api_key'):
         raise HTTPException(400, 'В профиле включите Monocle и сохраните API-ключ')
-    result = await call('context', '/analyze', {
+    result = await call('monocle', '/analyze', {
         'config': config, 'api_key': secrets['api_key'],
         'task_id': task_id, 'task': json.loads(task_state), 'subject': subject,
         'current_clock': deadline_facts(task.deadline),
@@ -160,7 +160,7 @@ async def prepare_task(task_id, force=False, review_request=""):
             raise HTTPException(409, 'Задача или контекст изменились. Повторите оценку')
         changed_fields = []
         # Даже если модель нарушит инструкцию, описание и категория не меняются.
-        allow_title = config['rewrite_title'] and read_config('context')['rewrite_title']
+        allow_title = config['rewrite_title'] and read_config('monocle')['rewrite_title']
         if allow_title and changes.title is not None and changes.title != task.title:
             task.title = changes.title
             changed_fields.append('title')

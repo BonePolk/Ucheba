@@ -7,10 +7,11 @@ from sqlalchemy import text
 
 from common.database import engine
 from common.identity import current_user_id, user_id
+from common.rpc import service_name
 from common.models.user import Feature, User
 
 passwords = PasswordHash.recommended()
-FEATURES = {'telegram', 'codex', 'context', 'ameba', 'straus', 'collector', 'notifications', 'registration'}
+FEATURES = {'telegram', 'arrodes', 'monocle', 'ameba', 'straus', 'collector', 'notifications', 'registration'}
 
 
 def bootstrap():
@@ -32,7 +33,7 @@ def bootstrap():
         with Session(engine) as session:
             context_exists = session.get(IntegrationSetting, 'context') is not None
         if not context_exists and os.getenv('LUNA_API_KEY'):
-            save_settings('context', secrets={'api_key': os.environ['LUNA_API_KEY']})
+            save_settings('monocle', secrets={'api_key': os.environ['LUNA_API_KEY']})
     finally:
         current_user_id.reset(token)
 
@@ -58,11 +59,13 @@ def features():
     with Session(engine) as session:
         saved = {item.name: item.enabled for item in session.exec(select(Feature)).all()}
     # Отключённый старый Jev не должен отключать самостоятельную Ameba.
-    previous_names = {'straus': 'context'}
-    return {name: saved.get(name, saved.get(previous_names.get(name, ''), True)) for name in sorted(FEATURES)}
+    previous_names = {'straus': 'context', 'monocle': 'context', 'arrodes': 'codex'}
+    result = {name: saved.get(name, saved.get(previous_names.get(name, ''), True)) for name in sorted(FEATURES)}
+    return result | {'context': result['monocle'], 'codex': result['arrodes']}
 
 
 def check_feature(name):
+    name = service_name(name)
     if name not in FEATURES or not features()[name]:
         raise HTTPException(403, 'Эта функция отключена администратором')
 

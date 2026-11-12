@@ -1,12 +1,13 @@
+import { agentName as publicAgentName } from './api';
 import AgentExplanation from './AgentExplanation';
 import AgentQuestion from './AgentQuestion';
-import MonocleBrowser from './LuchebaBrowser';
+import MonocleBrowser from './MonocleBrowser';
 import { useEffect, useRef, useState } from 'react';
 import { useMediaQuery } from '@mantine/hooks';
 import { Alert, Badge, Button, Collapse, Group, Loader, Paper, Stack, Text } from '@mantine/core';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 
-const names = { monocle: 'Monocle', straus: 'Straus', context: 'Monocle', ameba: 'Ameba', codex: 'Codex' };
+const names = { monocle: 'Monocle', straus: 'Straus', context: 'Monocle', ameba: 'Ameba', arrodes: 'Arrodes' };
 const statuses = { running: 'Работает', completed: 'Завершено', failed: 'Ошибка', interrupted: 'Прервано', blocked: 'Нужны данные или доступ', unchanged: 'Без изменений' };
 
 export default function AgentProgress({ taskId = 0, providers, active = false, children }) {
@@ -84,7 +85,7 @@ export default function AgentProgress({ taskId = 0, providers, active = false, c
     Number(b.run.status === 'running') - Number(a.run.status === 'running') ||
     (b.run.started_at ?? '').localeCompare(a.run.started_at ?? ''))[0];
   const run = current?.run;
-  const agentName = (run?.agent === 'Lucheba' ? 'Monocle' : run?.agent) ??
+  const agentName = publicAgentName(run?.agent) ??
     (providers.length === 1 ? names[providers[0]] : providers.map((provider) => names[provider] ?? provider).join(' · '));
   const statusLabel = run?.pending_question ? 'Ждёт ответа' : run ? statuses[run.status] : queued ? 'В очереди' : active ? 'Запускается' : 'Нет активной работы';
   const statusColor = run?.status === 'failed' ? 'red' : run?.status === 'blocked' || run?.pending_question ? 'yellow' : running ? 'purple' : 'gray';
@@ -96,7 +97,7 @@ export default function AgentProgress({ taskId = 0, providers, active = false, c
     ? Math.max(0, Math.floor((serverTime + elapsed - Date.parse(lastActivity)) / 60000)) : 0;
   const allEvents = current?.run.events ?? [];
   const browserUsed = current?.available && run?.status === 'running'
-    && ['Monocle', 'Lucheba', 'Straus'].includes(run.agent)
+    && ['Monocle', 'Straus', 'Arrodes'].includes(publicAgentName(run.agent))
     && allEvents.some((event) => event.kind !== 'note'
       && /^(Входит через сохранённый вход|Читает (текущую )?страницу|Переходит по выбранной ссылке|Скачивает документ из браузера|Ищет в Google|Смотрит снимок браузера|Перемещает курсор|Нажимает|Вводит текст|Прокручивает страницу|Открывает страницу|Возвращается назад|Переходит вперёд|Рассматривает изображение|Ждёт, пока владелец завершит CAPTCHA)/.test(event.message));
   const events = allEvents.map((event) => ({
@@ -151,7 +152,7 @@ export default function AgentProgress({ taskId = 0, providers, active = false, c
           const initialText = seenExplanations.current.get(event.key) ?? (receivedLog.current ? '' : event.message);
           return <div key={event.key} style={{ padding: '4px 0', overflowWrap: 'anywhere' }}>
             <Text size="xs" style={{ fontFamily: 'monospace', whiteSpace: 'pre-wrap' }}>
-              <Text component="span" inherit c="dimmed">{new Date(event.at).toLocaleTimeString()} · {current?.run.agent === 'Lucheba' ? 'Monocle' : current?.run.agent ?? names[event.provider]}{event.task_id ? ` #${event.task_id}` : ''} · </Text>
+              <Text component="span" inherit c="dimmed">{new Date(event.at).toLocaleTimeString()} · {publicAgentName(current?.run.agent) ?? names[event.provider]}{event.task_id ? ` #${event.task_id}` : ''} · </Text>
               <AgentExplanation text={event.message} initialText={initialText} animate={index === events.length - 1} />
             </Text>
 

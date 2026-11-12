@@ -39,7 +39,8 @@ def private_app(name, lifespan=None):
         except Exception as exc:
             code = getattr(exc, 'status_code', None) or getattr(exc, 'code', None)
             logging.getLogger('uvicorn.error').error('%s: %s (API %s)', name, type(exc).__name__, code if isinstance(code, int) else 'unknown')
-            detail = f'{name}: запрос отклонён или сервис недоступен'
+            label = {'arrodes': 'Arrodes', 'monocle': 'Monocle'}.get(name, name)
+            detail = f'{label}: запрос отклонён или сервис недоступен'
             if isinstance(code, int):
                 detail += f' (API {code})'
             return JSONResponse(status_code=502, content={'detail': detail})

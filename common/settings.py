@@ -6,6 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session
 
 from common.database import get_engine
+from common.rpc import service_name
 from common.security import decrypt, encrypt
 from common.models.integration import IntegrationSetting
 
@@ -13,16 +14,20 @@ DEFAULTS = {
     'notifications': {'enabled': False, 'owner_id': None, 'lead_minutes': 30},
     'collector': {'enabled': False, 'chat_ids': []},
     'telegram': {'enabled': False, 'chat_ids': []},
-    'context': {'enabled': True, 'base_url': 'https://lenec.tech/v1', 'model': 'gpt-6-luna', 'rewrite_title': False},
+    'monocle': {'enabled': True, 'base_url': 'https://lenec.tech/v1', 'model': 'gpt-6-luna', 'rewrite_title': False},
     'ameba': {'enabled': False, 'base_url': 'https://lenec.tech/v1', 'model': 'gpt-6-luna'},
     'straus': {'enabled': True, 'base_url': 'https://lenec.tech/v1', 'model': 'gpt-6-luna'},
-    'codex': {'enabled': False, 'auto_prepare': False},
+    'arrodes': {'enabled': False, 'auto_prepare': False, 'model': ''},
 }
 SECRET_FIELDS = {
     'notifications': {'bot_token'}, 'collector': {'bot_token'},
     'telegram': {'api_id', 'api_hash', 'phone', 'session'},
-    'context': {'api_key'}, 'ameba': {'api_key'}, 'straus': {'api_key'}, 'codex': set(),
+    'monocle': {'api_key'}, 'ameba': {'api_key'}, 'straus': {'api_key'}, 'arrodes': set(),
 }
+
+
+def setting_key(name):
+    return {'monocle': 'context', 'arrodes': 'codex'}.get(service_name(name), name)
 
 
 def inherit_agent_settings(name):
@@ -30,7 +35,7 @@ def inherit_agent_settings(name):
     if name not in ('ameba', 'straus'):
         return
     with Session(get_engine()) as session:
-        if session.get(IntegrationSetting, name):
+        if session.get(IntegrationSetting, setting_key(name)):
             return
         context = session.get(IntegrationSetting, 'context')
         # Старые настройки только наследуются; удалённый сервис не вызывается.
@@ -48,16 +53,17 @@ def inherit_agent_settings(name):
             session.commit()
         except IntegrityError:
             session.rollback()
-            if not session.get(IntegrationSetting, name):
+            if not session.get(IntegrationSetting, setting_key(name)):
                 raise
 
 
 def read_settings(name, *, apply_feature=True):
+    name = service_name(name)
     if name not in DEFAULTS:
         raise HTTPException(404, 'Неизвестная интеграция')
     inherit_agent_settings(name)
     with Session(get_engine()) as session:
-        row = session.get(IntegrationSetting, name)
+        row = session.get(IntegrationSetting, setting_key(name))
         stored = json.loads(row.config) if row else {}
         config = {key: stored.get(key, default) for key, default in DEFAULTS[name].items()}
         secrets = json.loads(decrypt(row.secrets)) if row and row.secrets else {}
@@ -68,6 +74,7 @@ def read_settings(name, *, apply_feature=True):
 
 
 def save_settings(name, config=None, secrets=None):
+    name = service_name(name)
     # Общий запрет влияет на запуск, но не меняет личный переключатель.
     current, private = read_settings(name, apply_feature=False)
     current.update(config or {})
@@ -76,7 +83,7 @@ def save_settings(name, config=None, secrets=None):
         from common.accounts import claim_bot
         claim_bot(name, private.get('bot_token', ''))
     with Session(get_engine()) as session:
-        row = session.get(IntegrationSetting, name) or IntegrationSetting(name=name)
+        row = session.get(IntegrationSetting, setting_key(name)) or IntegrationSetting(name=setting_key(name))
         row.config = json.dumps(current)
         if secrets is not None:
             row.secrets = encrypt(json.dumps(private))
@@ -85,8 +92,9 @@ def save_settings(name, config=None, secrets=None):
 
 
 def report(name, error=None, success=False):
+    name = service_name(name)
     with Session(get_engine()) as session:
-        row = session.get(IntegrationSetting, name) or IntegrationSetting(name=name)
+        row = session.get(IntegrationSetting, setting_key(name)) or IntegrationSetting(name=setting_key(name))
         row.last_error = error
         if success:
             row.last_success = datetime.now(timezone.utc)
@@ -102,7 +110,7 @@ def public_settings():
     result = {}
     with Session(get_engine()) as session:
         for name in DEFAULTS:
-            row = session.get(IntegrationSetting, name)
+            row = session.get(IntegrationSetting, setting_key(name))
             stored = json.loads(row.config) if row else {}
             config = {key: stored.get(key, default) for key, default in DEFAULTS[name].items()}
             if not enabled[name]:
@@ -114,13 +122,15 @@ def public_settings():
                 'last_success': row.last_success if row else None,
                 'last_error': row.last_error if row else None,
             }
-    return result
+    # Old API clients keep reading the same settings, not another integration.
+    return result | {'context': result['monocle'], 'codex': result['arrodes']}
 
 
 def read_config(name):
+    name = service_name(name)
     inherit_agent_settings(name)
     with Session(get_engine()) as session:
-        row = session.get(IntegrationSetting, name)
+        row = session.get(IntegrationSetting, setting_key(name))
         stored = json.loads(row.config) if row else {}
         config = {key: stored.get(key, default) for key, default in DEFAULTS[name].items()}
         from common.accounts import features

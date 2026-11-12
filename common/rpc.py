@@ -10,7 +10,13 @@ from fastapi.encoders import jsonable_encoder
 from common.identity import user_id
 
 
+def service_name(name):
+    return {'context': 'monocle', 'lucheba': 'monocle', 'codex': 'arrodes'}.get(name, name)
+
+
 def internal_token(service, owner=None):
+    # Preserve service signatures for already deployed clients.
+    service = {'monocle': 'context', 'arrodes': 'codex'}.get(service_name(service), service)
     secret = os.getenv('INTERNAL_SECRET', '')
     if not secret:
         raise HTTPException(503, 'Настройте ключ шифрования интеграций в .env')
@@ -30,15 +36,17 @@ def require_service(request: Request, service):
 
 async def call(service, path, body=None, method='POST', timeout=90):
     from common.accounts import check_feature
+    service = service_name(service)
     if path not in ('/close', '/disconnect', '/cancel'):
-        if service == 'context' and path.startswith('/browser/'):
+        if service == 'monocle' and path.startswith(('/browser/', '/workspace')):
             from common.accounts import features
-            if not (features()['context'] or features()['straus']):
-                check_feature('context')
+            enabled = features()
+            if not (enabled['monocle'] or enabled['straus'] or enabled['arrodes']):
+                check_feature('monocle')
         else:
             check_feature(service)
     async with httpx.AsyncClient(timeout=timeout, transport=httpx.AsyncHTTPTransport(retries=1)) as client:
-        host = 'lucheba' if service == 'context' else service
+        host = service
         try:
             # Чтение списка безопасно повторить, если Watch ещё перезапускает сервис.
             # Запуск агентов и остальные операции здесь не повторяем.
@@ -55,7 +63,7 @@ async def call(service, path, body=None, method='POST', timeout=90):
         except httpx.HTTPError as exc:
             # Не выводим тело запроса: в нём могут быть ключи и личные данные.
             logging.getLogger('uvicorn.error').warning('%s: %s', host, type(exc).__name__)
-            label = {'straus': 'Straus', 'context': 'Monocle', 'ameba': 'Ameba'}.get(service, service)
+            label = {'arrodes': 'Arrodes', 'straus': 'Straus', 'monocle': 'Monocle', 'ameba': 'Ameba'}.get(service, service)
             if isinstance(exc, httpx.TimeoutException):
                 detail = f'{label}: истекло время ожидания сервиса. Повторите запрос.'
             elif isinstance(exc, httpx.ConnectError):

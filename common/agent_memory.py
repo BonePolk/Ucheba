@@ -34,7 +34,7 @@ MEMORY_NAMES = {tool['name'] for tool in MEMORY_TOOLS}
 async def memory_request(method='GET', body=None):
     async with httpx.AsyncClient(timeout=15, transport=httpx.AsyncHTTPTransport(retries=1)) as client:
         response = await client.request(method, 'http://backend:8000/api/auth/agent-memory/internal', json=body,
-            headers={'X-Service-Token': internal_token('context'), 'X-User-ID': str(user_id())})
+            headers={'X-Service-Token': internal_token('monocle'), 'X-User-ID': str(user_id())})
         response.raise_for_status()
         return response.json()
 

@@ -17,7 +17,7 @@ export default function AppNavigation({ user, path, onLogout, leaving, collapsed
   const [more, setMore] = useState(false);
   const links = [{ href: '/', label: 'Задачи', icon: 'tasks' },
     { href: '/calendar', label: 'Календарь', icon: 'calendar' },
-    ...(user.features.context !== false ? [{ href: '/files', label: 'Файлы', icon: 'files' }] : []),
+    ...((user.features.monocle !== false || user.features.arrodes !== false || user.features.straus !== false) ? [{ href: '/files', label: 'Файлы', icon: 'files' }] : []),
     { href: '/profile', label: 'Профиль', icon: 'profile' }];
   const extra = <>
     <a href="/inbox" onClick={() => setMore(false)}>Входящие</a>

@@ -8,7 +8,7 @@ from sqlmodel import Session, select
 
 from common.database import get_engine
 from common.settings import read_settings, report
-from common.models.integration import CodexRun, NotificationSent, Suggestion
+from common.models.integration import ArrodesRun, NotificationSent, Suggestion
 from common.models.task import Task
 
 
@@ -42,8 +42,8 @@ async def send_notifications(bot):
             events.append((key, f'{label}: {task.title}\nСрок: {deadline.isoformat()}'))
         for item in session.exec(select(Suggestion).where(Suggestion.status == 'pending')).all():
             events.append((f'{owner}:suggestion:{item.id}', f'Новая задача на подтверждение: {item.title}\n{item.reason}'))
-        for run in session.exec(select(CodexRun).where(CodexRun.status == 'succeeded')).all():
-            events.append((f'{owner}:codex:{run.id}', f'Codex подготовил материалы для задачи #{run.task_id}. Результат ожидает проверки.'))
+        for run in session.exec(select(ArrodesRun).where(ArrodesRun.status == 'succeeded')).all():
+            events.append((f'{owner}:codex:{run.id}', f'Arrodes подготовил материалы для задачи #{run.task_id}. Результат ожидает проверки.'))
         unsent = [(key, text) for key, text in events if not session.get(NotificationSent, key)][:5]
     for key, text in unsent:
         await bot.send_message(owner, text[:3500])

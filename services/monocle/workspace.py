@@ -55,7 +55,7 @@ def tree(memory, include_attachments=True):
                        'source': 'download' if path in downloaded else 'silo',
                        'modified_at': item.last_modified.isoformat() if item.last_modified else None,
                        'folder': path.endswith('/'), 'editable': not path.endswith('/') and item.size <= MAX_TEXT and Path(path).suffix.lower() not in ('.pdf', '.xlsx', '.ods', '.xls', '.docx', '.doc', '.pptx', '.zip', '.png', '.jpg', '.jpeg', '.gif', '.webp'), 'size': item.size,
-                       'url': '/api/integrations/context/workspace/download?path=' + quote(path, safe='')})
+                       'url': '/api/integrations/monocle/workspace/download?path=' + quote(path, safe='')})
     if not include_attachments:
         return result
     # Показываем все вложения, включая убранные из задачи, без лимита поиска Monocle.
@@ -67,7 +67,7 @@ def tree(memory, include_attachments=True):
         info = materials.get_info(memory, task_id, file_id)
         result.append({'path': f'@tasks/{task_id}/{file_id}', 'name': info['name'], 'folder': False,
                        'size': info['size'], 'editable': info['mime'] == 'text/plain',
-                       'url': f'/api/integrations/context/files/{task_id}/{file_id}'})
+                       'url': f'/api/integrations/monocle/files/{task_id}/{file_id}'})
     return result
 
 

@@ -85,10 +85,17 @@ services:
         - action: rebuild
           path: ./services/telegram/Dockerfile
 
-  codex:
+  arrodes:
     build:
       context: .
-      dockerfile: services/codex/Dockerfile
+      dockerfile: services/arrodes/Dockerfile
+    networks:
+      default:
+        aliases: [codex]
+    # Bubblewrap needs nested namespaces; retain the default syscall restrictions otherwise.
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=./services/arrodes/seccomp.json
     healthcheck: *health
     environment:
       INTERNAL_SECRET: ${INTEGRATION_ENCRYPTION_KEY:-}
@@ -101,7 +108,7 @@ services:
     develop:
       watch:
         - action: sync+restart
-          path: ./services/codex
+          path: ./services/arrodes
           target: /app
           ignore: [Dockerfile, requirements.txt, __pycache__]
         - action: sync+restart
@@ -109,16 +116,16 @@ services:
           target: /app/common
           ignore: [requirements.txt, __pycache__]
         - action: rebuild
-          path: ./services/codex/requirements.txt
+          path: ./services/arrodes/requirements.txt
         - action: rebuild
           path: ./common/requirements.txt
         - action: rebuild
-          path: ./services/codex/Dockerfile
+          path: ./services/arrodes/Dockerfile
 
-  lucheba:
+  monocle:
     build:
       context: .
-      dockerfile: services/lucheba/Dockerfile
+      dockerfile: services/monocle/Dockerfile
     healthcheck: *health
     environment:
       INTERNAL_SECRET: ${INTEGRATION_ENCRYPTION_KEY:-}
@@ -126,12 +133,13 @@ services:
       SILO_SECRET_KEY: ${SILO_SECRET_KEY:-}
     networks:
       default:
+        aliases: [lucheba]
       context-egress:
         gw_priority: 1
     develop:
       watch:
         - action: sync+restart
-          path: ./services/lucheba
+          path: ./services/monocle
           target: /app
           ignore: [Dockerfile, requirements.txt, __pycache__]
         - action: sync+restart
@@ -139,11 +147,11 @@ services:
           target: /app/common
           ignore: [requirements.txt, __pycache__]
         - action: rebuild
-          path: ./services/lucheba/requirements.txt
+          path: ./services/monocle/requirements.txt
         - action: rebuild
           path: ./common/requirements.txt
         - action: rebuild
-          path: ./services/lucheba/Dockerfile
+          path: ./services/monocle/Dockerfile
 
   ameba:
     build:

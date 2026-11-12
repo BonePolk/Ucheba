@@ -14,8 +14,8 @@ export default function ContextBrowser({ taskId, disabled, initialSiteId = null 
   const [screen, setScreen] = useState(null);
   const [expanded, setExpanded] = useState(false);
   const live = useBrowserScreen(opened && Boolean(screen));
-  const path = `/integrations/tasks/${taskId}/context/browser`;
-  const sitesPath = '/integrations/context/browser/sites';
+  const path = `/integrations/tasks/${taskId}/monocle/browser`;
+  const sitesPath = '/integrations/monocle/browser/sites';
   const sites = useQuery({ queryKey: ['context-browser-sites'], queryFn: () => request(sitesPath), enabled: opened });
   const selected = useQuery({ queryKey: ['context-browser', taskId], queryFn: () => request(path), enabled: opened && Boolean(taskId) });
   const refresh = async () => {
@@ -44,7 +44,7 @@ export default function ContextBrowser({ taskId, disabled, initialSiteId = null 
     onSuccess: () => { client.setQueryData(['luna-browser-screen'], null); select.mutate(null); },
   });
   const action = useMutation({
-    mutationFn: (values) => request(taskId ? `${path}/action` : '/integrations/context/browser/manual', { method: 'POST', body: JSON.stringify({ site_id: siteId, ...values }) }),
+    mutationFn: (values) => request(taskId ? `${path}/action` : '/integrations/monocle/browser/manual', { method: 'POST', body: JSON.stringify({ site_id: siteId, ...values }) }),
     onSuccess: (data) => { setScreen(data); return refresh(); },
   });
   const busy = disabled || select.isPending || save.isPending || forget.isPending || action.isPending;

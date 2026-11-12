@@ -81,7 +81,7 @@ export default function Files() {
     window.addEventListener('beforeunload', warn);
     return () => window.removeEventListener('beforeunload', warn);
   }, [dirty]);
-  const tree = useQuery({ queryKey: ['file-tree'], queryFn: () => request('/integrations/context/workspace'), refetchInterval: 10000 });
+  const tree = useQuery({ queryKey: ['file-tree'], queryFn: () => request('/integrations/monocle/workspace'), refetchInterval: 10000 });
   const files = Array.isArray(tree.data) ? tree.data : tree.data?.files ?? [];
   const root = buildTree(files);
   let current = root;
@@ -91,27 +91,27 @@ export default function Files() {
   const total = files.filter((file) => !file.folder);
   const refresh = () => client.invalidateQueries({ queryKey: ['file-tree'] });
   const open = useMutation({
-    mutationFn: (file) => request(`/integrations/context/workspace/file?path=${encodeURIComponent(file.path)}`),
+    mutationFn: (file) => request(`/integrations/monocle/workspace/file?path=${encodeURIComponent(file.path)}`),
     onSuccess: (data, file) => setEditor({ ...file, ...data, original: data.content }),
   });
   const preview = useQuery({
     queryKey: ['file-preview', editor?.path, editor?.version, page, sheet, offset],
-    queryFn: () => request(`/integrations/context/workspace/preview?${new URLSearchParams({ path: editor.path, page, sheet, offset })}`),
+    queryFn: () => request(`/integrations/monocle/workspace/preview?${new URLSearchParams({ path: editor.path, page, sheet, offset })}`),
     enabled: Boolean(editor?.url) && mode === 'preview',
     placeholderData: (previous, query) => query?.queryKey[1] === editor?.path ? previous : undefined,
     retry: false,
   });
   const save = useMutation({
-    mutationFn: (file) => request('/integrations/context/workspace/file', { method: 'PUT', body: JSON.stringify({ path: file.path, content: file.content, version: file.version }) }),
+    mutationFn: (file) => request('/integrations/monocle/workspace/file', { method: 'PUT', body: JSON.stringify({ path: file.path, content: file.content, version: file.version }) }),
     onSuccess: (data, file) => {
-      setEditor((current) => current?.path === file.path ? { ...current, version: data.version, original: file.content, url: current.url ?? `/api/integrations/context/workspace/download?path=${encodeURIComponent(file.path)}` } : current);
+      setEditor((current) => current?.path === file.path ? { ...current, version: data.version, original: file.content, url: current.url ?? `/api/integrations/monocle/workspace/download?path=${encodeURIComponent(file.path)}` } : current);
       setNotice('Файл сохранён в Silo');
       refresh();
       for (const key of ['context-file-library', 'context-files', 'context', 'tasks', 'ameba-ranking']) client.invalidateQueries({ queryKey: [key] });
     },
   });
   const deleteFile = useMutation({
-    mutationFn: (file) => request(`/integrations/context/workspace/file?path=${encodeURIComponent(file.path)}`, { method: 'DELETE' }),
+    mutationFn: (file) => request(`/integrations/monocle/workspace/file?path=${encodeURIComponent(file.path)}`, { method: 'DELETE' }),
     onSuccess: (_, file) => {
       setEditor((current) => current?.path === file.path ? null : current);
       setSelectedPaths((paths) => paths.filter((path) => path !== file.path));
@@ -120,11 +120,11 @@ export default function Files() {
     },
   });
   const createFolder = useMutation({
-    mutationFn: (path) => request(`/integrations/context/workspace/folder?path=${encodeURIComponent(path)}`, { method: 'POST' }),
+    mutationFn: (path) => request(`/integrations/monocle/workspace/folder?path=${encodeURIComponent(path)}`, { method: 'POST' }),
     onSuccess: () => { setCreating(null); setName(''); refresh(); },
   });
   const archive = useMutation({
-    mutationFn: (body) => request('/integrations/context/workspace/archive', { method: 'POST', body: JSON.stringify(body) }),
+    mutationFn: (body) => request('/integrations/monocle/workspace/archive', { method: 'POST', body: JSON.stringify(body) }),
     onSuccess: (result) => {
       setNotice(`Архив сохранён: ${result.path}`);
       setSelectedPaths([]); setArchiveOpen(false); refresh();
@@ -134,7 +134,7 @@ export default function Files() {
     mutationFn: async ({ files, target }) => {
       if (target.startsWith('@')) throw new Error('Выберите личную папку для загрузки');
       for (const file of files) {
-        await request('/integrations/context/workspace/upload', { method: 'POST', body: JSON.stringify({
+        await request('/integrations/monocle/workspace/upload', { method: 'POST', body: JSON.stringify({
           path: target ? `${target}/${file.name}` : file.name, content: await fileContent(file),
         }) });
       }

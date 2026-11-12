@@ -60,7 +60,8 @@ class TaskRanking(SQLModel, table=True):
     result: str = '{}'
 
 
-class CodexRun(SQLModel, table=True):
+class ArrodesRun(SQLModel, table=True):
+    __tablename__ = 'codexrun'
     id: str = Field(primary_key=True)
     task_id: int
     status: str = 'queued'
@@ -144,3 +145,7 @@ class AgentIssue(SQLModel, table=True):
     occurrences: int = 1
     resolved: bool = False
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# Compatibility for older imports and existing migrations.
+CodexRun = ArrodesRun

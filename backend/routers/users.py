@@ -11,6 +11,7 @@ from sqlmodel import Session, select
 from agent_memory import FactInput
 from agent_issues import IssueInput
 
+from common.rpc import service_name
 from common.accounts import account, check_feature, features, passwords, public_user
 from common.database import engine, user_engine
 from common.models.user import Feature, User
@@ -113,6 +114,7 @@ class FeatureUpdate(BaseModel):
 @admin.patch('/features/{name}')
 def feature_update(name: str, body: FeatureUpdate):
     from common.accounts import FEATURES
+    name = service_name(name)
     if name not in FEATURES:
         raise HTTPException(404, 'Неизвестная функция')
     with Session(engine) as session:
@@ -130,14 +132,16 @@ def agent_history_list(request: Request, before: int | None = None):
     return read(before)
 
 
-@router.api_route('/agent-history/internal', methods=['POST', 'PATCH'])
-async def agent_history_internal(request: Request):
+@router.api_route('/agent-history/internal', methods=['GET', 'POST', 'PATCH'])
+async def agent_history_internal(request: Request, before: int | None = None):
     from common.rpc import require_service
     from common.identity import current_user_id
-    from agent_history import start, finish
+    from agent_history import start, finish, read
     owner = require_service(request, 'context')
     token = current_user_id.set(owner)
     try:
+        if request.method == 'GET':
+            return read(before=before)
         body = await request.json()
         return start(body) if request.method == 'POST' else finish(body)
     finally:
@@ -186,9 +190,10 @@ async def agent_memory_internal(request: Request):
         if request.method == 'GET':
             return read()
         body = await request.json()
-        if body.get('agent') not in ('Straus', 'Monocle', 'Lucheba', 'Ameba'):
+        if body.get('agent') not in ('Straus', 'Monocle', 'Lucheba', 'Ameba', 'Arrodes', '\u0410\u0440\u0440\u043e\u0434\u0435\u0441', 'Codex'):
             raise HTTPException(422, 'Неизвестный агент')
-        return save(body, body['agent'])
+        agent = 'Arrodes' if body['agent'] in ('Codex', '\u0410\u0440\u0440\u043e\u0434\u0435\u0441') else body['agent']
+        return save(body, agent)
     finally:
         current_user_id.reset(token)
 
@@ -222,3 +227,16 @@ def report_own_agent_issue(body: IssueInput, request: Request):
     require_user(request)
     from agent_issues import report
     return report(body)
+
+
+@router.post('/arrodes/tasks/internal')
+async def arrodes_tasks_internal(request: Request):
+    from common.rpc import require_service
+    from common.identity import current_user_id
+    from integrations.arrodes import read_tasks
+    token = current_user_id.set(require_service(request, 'arrodes'))
+    try:
+        check_feature('arrodes')
+        return read_tasks(**(await request.json()))
+    finally:
+        current_user_id.reset(token)

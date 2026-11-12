@@ -11,12 +11,12 @@ export default function MonocleBrowser({ active = false }) {
   const client = useQueryClient();
   const controls = useQuery({
     queryKey: ['browser-handoff'],
-    queryFn: () => request('/integrations/context/browser/handoff', { method: 'POST', body: JSON.stringify({ action: 'status' }) }),
+    queryFn: () => request('/integrations/monocle/browser/handoff', { method: 'POST', body: JSON.stringify({ action: 'status' }) }),
     enabled: opened || expanded,
     refetchInterval: 1000,
   });
   const action = useMutation({
-    mutationFn: (values) => request('/integrations/context/browser/handoff', { method: 'POST', body: JSON.stringify(values) }),
+    mutationFn: (values) => request('/integrations/monocle/browser/handoff', { method: 'POST', body: JSON.stringify(values) }),
     onSuccess: () => client.invalidateQueries({ queryKey: ['browser-handoff'] }),
   });
   const paused = controls.data?.paused;

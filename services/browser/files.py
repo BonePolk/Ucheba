@@ -34,8 +34,8 @@ def silo_request(name, arguments):
     # Silo принадлежит сервису библиотеки; браузеру не нужны его ключи.
     try:
         with httpx.Client(timeout=60, transport=httpx.HTTPTransport(retries=1)) as client:
-            response = client.post('http://lucheba:8000/library/tool', json={'name': name, 'arguments': arguments},
-                headers={'X-Service-Token': internal_token('context'), 'X-User-ID': str(user_id())})
+            response = client.post('http://monocle:8000/library/tool', json={'name': name, 'arguments': arguments},
+                headers={'X-Service-Token': internal_token('monocle'), 'X-User-ID': str(user_id())})
     except httpx.HTTPError:
         raise HTTPException(503, 'Не удалось подключиться к Silo. Загрузка не подтверждена как сохранённая') from None
     if not response.is_success:

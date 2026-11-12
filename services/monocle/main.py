@@ -32,7 +32,7 @@ import materials
 import workspace
 from browser_client import browser_request, browser_run_id
 
-app = private_app('context')
+app = private_app('monocle')
 agent_routes(app, 'Monocle')
 
 
@@ -514,7 +514,7 @@ async def run_agent(client, memory, task_id, body, progress):
                     file = await asyncio.to_thread(materials.reuse, memory, task_id, args.get('source_task_id'), args.get('file_id'))
                     extra_content.extend(await asyncio.to_thread(materials.file_input, memory, task_id, file['id']))
                     output = {'status': 'saved_file', 'file': file,
-                              'url': f"/api/integrations/tasks/{task_id}/context/files/{file['id']}"}
+                              'url': f"/api/integrations/tasks/{task_id}/monocle/files/{file['id']}"}
                 elif call.name in BROWSER_NAMES:
                     output = await run_browser_tool(call.name, args, browser_request, progress, browser_elements)
                 else:
@@ -529,7 +529,7 @@ async def run_agent(client, memory, task_id, body, progress):
                     progress.add(f"Документ сохранён: {file['name']}")
                     extra_content.extend(await asyncio.to_thread(materials.file_input, memory, task_id, file['id']))
                     output = {'status': 'file', 'file': file,
-                              'url': f"/api/integrations/tasks/{task_id}/context/files/{file['id']}"}
+                              'url': f"/api/integrations/tasks/{task_id}/monocle/files/{file['id']}"}
             except (ValueError, TypeError, AttributeError):
                 progress.add('Инструмент получил некорректные аргументы')
                 output = {'error': 'Некорректные аргументы инструмента'}

@@ -11,8 +11,8 @@ async def library_request(name, args):
     for attempt in range(attempts):
         try:
             async with httpx.AsyncClient(timeout=60) as client:
-                response = await client.post('http://lucheba:8000/library/tool', json={'name': name, 'arguments': args},
-                    headers={'X-Service-Token': internal_token('context'), 'X-User-ID': str(user_id())})
+                response = await client.post('http://monocle:8000/library/tool', json={'name': name, 'arguments': args},
+                    headers={'X-Service-Token': internal_token('monocle'), 'X-User-ID': str(user_id())})
             if response.status_code in (502, 503, 504) and attempt + 1 < attempts:
                 continue
             if not response.is_success:

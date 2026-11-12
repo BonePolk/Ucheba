@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { request } from './api';
 import BotSettings from './BotSettings';
 import AgentSettings from './AgentSettings';
+import ModelPicker from './ModelPicker';
 
 function ConnectionInfo({ value }) {
   return <>
@@ -25,20 +26,20 @@ export default function Integrations({ features = {} }) {
 function IntegrationForms({ data, features }) {
   const client = useQueryClient();
   const [telegram, setTelegram] = useState({ enabled: data.telegram.enabled, api_id: '', api_hash: '', phone: '' });
-  const [codex, setCodex] = useState({ enabled: data.codex.enabled, auto_prepare: data.codex.auto_prepare });
+  const [arrodes, setArrodes] = useState({ enabled: data.arrodes.enabled, auto_prepare: data.arrodes.auto_prepare, model: data.arrodes.model ?? '' });
   const [code, setCode] = useState('');
   const [password, setPassword] = useState('');
   const [step, setStep] = useState('');
   const [chatIds, setChatIds] = useState(data.telegram.chat_ids.map(String));
   const [notice, setNotice] = useState('');
   const chats = useQuery({ queryKey: ['integrations', 'chats'], queryFn: () => request('/integrations/telegram/chats'), enabled: false, retry: false });
-  const [codexOpened, setCodexOpened] = useState(data.codex.enabled);
-  const codexState = useQuery({ queryKey: ['integrations', 'codex'], enabled: features.codex !== false && codexOpened, queryFn: () => request('/integrations/codex/status'), refetchInterval: 10000, retry: false });
+  const [arrodesOpened, setArrodesOpened] = useState(data.arrodes.enabled);
+  const arrodesState = useQuery({ queryKey: ['integrations', 'arrodes'], enabled: features.arrodes !== false && arrodesOpened, queryFn: () => request('/integrations/arrodes/status'), refetchInterval: 10000, retry: false });
   const mutation = useMutation({
     mutationFn: ({ path, body, method = 'POST' }) => request(`/integrations/${path}`, { method, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) }),
     onSuccess: async (result, variables) => {
       if (variables.method === 'PATCH') {
-        const setter = { telegram: setTelegram, codex: setCodex }[variables.path];
+        const setter = { telegram: setTelegram, arrodes: setArrodes }[variables.path];
         if (setter) setter((current) => Object.fromEntries(Object.entries(current).map(([key, value]) => [
           key, ['api_id', 'api_hash', 'phone', 'api_key', 'api_token'].includes(key) ? '' : variables.body[key] ?? value,
         ])));
@@ -46,7 +47,7 @@ function IntegrationForms({ data, features }) {
       if (result.step) { setStep(result.step); setCode(''); setPassword(''); }
       setNotice(result.messages !== undefined ? `Обработано сообщений: ${result.messages}, создано задач: ${result.created}, на подтверждение: ${result.pending}` : 'Готово');
       await client.invalidateQueries({ queryKey: ['integrations'], exact: true });
-      if (variables.path.startsWith('codex/')) client.invalidateQueries({ queryKey: ['integrations', 'codex'] });
+      if (variables.path.startsWith('arrodes/')) client.invalidateQueries({ queryKey: ['integrations', 'arrodes'] });
       await client.invalidateQueries({ queryKey: ['tasks'] });
       await client.invalidateQueries({ queryKey: ['inbox'] });
     },
@@ -62,12 +63,12 @@ function IntegrationForms({ data, features }) {
     const checked = event.currentTarget.checked;
     setter((current) => ({ ...current, [name]: checked }));
   };
-  const error = mutation.error || chats.error || codexState.error;
+  const error = mutation.error || chats.error || arrodesState.error;
   return <Stack>
     {error && <Alert color="red">{error.message}</Alert>}
     {notice && <Alert color="purple" withCloseButton onClose={() => setNotice('')}>{notice}</Alert>}
     <SimpleGrid cols={{ base: 1, md: 2 }} style={{ alignItems: 'start' }}>
-      {features.context !== false && <AgentSettings name="context" title="Monocle" data={data.context} />}
+      {features.monocle !== false && <AgentSettings name="monocle" title="Monocle" data={data.monocle} />}
       {features.ameba !== false && data.ameba && <AgentSettings name="ameba" title="Ameba" data={data.ameba} />}
       {features.straus !== false && data.straus && <AgentSettings name="straus" title="Straus" data={data.straus} />}
 
@@ -85,18 +86,18 @@ function IntegrationForms({ data, features }) {
         <Button color="red" variant="subtle" disabled={mutation.isPending} onClick={() => { if (window.confirm('Отключить Telegram?')) run('telegram/disconnect'); }}>Отключить аккаунт</Button>
         <ConnectionInfo value={data.telegram} />
       </Stack></Paper>}
-      {features.codex !== false && <Paper withBorder p="md"><Stack gap="sm">
-        <Group justify="space-between"><Title order={4}>Codex</Title><Badge color={codexState.data?.authorized ? 'green' : 'gray'}>{codexState.data?.authorized ? 'Вход выполнен' : 'Нет авторизации'}</Badge></Group>
-        <Text size="sm">Официальный Python SDK openai-codex с входом ChatGPT по device code. Включите device code login в настройках безопасности ChatGPT. Доступ зависит от подписки и лимитов аккаунта.</Text>
-        {codexState.data && !codexState.data.sandbox_available && <Alert color="yellow">Linux sandbox недоступен в этом окружении. Выполнение заблокировано; режим без защиты не используется.</Alert>}
-        <Group><Button disabled={mutation.isPending} onClick={() => { setCodexOpened(true); run('codex/connect'); }}>Подключить через ChatGPT</Button><Button variant="default" disabled={mutation.isPending} onClick={() => { setCodexOpened(true); run('codex/check'); }}>Проверить доступность</Button></Group>
-        {codexState.data?.device?.state === 'waiting' && <Alert color="purple"><Stack gap="xs"><Text>Подтвердите вход в браузере:</Text>{codexState.data.device.url && <Anchor href={codexState.data.device.url} target="_blank" rel="noreferrer">Открыть страницу OpenAI</Anchor>}<Text fw={700}>{codexState.data.device.code ?? 'Ожидание кода…'}</Text></Stack></Alert>}
-        {['failed', 'expired'].includes(codexState.data?.device?.state) && <Alert color="yellow">Вход не завершён или код истёк. Запросите новый код.</Alert>}
-        <Switch label="Включить агента" checked={codex.enabled} onChange={toggle(setCodex, 'enabled')} />
-        <Switch label="Автоматически готовить материалы для принятых задач из Telegram" checked={codex.auto_prepare} onChange={toggle(setCodex, 'auto_prepare')} />
-        <Text size="xs" c="dimmed">Одна задача за раз, до 5 минут. Подготовка файлов и встроенный поиск; сетевой доступ команд отключён. Результат переводит задачу «На проверку». Публикация и отправка сообщений не выполняются.</Text>
-        <Group><Button loading={saving('codex')} disabled={mutation.isPending} onClick={() => save('codex', codex)}>Сохранить</Button><Button color="red" variant="subtle" disabled={mutation.isPending} onClick={() => run('codex/disconnect')}>Отключить</Button></Group>
-        <ConnectionInfo value={data.codex} />
+      {features.arrodes !== false && <Paper withBorder p="md"><Stack gap="sm">
+        <Group justify="space-between"><Title order={4}>Arrodes</Title><Badge color={arrodesState.data?.authorized ? 'green' : 'gray'}>{arrodesState.data?.authorized ? 'Вход выполнен' : 'Нет авторизации'}</Badge></Group>
+        <Text size="sm" c="dimmed">Выполняет поручения и готовит файлы. Вход через ChatGPT.</Text>
+        {arrodesState.data && !arrodesState.data.sandbox_available && <Alert color="yellow">Linux sandbox недоступен. {arrodesState.data.sandbox_error || 'Выполнение заблокировано; режим без защиты не используется.'}</Alert>}
+        <Group><Button disabled={mutation.isPending} onClick={() => { setArrodesOpened(true); run('arrodes/connect'); }}>Подключить через ChatGPT</Button><Button variant="default" disabled={mutation.isPending} onClick={() => { setArrodesOpened(true); run('arrodes/check'); }}>Проверить доступность</Button></Group>
+        {arrodesState.data?.device?.state === 'waiting' && <Alert color="purple"><Stack gap="xs"><Text>Подтвердите вход в браузере:</Text>{arrodesState.data.device.url && <Anchor href={arrodesState.data.device.url} target="_blank" rel="noreferrer">Открыть страницу OpenAI</Anchor>}<Text fw={700}>{arrodesState.data.device.code ?? 'Ожидание кода…'}</Text></Stack></Alert>}
+        {['failed', 'expired'].includes(arrodesState.data?.device?.state) && <Alert color="yellow">Вход не завершён или код истёк. Запросите новый код.</Alert>}
+        <ModelPicker path="/integrations/arrodes/models" chatgpt value={arrodes.model} onChange={(model) => setArrodes((current) => ({ ...current, model }))} />
+        <Switch label="Включить агента" checked={arrodes.enabled} onChange={toggle(setArrodes, 'enabled')} />
+        <Switch label="Автоматически готовить материалы для принятых задач из Telegram" checked={arrodes.auto_prepare} onChange={toggle(setArrodes, 'auto_prepare')} />
+        <Group><Button loading={saving('arrodes')} disabled={mutation.isPending} onClick={() => save('arrodes', arrodes)}>Сохранить</Button><Button color="red" variant="subtle" disabled={mutation.isPending} onClick={() => run('arrodes/disconnect')}>Отключить</Button></Group>
+        <details><summary style={{ cursor: 'pointer', fontSize: 13 }}>Состояние подключения</summary><ConnectionInfo value={data.arrodes} /></details>
       </Stack></Paper>}
       {features.collector !== false && <Paper withBorder p="md"><BotSettings name="collector" data={data.collector} /></Paper>}
       {features.notifications !== false && <Paper withBorder p="md"><BotSettings name="notifications" data={data.notifications} /></Paper>}

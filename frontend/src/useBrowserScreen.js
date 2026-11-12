@@ -5,7 +5,7 @@ export default function useBrowserScreen(enabled) {
   const [error, setError] = useState(false);
   useEffect(() => {
     if (!enabled) return;
-    const stream = new EventSource('/api/integrations/context/browser/stream');
+    const stream = new EventSource('/api/integrations/monocle/browser/stream');
     setError(false);
     stream.onmessage = (event) => {
       try {

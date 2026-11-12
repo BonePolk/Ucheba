@@ -13,7 +13,7 @@ from common.models.integration import AgentIssue
 
 
 class IssueInput(BaseModel):
-    agent: Literal['Straus', 'Monocle', 'Ameba']
+    agent: Literal['Straus', 'Monocle', 'Ameba', 'Arrodes']
     tool_name: str = Field(min_length=1, max_length=60, pattern=r'^[a-z_]+$')
     category: Literal['timeout', 'element_not_found', 'login_failed', 'unsupported_file', 'invalid_format', 'service_unavailable', 'missing_capability', 'other']
     description: str = Field(default='', max_length=500)

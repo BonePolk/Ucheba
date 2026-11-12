@@ -14,7 +14,7 @@ export async function uploadTaskFiles(taskId, files) {
   for (let index = 0; index < files.length; index += 1) {
     const file = files[index];
     try {
-      await request(`/integrations/tasks/${taskId}/context/files`, {
+      await request(`/integrations/tasks/${taskId}/monocle/files`, {
         method: 'POST', body: JSON.stringify({ name: file.name, content: await fileContent(file) }),
       });
     } catch (error) {

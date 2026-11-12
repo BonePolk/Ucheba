@@ -9,9 +9,9 @@ import subprocess
 import sys
 
 root = Path(__file__).resolve().parents[1]
-service = sys.argv[1]
-if service not in ('browser', 'straus', 'lucheba'):
-    raise SystemExit('Выберите browser, straus или lucheba')
+service = 'monocle' if sys.argv[1] == 'lucheba' else sys.argv[1]
+if service not in ('browser', 'straus', 'monocle'):
+    raise SystemExit('Выберите browser, straus или monocle')
 paths = list((root / 'common').rglob('*.py')) + list((root / 'services' / service).glob('*.py'))
 paths += list((root / 'backend').rglob('*.py')) + [root / 'tests' / f'test_{service}_tools.py']
 files = {}

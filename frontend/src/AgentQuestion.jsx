@@ -3,7 +3,7 @@ import { Alert, Button, Group, Paper, Stack, Text, Textarea } from '@mantine/cor
 import { useMutation } from '@tanstack/react-query';
 import { request } from './api';
 
-const services = { Monocle: 'context', Lucheba: 'context', Straus: 'straus', Ameba: 'ameba' };
+const services = { '\u0410\u0440\u0440\u043e\u0434\u0435\u0441': 'arrodes', Arrodes: 'arrodes', Codex: 'arrodes', Monocle: 'monocle', Lucheba: 'monocle', Straus: 'straus', Ameba: 'ameba' };
 
 export default function AgentQuestion({ question, agent }) {
   const [text, setText] = useState('');

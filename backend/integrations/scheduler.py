@@ -1,4 +1,4 @@
-"""Monocle и Straus делят браузер и имеют приоритет перед Ameba."""
+"""Monocle, Straus и Arrodes делят браузер и имеют приоритет перед Ameba."""
 import asyncio
 from contextlib import asynccontextmanager
 from uuid import uuid4
@@ -63,23 +63,23 @@ async def slot(provider, task_id=0):
     async with condition:
         waiting.append(entry)
     try:
-        if provider == 'context':
+        if provider in ('context', 'arrodes'):
             await interrupt_ranking()
         async with condition:
             def available():
                 if owner in ameba_users or owner in active_users:
                     return False
-                browser_waiting = [item for item in waiting if item['owner'] == owner and item['provider'] == 'context']
-                if provider == 'context':
+                browser_waiting = [item for item in waiting if item['owner'] == owner and item['provider'] in ('context', 'arrodes')]
+                if provider in ('context', 'arrodes'):
                     return bool(browser_waiting) and browser_waiting[0] is entry
-                ranking_waiting = [item for item in waiting if item['owner'] == owner and item['provider'] != 'context']
+                ranking_waiting = [item for item in waiting if item['owner'] == owner and item['provider'] not in ('context', 'arrodes')]
                 return not browser_waiting and not planned.get(owner) and ranking_waiting[0] is entry
 
             await condition.wait_for(available)
             waiting.remove(entry)
-            if provider == 'context':
+            if provider in ('context', 'arrodes'):
                 active_users.add(owner)
-                if owner in planned:
+                if provider == 'context' and owner in planned:
                     planned[owner] = [value for value in planned[owner] if value != task_id]
             else:
                 ameba_users.add(owner)
@@ -94,7 +94,7 @@ async def slot(provider, task_id=0):
     finally:
         async with condition:
             running[:] = [item for item in running if item is not entry]
-            if provider == 'context':
+            if provider in ('context', 'arrodes'):
                 active_users.discard(owner)
             else:
                 ameba_users.discard(owner)
@@ -121,7 +121,7 @@ def queue_state():
     pending.extend({'owner': owner, 'provider': 'context', 'task_id': task_id}
                    for task_id in planned.get(owner, []) if task_id not in visible)
     return {'active': active, 'waiting': pending,
-            'browser_busy': bool(owner in active_users or any(item['provider'] == 'context' for item in pending) or planned.get(owner)),
+            'browser_busy': bool(owner in active_users or any(item['provider'] in ('context', 'arrodes') for item in pending) or planned.get(owner)),
             'ameba_running': any(item['provider'] == 'ameba' for item in active),
             'busy': bool(active or pending)}
 

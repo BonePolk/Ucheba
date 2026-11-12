@@ -8,9 +8,9 @@ export default function ContextFiles({ taskId, disabled }) {
   const client = useQueryClient();
   const reset = useRef(null);
   const [saved, setSaved] = useState(null);
-  const path = `/integrations/tasks/${taskId}/context/files`;
+  const path = `/integrations/tasks/${taskId}/monocle/files`;
   const files = useQuery({ queryKey: ['context-files', taskId], queryFn: () => request(path) });
-  const library = useQuery({ queryKey: ['context-file-library'], queryFn: () => request('/integrations/context/files') });
+  const library = useQuery({ queryKey: ['context-file-library'], queryFn: () => request('/integrations/monocle/files') });
   const refresh = async () => {
     await client.invalidateQueries({ queryKey: ['context-files', taskId] });
     await client.invalidateQueries({ queryKey: ['context-file-library'] });

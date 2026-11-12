@@ -192,7 +192,7 @@ async def rank_all(force=False, task_id=0):
                 try:
                     await prepare(pending_id)
                 except HTTPException as exc:
-                    report('context', error=str(exc.detail))
+                    report('monocle', error=str(exc.detail))
                     raise
         with Session(get_engine()) as session:
             signature, ready, waiting = task_state(session)

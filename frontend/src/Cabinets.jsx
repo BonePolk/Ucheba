@@ -12,10 +12,10 @@ export default function Cabinets() {
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(empty);
   const [viewing, setViewing] = useState(null);
-  const sites = useQuery({ queryKey: ['context-browser-sites'], queryFn: () => request('/integrations/context/browser/sites') });
+  const sites = useQuery({ queryKey: ['context-browser-sites'], queryFn: () => request('/integrations/monocle/browser/sites') });
   const queue = useQuery({ queryKey: ['agent-queue'], queryFn: () => request('/integrations/queue'), refetchInterval: 2000 });
   const save = useMutation({
-    mutationFn: () => request(`/integrations/context/browser/sites${editing.id ? `/${editing.id}` : ''}`, { method: editing.id ? 'PATCH' : 'POST', body: JSON.stringify(form) }),
+    mutationFn: () => request(`/integrations/monocle/browser/sites${editing.id ? `/${editing.id}` : ''}`, { method: editing.id ? 'PATCH' : 'POST', body: JSON.stringify(form) }),
     onSuccess: async () => { setEditing(null); setForm(empty); await client.invalidateQueries({ queryKey: ['context-browser-sites'] }); },
   });
   const field = (name) => (event) => setForm({ ...form, [name]: event.currentTarget.value });

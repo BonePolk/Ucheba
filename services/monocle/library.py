@@ -38,10 +38,22 @@ async def run(name, args):
         else:
             operation = {'search_table': search_table, 'inspect_table': inspect_table, 'summarize_table': summarize_table}[name]
             output = await asyncio.to_thread(operation, filename, original, args)
+    elif name == 'list_task_files':
+        output = await asyncio.to_thread(materials.list_files, memory, args['task_id'])
+    elif name == 'create_silo_folder':
+        output = await asyncio.to_thread(workspace.folder, memory, args['path'])
     elif name == 'read_silo_file':
-        original, version = await asyncio.to_thread(workspace.read_binary, memory, args['path'])
+        filename = args['path'].rsplit('/', 1)[-1]
+        if args['path'].startswith('@tasks/'):
+            import hashlib
+            task_id, file_id = workspace.attachment(args['path'])
+            info = await asyncio.to_thread(materials.get_info, memory, task_id, file_id)
+            original = await asyncio.to_thread(memory.read_bytes, materials.file_key(task_id, file_id) + '.bin')
+            version, filename = hashlib.sha256(original).hexdigest(), info['name']
+        else:
+            original, version = await asyncio.to_thread(workspace.read_binary, memory, args['path'])
         return {'output': {'path': args['path'], 'version': version},
-                'file': {'name': args['path'].rsplit('/', 1)[-1], 'content': base64.b64encode(original).decode()}}
+                'file': {'name': filename, 'content': base64.b64encode(original).decode()}}
     elif name == 'save_file_to_silo':
         original = base64.b64decode(args['content'], validate=True)
         output = await asyncio.to_thread(workspace.save_binary, memory, args['path'], original, args.get('version'))
@@ -72,7 +84,7 @@ async def run(name, args):
         else:
             content = await asyncio.to_thread(materials.file_input, memory, task_id, file_id)
         output = {'status': 'read_file', 'file': materials.public_info(info),
-                  'url': f'/api/integrations/context/files/{task_id}/{file_id}'}
+                  'url': f'/api/integrations/monocle/files/{task_id}/{file_id}'}
     else:
         raise HTTPException(422, 'Неизвестный инструмент библиотеки')
     return {'output': output, 'content': content}

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Alert, Button, Group, Paper, Stack, Text, Textarea, Title } from '@mantine/core';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { request } from './api';
+import { request, agentName } from './api';
 
 export default function AgentMemory() {
   const client = useQueryClient();
@@ -31,7 +31,7 @@ export default function AgentMemory() {
         <Textarea value={editing.text} onChange={(event) => setEditing({ ...editing, text: event.currentTarget.value })} autosize maxLength={1500} />
         <Group gap="xs"><Button size="compact-xs" loading={save.isPending} disabled={!editing.text.trim()} onClick={() => save.mutate()}>Сохранить</Button><Button size="compact-xs" variant="subtle" onClick={() => setEditing(null)}>Отмена</Button></Group>
       </Stack> : <Group justify="space-between" align="start" className="memory-fact">
-        <div style={{ flex: 1, minWidth: 0 }}><Text size="sm" style={{ overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' }}>{fact.text}</Text><Text size="xs" c="dimmed">{fact.agent === 'Lucheba' ? 'Monocle' : fact.agent} · {new Date(fact.updated_at).toLocaleDateString()}</Text></div>
+        <div style={{ flex: 1, minWidth: 0 }}><Text size="sm" style={{ overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' }}>{fact.text}</Text><Text size="xs" c="dimmed">{agentName(fact.agent)} · {new Date(fact.updated_at).toLocaleDateString()}</Text></div>
         <Group gap={4} wrap="nowrap"><Button size="compact-xs" variant="subtle" onClick={() => setEditing({ key: fact.key, text: fact.text })}>Изменить</Button><Button size="compact-xs" variant="subtle" color="red" loading={remove.isPending && remove.variables === fact.key} onClick={() => remove.mutate(fact.key)}>Забыть</Button></Group>
       </Group>}
     </Paper>)}

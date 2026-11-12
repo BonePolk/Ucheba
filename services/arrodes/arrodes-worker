@@ -6,4 +6,4 @@ user_home="/home/codex/.codex/users/$owner"
 user_uid=$((10000 + owner))
 exec /usr/bin/setpriv --reuid="$user_uid" --regid="$user_uid" --clear-groups \
   /usr/bin/env -i HOME="$user_home" CODEX_HOME="$user_home/.codex" \
-  PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 /usr/local/bin/codex-native "$@"
+  PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 /usr/local/bin/arrodes-native "$@"

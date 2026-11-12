@@ -47,7 +47,7 @@ export default function TaskBoard({ features = {} }) {
   const [editor, setEditor] = useState(null);
   const [planFeedback, setPlanFeedback] = useState(null);
   const taskView = view === 'active' || view === 'archive';
-  const automationEnabled = features.codex !== false || features.ameba !== false || features.context !== false;
+  const automationEnabled = features.arrodes !== false || features.ameba !== false || features.monocle !== false;
   const currentSort = features.ameba === false && sort === 'ameba:asc' ? 'deadline:asc' : sort;
   const [sortBy, order] = currentSort.split(':');
   const tasks = useQuery({
@@ -64,7 +64,7 @@ export default function TaskBoard({ features = {} }) {
   const ranking = useQuery({ queryKey: ['ameba-ranking'], queryFn: () => request('/integrations/ameba/ranking'),
     enabled: features.ameba !== false && !archived, refetchInterval: 15000 });
   const queue = useQuery({ queryKey: ['agent-queue'], queryFn: () => request('/integrations/queue'),
-    enabled: !archived && (features.context !== false || features.ameba !== false), refetchInterval: 1000 });
+    enabled: !archived && (features.monocle !== false || features.ameba !== false), refetchInterval: 1000 });
   const rank = useMutation({ mutationFn: () => agentRequest('/integrations/ameba/rank', { method: 'POST', body: JSON.stringify({ feedback: planFeedback ?? ranking.data?.feedback ?? '' }) }),
     onSuccess: async () => { setSort('ameba:asc'); await queryClient.invalidateQueries({ queryKey: ['ameba-ranking'] }); await refresh(); } });
   const clearPlan = useMutation({
@@ -137,8 +137,8 @@ export default function TaskBoard({ features = {} }) {
             <Select label="Сортировка" data={sorting.filter((item) => features.ameba !== false || item.value !== 'ameba:asc')} value={currentSort} allowDeselect={false} onChange={setSort} />
           </SimpleGrid>}
         </Paper>
-        {!archived && features.context !== false && features.ameba === false && <AgentProgress providers={['context']} active={queue.data?.active?.some((item) => item.provider === 'context')} />}
-        {!archived && (features.context !== false || features.ameba !== false) && <AgentQueue queue={queue.data} error={queue.error} />}
+        {!archived && features.monocle !== false && features.ameba === false && <AgentProgress providers={['context']} active={queue.data?.active?.some((item) => item.provider === 'context')} />}
+        {!archived && (features.monocle !== false || features.ameba !== false) && <AgentQueue queue={queue.data} error={queue.error} />}
         {features.ameba !== false && !archived && <Paper withBorder radius="lg" p="md" className="planner-panel"><Stack gap="sm">
           <Group justify="space-between"><Group gap="xs"><span className={`planner-dot ${queue.data?.ameba_running ? 'is-active' : ''}`} /><Text fw={600} size="sm">План дня</Text></Group><Button size="compact-sm" variant="subtle" onClick={() => setPlannerOpen(!plannerOpen)} aria-expanded={plannerOpen}>{plannerOpen ? 'Свернуть' : 'Настроить'}</Button></Group>
           {plannerOpen && <>
@@ -179,7 +179,7 @@ export default function TaskBoard({ features = {} }) {
                         {task.description && <Text size="sm" c="dimmed" lineClamp={2} style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{task.description}</Text>}
                       </Table.Td>
                       <Table.Td data-label="Дедлайн" style={{ whiteSpace: 'nowrap' }}><Text size="sm" c={isOverdue(task, now) ? 'red' : undefined}>{task.deadline ? dayjs.utc(task.deadline).local().format('DD.MM.YYYY HH:mm') : '—'}</Text>{isOverdue(task, now) && <Text size="xs" c="red">Просрочено</Text>}</Table.Td>
-                      <Table.Td data-label="Приоритет"><Badge color={{ low: 'gray', medium: 'yellow', high: 'red' }[task.priority]} variant="light">{priorities.find((item) => item.value === task.priority)?.label}</Badge>{features.context !== false && task.ai_details && JSON.parse(task.ai_details).status === 'needs_context' && <Text size="xs" c="yellow">Недостаточно контекста. {JSON.parse(task.ai_details).reason} <a href={`/?task=${task.id}`}>Ответить</a></Text>}{features.context !== false && task.ai_details && JSON.parse(task.ai_details).status === 'context_pending' && <Text size="xs" c="dimmed">Ожидает проверки Monocle</Text>}{features.ameba !== false && positions.has(task.id) && <Text size="xs" c="dimmed">Порядок Ameba: {positions.get(task.id)} из {ranking.data.ranked_count}</Text>}{features.ameba !== false && positions.has(task.id) && rankingReasons.has(task.id) && <RankingAssessment assessment={rankingReasons.get(task.id)} compact />}</Table.Td>
+                      <Table.Td data-label="Приоритет"><Badge color={{ low: 'gray', medium: 'yellow', high: 'red' }[task.priority]} variant="light">{priorities.find((item) => item.value === task.priority)?.label}</Badge>{features.monocle !== false && task.ai_details && JSON.parse(task.ai_details).status === 'needs_context' && <Text size="xs" c="yellow">Недостаточно контекста. {JSON.parse(task.ai_details).reason} <a href={`/?task=${task.id}`}>Ответить</a></Text>}{features.monocle !== false && task.ai_details && JSON.parse(task.ai_details).status === 'context_pending' && <Text size="xs" c="dimmed">Ожидает проверки Monocle</Text>}{features.ameba !== false && positions.has(task.id) && <Text size="xs" c="dimmed">Порядок Ameba: {positions.get(task.id)} из {ranking.data.ranked_count}</Text>}{features.ameba !== false && positions.has(task.id) && rankingReasons.has(task.id) && <RankingAssessment assessment={rankingReasons.get(task.id)} compact />}</Table.Td>
                       <Table.Td data-label="Статус"><Select aria-label={`Статус: ${task.title}`} w={{ base: '100%', sm: 160 }} data={statuses} value={completing === task.id ? 'done' : task.status} allowDeselect={false} disabled={update.isPending || archived} onChange={(value) => update.mutate({ id: task.id, data: { status: value } })} /></Table.Td>
                       <Table.Td data-label="Категория">{task.category || '—'}</Table.Td>
                       <Table.Td>
@@ -208,7 +208,7 @@ export default function TaskBoard({ features = {} }) {
         )}
         </>}
       </Stack>
-      {editor && <TaskForm task={editor.task} onClose={() => setEditor(null)} allowAutomation={automationEnabled} allowContext={features.context !== false} onSubmit={(data, options) => save.mutate({ id: editor.task?.id ?? options.taskId, data, ...options })} pending={save.isPending} error={save.error} />}
+      {editor && <TaskForm task={editor.task} onClose={() => setEditor(null)} allowAutomation={automationEnabled} allowContext={features.monocle !== false} onSubmit={(data, options) => save.mutate({ id: editor.task?.id ?? options.taskId, data, ...options })} pending={save.isPending} error={save.error} />}
     </Container>
   );
 }

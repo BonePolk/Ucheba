@@ -15,14 +15,14 @@ from sqlmodel import Session, select
 
 from common.provider import provider_url
 from common.database import get_engine
-from common.rpc import call, internal_token
+from common.rpc import call, internal_token, service_name
 from common.security import require_user
 from common.identity import user_id
 from common.accounts import check_feature, features
-from integrations import ameba, codex, telegram, context, jobs, scheduler
+from integrations import ameba, arrodes, telegram, context, jobs, scheduler
 from common import extraction as pipeline
 from common.settings import read_config, SECRET_FIELDS, public_settings, read_settings, report, save_settings
-from common.models.integration import CodexRun, Suggestion
+from common.models.integration import ArrodesRun, Suggestion
 from common.models.task import Task, TaskCreate
 
 settings_lock = asyncio.Lock()
@@ -50,7 +50,7 @@ def agent_job(job_id: str):
     return jobs.result(job_id)
 
 
-@router.get('/context/schedule/import/status')
+@router.get('/monocle/schedule/import/status')
 def schedule_import_status():
     check_feature('straus')
     previous = jobs.last('straus')
@@ -59,14 +59,14 @@ def schedule_import_status():
             'error': error if error != 'Операция остановлена' else None}
 
 
-@router.post('/context/schedule/import/stop')
+@router.post('/monocle/schedule/import/stop')
 async def stop_schedule_import():
     result = await jobs.stop('straus')
     return result
 
 
 @router.api_route('/agents/{name}/models', methods=['GET', 'POST'])
-async def agent_models(name: Literal['context', 'ameba', 'straus'], request: Request):
+async def agent_models(name: Literal['monocle', 'ameba', 'straus'], request: Request):
     config, secrets = read_settings(name)
     check_feature(name)
     body = await request.json() if request.method == 'POST' else {}
@@ -85,7 +85,7 @@ class AgentAnswer(BaseModel):
 
 
 @router.post('/agents/{name}/questions/{question_id}/answer')
-async def answer_agent(name: Literal['context', 'ameba', 'straus'], question_id: str, body: AgentAnswer):
+async def answer_agent(name: Literal['monocle', 'ameba', 'straus', 'arrodes'], question_id: str, body: AgentAnswer):
     check_feature(name)
     if len(question_id) != 32 or any(char not in '0123456789abcdef' for char in question_id):
         raise HTTPException(422, 'Некорректный вопрос')
@@ -111,7 +111,7 @@ async def agent_queue():
 
 
 @router.get('/progress')
-async def agent_progress(task_id: int = 0, providers: str = 'context,codex'):
+async def agent_progress(task_id: int = 0, providers: str = 'context,arrodes'):
     if task_id < 0:
         raise HTTPException(422, 'Некорректный номер задачи')
     if task_id:
@@ -119,11 +119,11 @@ async def agent_progress(task_id: int = 0, providers: str = 'context,codex'):
     enabled = features()
     allowed = {'context': enabled['context'] or (task_id == 0 and enabled['straus']),
                'monocle': enabled['context'], 'straus': task_id == 0 and enabled['straus'],
-               'ameba': enabled['ameba'], 'codex': enabled['codex']}
+               'ameba': enabled['ameba'], 'arrodes': enabled['arrodes'], 'codex': enabled['arrodes']}
     names = [name for name in allowed if name in providers.split(',') and allowed[name]]
 
     async def read(name):
-        queued = scheduler.queued('context' if name in ('monocle', 'straus') else name, task_id)
+        queued = scheduler.queued('context' if name in ('monocle', 'straus') else service_name(name), task_id)
         try:
             if name in ('monocle', 'straus'):
                 service = 'context' if name == 'monocle' else 'straus'
@@ -133,7 +133,7 @@ async def agent_progress(task_id: int = 0, providers: str = 'context,codex'):
             elif name == 'context' and task_id == 0:
                 operations = []
                 if enabled['context']:
-                    operations.append(call('context', '/work/progress', method='GET', timeout=2))
+                    operations.append(call('monocle', '/work/progress', method='GET', timeout=2))
                 if enabled['straus']:
                     operations.append(call('straus', '/progress', method='GET', timeout=2))
                 results = await asyncio.gather(*operations, return_exceptions=True)
@@ -153,7 +153,7 @@ async def agent_progress(task_id: int = 0, providers: str = 'context,codex'):
 
 
 @router.get('/progress/stream')
-async def agent_progress_stream(task_id: int = 0, providers: str = 'context,codex'):
+async def agent_progress_stream(task_id: int = 0, providers: str = 'context,arrodes'):
     if task_id < 0:
         raise HTTPException(422, 'Некорректный номер задачи')
     if task_id:
@@ -162,7 +162,7 @@ async def agent_progress_stream(task_id: int = 0, providers: str = 'context,code
     sources = []
     requested = providers.split(',')
     if 'monocle' in requested and enabled['context']:
-        sources.append(('monocle', 'context', 'agent', task_id == 0))
+        sources.append(('monocle', 'monocle', 'agent', task_id == 0))
     if 'straus' in requested and task_id == 0 and enabled['straus']:
         sources.append(('straus', 'straus', 'agent', False))
     if 'context' in requested:
@@ -172,15 +172,16 @@ async def agent_progress_stream(task_id: int = 0, providers: str = 'context,code
             sources.append(('context', 'straus', 'agent', False))
     if 'ameba' in requested and enabled['ameba']:
         sources.append(('ameba', 'ameba', 'ranking', task_id == 0))
-    if 'codex' in requested and enabled['codex']:
-        sources.append(('codex', 'codex', 'agent', False))
+    for provider in ('arrodes', 'codex'):
+        if provider in requested and enabled['arrodes']:
+            sources.append((provider, 'arrodes', 'agent', False))
 
     async def events():
         changes = asyncio.Queue(maxsize=8)
         states = {}
 
         async def listen(provider, service, namespace, work):
-            host = 'lucheba' if service == 'context' else service
+            host = service_name(service)
             url = f'http://{host}:8000/progress/stream'
             headers = {'X-Service-Token': internal_token(service), 'X-User-ID': str(user_id())}
             while True:
@@ -212,7 +213,7 @@ async def agent_progress_stream(task_id: int = 0, providers: str = 'context,code
                         entries.append({'provider': name, 'run': current,
                                         'server_time': datetime.now(timezone.utc).isoformat(),
                                         'available': any(value['available'] for value in values),
-                                        'queued': scheduler.queued('context' if name in ('monocle', 'straus') else name, task_id)})
+                                        'queued': scheduler.queued('context' if name in ('monocle', 'straus') else service_name(name), task_id)})
                     yield 'data: ' + json.dumps(entries, ensure_ascii=False) + '\n\n'
                 except TimeoutError:
                     yield ': keepalive\n\n'
@@ -239,9 +240,10 @@ class ProviderConfig(BaseModel):
         return provider_url(value)
 
 
-class CodexConfig(BaseModel):
+class ArrodesConfig(BaseModel):
     enabled: bool = False
     auto_prepare: bool = False
+    model: str = Field(default='', max_length=200)
 
 
 class NotificationsConfig(BaseModel):
@@ -265,7 +267,7 @@ class AgentConfig(ProviderConfig):
     model: str = Field(default='gpt-6-luna', min_length=1, max_length=200)
 
 
-CONFIG_MODELS = {'context': ContextConfig, 'ameba': AgentConfig, 'straus': AgentConfig, 'notifications': NotificationsConfig, 'collector': CollectorConfig, 'telegram': TelegramConfig, 'codex': CodexConfig}
+CONFIG_MODELS = {'monocle': ContextConfig, 'ameba': AgentConfig, 'straus': AgentConfig, 'notifications': NotificationsConfig, 'collector': CollectorConfig, 'telegram': TelegramConfig, 'arrodes': ArrodesConfig}
 
 
 @router.get('')
@@ -278,7 +280,8 @@ async def settings():
 
 
 @router.patch('/{name}')
-async def configure(name: Literal['telegram', 'codex', 'collector', 'notifications', 'context', 'ameba', 'straus'], body: dict):
+async def configure(name: Literal['telegram', 'arrodes', 'collector', 'notifications', 'monocle', 'ameba', 'straus'], body: dict):
+    name = service_name(name)
     if body.get('enabled'):
         check_feature(name)
     allowed = set(CONFIG_MODELS[name].model_fields) | (SECRET_FIELDS[name] - {'session'})
@@ -307,7 +310,7 @@ async def configure(name: Literal['telegram', 'codex', 'collector', 'notificatio
                 raise HTTPException(409, 'Отключите Telegram перед сменой реквизитов аккаунта')
             await provider_call('telegram', telegram.close())
         save_settings(name, config=config, secrets=secrets if secrets else None)
-        if name == 'context' and current.get('model') != config.get('model'):
+        if name == 'monocle' and current.get('model') != config.get('model'):
             context.invalidate_file_contexts()
     return {'ok': True}
 
@@ -349,25 +352,30 @@ async def telegram_select(body: ChatSelection):
     return {'ok': True}
 
 
-@router.get('/codex/status')
-async def codex_status():
-    return await provider_call('codex', codex.status())
+@router.get('/arrodes/status')
+async def arrodes_status():
+    return await provider_call('arrodes', arrodes.status())
 
 
-@router.post('/codex/connect')
-async def codex_connect():
-    return await provider_call('codex', codex.start_login())
+@router.api_route('/arrodes/models', methods=['GET', 'POST'])
+async def arrodes_models():
+    return await provider_call('arrodes', call('arrodes', '/models', method='GET', timeout=45))
 
 
-@router.post('/codex/disconnect')
-async def codex_disconnect():
-    await provider_call('codex', codex.disconnect())
+@router.post('/arrodes/connect')
+async def arrodes_connect():
+    return await provider_call('arrodes', arrodes.start_login())
+
+
+@router.post('/arrodes/disconnect')
+async def arrodes_disconnect():
+    await provider_call('arrodes', arrodes.disconnect())
     return {'ok': True}
 
 
-@router.post('/codex/check')
-async def codex_check():
-    return await provider_call('codex', codex.check())
+@router.post('/arrodes/check')
+async def arrodes_check():
+    return await provider_call('arrodes', arrodes.check())
 
 
 @router.post('/ameba/check')
@@ -424,35 +432,45 @@ async def ameba_score(task_id: int, background: bool = False):
     return await provider_call('ameba', ameba.evaluate(task_id))
 
 
-@router.post('/tasks/{task_id}/codex', status_code=202)
-async def codex_task(task_id: int):
-    return codex.start_task(task_id)
+class ArrodesInstruction(BaseModel):
+    instruction: str = Field(default='', max_length=12000)
+    resume_run_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
+
+
+@router.post('/tasks/{task_id}/arrodes', status_code=202)
+async def arrodes_task(task_id: int, body: ArrodesInstruction | None = None):
+    return arrodes.start_task(task_id, **(body.model_dump() if body else {}))
+
+
+@router.post('/arrodes/stop')
+async def arrodes_stop():
+    return await arrodes.stop()
 
 
 @router.get('/tasks/{task_id}/runs')
 def runs(task_id: int):
     with Session(get_engine()) as session:
-        return session.exec(select(CodexRun).where(CodexRun.task_id == task_id).order_by(CodexRun.created_at.desc())).all()
+        return session.exec(select(ArrodesRun).where(ArrodesRun.task_id == task_id).order_by(ArrodesRun.created_at.desc())).all()
 
 
 def require_run(run_id):
     with Session(get_engine()) as session:
-        if not session.get(CodexRun, run_id):
+        if not session.get(ArrodesRun, run_id):
             raise HTTPException(404, 'Запуск не найден')
 
 
-@router.get('/codex/runs/{run_id}/files')
+@router.get('/arrodes/runs/{run_id}/files')
 async def files(run_id: str):
     require_run(run_id)
-    return await provider_call('codex', call('codex', f'/runs/{run_id}/files', method='GET'))
+    return await provider_call('arrodes', call('arrodes', f'/runs/{run_id}/files', method='GET'))
 
 
-@router.get('/codex/runs/{run_id}/files/{filename:path}')
+@router.get('/arrodes/runs/{run_id}/files/{filename:path}')
 async def download(run_id: str, filename: str):
     require_run(run_id)
     async with httpx.AsyncClient(timeout=30) as client:
-        result = await client.get(f'http://codex:8000/runs/{run_id}/files/{quote(filename, safe="/")}',
-            headers={'X-Service-Token': internal_token('codex')})
+        result = await client.get(f'http://arrodes:8000/runs/{run_id}/files/{quote(filename, safe="/")}',
+            headers={'X-Service-Token': internal_token('arrodes'), 'X-User-ID': str(user_id())})
         if not result.is_success:
             raise HTTPException(result.status_code, 'Файл недоступен')
         return Response(content=result.content, media_type='application/octet-stream',
@@ -518,7 +536,7 @@ async def collector_select(body: ChatSelection):
 
 @router.api_route('/services/{name}/{path:path}', methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'])
 async def service_access(
-    name: Literal['telegram', 'codex', 'collector', 'notifications', 'context', 'ameba', 'straus'],
+    name: Literal['telegram', 'arrodes', 'collector', 'notifications', 'monocle', 'ameba', 'straus'],
     path: str,
     request: Request,
 ):
@@ -528,7 +546,7 @@ async def service_access(
         headers['Content-Type'] = request.headers['content-type']
     try:
         async with httpx.AsyncClient(timeout=330) as client:
-            result = await client.request(request.method, f'http://{"lucheba" if name == "context" else name}:8000/{quote(path, safe="/")}',
+            result = await client.request(request.method, f'http://{service_name(name)}:8000/{quote(path, safe="/")}',
                 params=request.query_params.multi_items(), headers=headers, content=await request.body())
     except httpx.HTTPError:
         raise HTTPException(502, 'Сервис недоступен или превышено время ожидания') from None
@@ -541,26 +559,26 @@ class ContextAnswer(BaseModel):
     answer: str = Field(min_length=1, max_length=12000)
 
 
-@router.get('/tasks/{task_id}/context')
+@router.get('/tasks/{task_id}/monocle')
 def task_context(task_id: int):
     return context.get_context(task_id)
 
 
-@router.post('/tasks/{task_id}/context/analyze')
+@router.post('/tasks/{task_id}/monocle/analyze')
 async def analyze_context(task_id: int, background: bool = False):
     if background:
-        return jobs.start(lambda: provider_call('context', context.prepare(task_id, force=True)))
-    return await provider_call('context', context.prepare(task_id, force=True))
+        return jobs.start(lambda: provider_call('monocle', context.prepare(task_id, force=True)))
+    return await provider_call('monocle', context.prepare(task_id, force=True))
 
 
-@router.post('/tasks/{task_id}/context')
+@router.post('/tasks/{task_id}/monocle')
 async def answer_context(task_id: int, body: ContextAnswer, background: bool = False):
-    check_feature('context')
+    check_feature('monocle')
     context.save_answer(task_id, body.subject, body.answer)
     if not features()['ameba'] or not read_settings('ameba')[0]['enabled']:
         if background:
-            return jobs.start(lambda: provider_call('context', context.prepare(task_id, force=True)))
-        return await provider_call('context', context.prepare(task_id, force=True))
+            return jobs.start(lambda: provider_call('monocle', context.prepare(task_id, force=True)))
+        return await provider_call('monocle', context.prepare(task_id, force=True))
     if background:
         return jobs.start(lambda: provider_call('ameba', ameba.evaluate(task_id)))
     return await provider_call('ameba', ameba.evaluate(task_id))
@@ -577,7 +595,7 @@ class WorkspaceFile(BaseModel):
     version: str | None = Field(default=None, pattern=r'^[a-f0-9]{64}$')
 
 
-@router.get('/context/workspace')
+@router.get('/monocle/workspace')
 async def workspace_tree():
     from common.browser_client import browser_request
     # Перенос прежних локальных загрузок выполняется перед чтением общего списка.
@@ -586,7 +604,7 @@ async def workspace_tree():
         await browser_request('/downloads/migrate', {})
     except HTTPException:
         warning = 'Не удалось проверить старые загрузки браузера. Файлы Silo показаны ниже.'
-    return {'files': await call('context', '/workspace', method='GET'), 'warning': warning}
+    return {'files': await call('monocle', '/workspace', method='GET'), 'warning': warning}
 
 
 class WorkspaceUpload(BaseModel):
@@ -599,57 +617,57 @@ class WorkspaceArchive(BaseModel):
     output_path: str = Field(min_length=1, max_length=500)
 
 
-@router.post('/context/workspace/upload')
+@router.post('/monocle/workspace/upload')
 async def upload_workspace_file(body: WorkspaceUpload):
-    return await call('context', '/workspace/upload', body.model_dump())
+    return await call('monocle', '/workspace/upload', body.model_dump())
 
 
-@router.post('/context/workspace/archive')
+@router.post('/monocle/workspace/archive')
 async def workspace_archive(body: WorkspaceArchive):
-    return await call('context', '/workspace/archive', body.model_dump())
+    return await call('monocle', '/workspace/archive', body.model_dump())
 
 
-@router.get('/context/workspace/preview')
+@router.get('/monocle/workspace/preview')
 async def preview_workspace_file(path: str, page: int = 1, sheet: str = '', offset: int = 0):
     if page < 1 or offset < 0:
         raise HTTPException(422, 'Неверная страница')
     from common.browser_client import browser_request
-    original = await call('context', '/workspace/preview?path=' + quote(path, safe=''), method='GET')
+    original = await call('monocle', '/workspace/preview?path=' + quote(path, safe=''), method='GET')
     return await browser_request('/file-preview', original | {'page': page, 'sheet': sheet, 'offset': offset})
 
 
-@router.get('/context/workspace/download')
+@router.get('/monocle/workspace/download')
 async def download_workspace_file(path: str):
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            result = await client.get('http://lucheba:8000/workspace/download', params={'path': path},
-                headers={'X-Service-Token': internal_token('context'), 'X-User-ID': str(user_id())})
+            result = await client.get('http://monocle:8000/workspace/download', params={'path': path},
+                headers={'X-Service-Token': internal_token('monocle'), 'X-User-ID': str(user_id())})
     except httpx.HTTPError:
         raise HTTPException(503, 'Silo недоступен') from None
     return Response(result.content, status_code=result.status_code,
                     headers={key: result.headers[key] for key in ('content-type', 'content-disposition') if key in result.headers})
 
 
-@router.get('/context/workspace/file')
+@router.get('/monocle/workspace/file')
 async def workspace_read(path: str):
-    return await call('context', '/workspace/file?path=' + quote(path, safe=''), method='GET')
+    return await call('monocle', '/workspace/file?path=' + quote(path, safe=''), method='GET')
 
 
-@router.post('/context/workspace/folder')
+@router.post('/monocle/workspace/folder')
 async def workspace_folder(path: str):
-    return await call('context', '/workspace/folder?path=' + quote(path, safe=''))
+    return await call('monocle', '/workspace/folder?path=' + quote(path, safe=''))
 
 
-@router.put('/context/workspace/file')
+@router.put('/monocle/workspace/file')
 async def workspace_save(body: WorkspaceFile):
-    result = await call('context', '/workspace/file', body.model_dump(), method='PUT')
+    result = await call('monocle', '/workspace/file', body.model_dump(), method='PUT')
     context.invalidate_file_contexts(result.get('task_id'))
     return result
 
 
-@router.delete('/context/workspace/file')
+@router.delete('/monocle/workspace/file')
 async def workspace_delete(path: str):
-    return await call('context', '/workspace/file?path=' + quote(path, safe=''), method='DELETE')
+    return await call('monocle', '/workspace/file?path=' + quote(path, safe=''), method='DELETE')
 
 
 class SavedContextFile(BaseModel):
@@ -657,28 +675,28 @@ class SavedContextFile(BaseModel):
     file_id: str = Field(pattern=r'^[a-f0-9]{32}$')
 
 
-@router.get('/context/files')
+@router.get('/monocle/files')
 async def saved_context_files():
-    return await call('context', '/files', method='GET')
+    return await call('monocle', '/files', method='GET')
 
 
-@router.post('/tasks/{task_id}/context/files/reuse')
+@router.post('/tasks/{task_id}/monocle/files/reuse')
 async def reuse_context_file(task_id: int, body: SavedContextFile):
     context.get_context(task_id)
-    result = await call('context', f'/tasks/{task_id}/files/reuse', body.model_dump())
+    result = await call('monocle', f'/tasks/{task_id}/files/reuse', body.model_dump())
     context.invalidate(task_id)
     return result
 
 
-@router.get('/tasks/{task_id}/context/files')
+@router.get('/tasks/{task_id}/monocle/files')
 async def context_files(task_id: int):
     context.get_context(task_id)  # Проверяем задачу в базе текущего пользователя.
-    return await call('context', f'/tasks/{task_id}/files', method='GET')
+    return await call('monocle', f'/tasks/{task_id}/files', method='GET')
 
 
-@router.post('/tasks/{task_id}/context/files')
+@router.post('/tasks/{task_id}/monocle/files')
 async def attach_context_file(task_id: int, body: ContextFile):
-    check_feature('context')
+    check_feature('monocle')
     context.get_context(task_id)
     try:
         content = base64.b64decode(body.content, validate=True)
@@ -688,8 +706,8 @@ async def attach_context_file(task_id: int, body: ContextFile):
         raise HTTPException(413, 'Максимальный размер файла — 10 МБ')
     try:
         async with httpx.AsyncClient(timeout=90) as client:
-            result = await client.post(f'http://lucheba:8000/tasks/{task_id}/files', params={'name': body.name},
-                headers={'X-Service-Token': internal_token('context'), 'X-User-ID': str(user_id())}, content=content)
+            result = await client.post(f'http://monocle:8000/tasks/{task_id}/files', params={'name': body.name},
+                headers={'X-Service-Token': internal_token('monocle'), 'X-User-ID': str(user_id())}, content=content)
     except httpx.HTTPError:
         raise HTTPException(503, 'Хранилище файлов недоступно') from None
     if not result.is_success:
@@ -702,20 +720,20 @@ async def attach_context_file(task_id: int, body: ContextFile):
     return result.json()
 
 
-@router.delete('/tasks/{task_id}/context/files/{file_id}')
+@router.delete('/tasks/{task_id}/monocle/files/{file_id}')
 async def delete_context_file(task_id: int, file_id: str):
     context.get_context(task_id)
     if len(file_id) != 32 or any(c not in '0123456789abcdef' for c in file_id):
         raise HTTPException(404, 'Файл не найден')
-    result = await call('context', f'/tasks/{task_id}/files/{file_id}', method='DELETE')
+    result = await call('monocle', f'/tasks/{task_id}/files/{file_id}', method='DELETE')
     context.invalidate(task_id)
     return result
 
 
-@router.get('/context/files/{task_id}/{file_id}')
-@router.get('/tasks/{task_id}/context/files/{file_id}')
+@router.get('/monocle/files/{task_id}/{file_id}')
+@router.get('/tasks/{task_id}/monocle/files/{file_id}')
 async def download_context_file(task_id: int, file_id: str):
-    check_feature('context')
+    check_feature('monocle')
     # Файл может остаться в библиотеке после удаления задачи. Владение задаётся
     # пользовательским префиксом Silo и подписанным межсервисным запросом.
     if task_id <= 0:
@@ -724,59 +742,59 @@ async def download_context_file(task_id: int, file_id: str):
         raise HTTPException(404, 'Файл не найден')
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            result = await client.get(f'http://lucheba:8000/tasks/{task_id}/files/{file_id}',
-                headers={'X-Service-Token': internal_token('context'), 'X-User-ID': str(user_id())})
+            result = await client.get(f'http://monocle:8000/tasks/{task_id}/files/{file_id}',
+                headers={'X-Service-Token': internal_token('monocle'), 'X-User-ID': str(user_id())})
     except httpx.HTTPError:
         raise HTTPException(503, 'Хранилище файлов недоступно') from None
     return Response(result.content, status_code=result.status_code,
                     headers={key: result.headers[key] for key in ('content-type', 'content-disposition') if key in result.headers})
 
 
-@router.api_route('/context/browser/sites', methods=['GET', 'POST'])
+@router.api_route('/monocle/browser/sites', methods=['GET', 'POST'])
 async def browser_sites(request: Request):
     body = await request.json() if request.method == 'POST' else None
-    return await call('context', '/browser/sites', body, method=request.method)
+    return await call('monocle', '/browser/sites', body, method=request.method)
 
 
-@router.post('/context/browser/handoff')
+@router.post('/monocle/browser/handoff')
 async def browser_handoff(body: dict):
     from common.browser_client import browser_request
     return await browser_request('/handoff', body)
 
 
-@router.post('/context/browser/manual')
+@router.post('/monocle/browser/manual')
 async def profile_browser_action(body: dict):
     if scheduler.queue_state()['busy']:
         raise HTTPException(409, 'Дождитесь завершения работы агентов перед ручным управлением браузером')
-    return await call('context', '/browser/manual', body)
+    return await call('monocle', '/browser/manual', body)
 
 
-@router.patch('/context/browser/sites/{site_id}')
+@router.patch('/monocle/browser/sites/{site_id}')
 async def update_browser_site(site_id: str, body: dict):
-    return await call('context', f'/browser/sites/{site_id}', body, method='PATCH')
+    return await call('monocle', f'/browser/sites/{site_id}', body, method='PATCH')
 
 
-@router.delete('/context/browser/sites/{site_id}')
+@router.delete('/monocle/browser/sites/{site_id}')
 async def delete_browser_site(site_id: str):
     if len(site_id) != 32 or any(c not in '0123456789abcdef' for c in site_id):
         raise HTTPException(404, 'Личный кабинет не найден')
-    return await call('context', f'/browser/sites/{site_id}', method='DELETE')
+    return await call('monocle', f'/browser/sites/{site_id}', method='DELETE')
 
 
-@router.get('/context/browser/screen')
+@router.get('/monocle/browser/screen')
 async def luna_screen(response: Response):
     response.headers['Cache-Control'] = 'no-store'
-    return await call('context', '/browser/screen', method='GET', timeout=5)
+    return await call('monocle', '/browser/screen', method='GET', timeout=5)
 
 
-@router.get('/context/browser/stream')
+@router.get('/monocle/browser/stream')
 async def luna_browser_stream():
-    if not (features()['context'] or features()['straus']):
-        check_feature('context')
+    if not (features()['context'] or features()['straus'] or features()['arrodes']):
+        check_feature('monocle')
     client = httpx.AsyncClient(timeout=httpx.Timeout(None, connect=8))
     try:
         upstream = await client.send(client.build_request('GET', 'http://browser:8000/screen/stream',
-            headers={'X-Service-Token': internal_token('context'), 'X-User-ID': str(user_id())}), stream=True)
+            headers={'X-Service-Token': internal_token('monocle'), 'X-User-ID': str(user_id())}), stream=True)
     except httpx.HTTPError:
         await client.aclose()
         raise HTTPException(503, 'Видеопоток браузера недоступен') from None
@@ -797,20 +815,20 @@ async def luna_browser_stream():
                              headers={'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no'})
 
 
-@router.api_route('/tasks/{task_id}/context/browser', methods=['GET', 'PUT'])
+@router.api_route('/tasks/{task_id}/monocle/browser', methods=['GET', 'PUT'])
 async def task_browser(task_id: int, request: Request):
     context.get_context(task_id)
     body = await request.json() if request.method == 'PUT' else None
-    result = await call('context', f'/tasks/{task_id}/browser', body, method=request.method)
+    result = await call('monocle', f'/tasks/{task_id}/browser', body, method=request.method)
     if request.method == 'PUT':
         context.invalidate(task_id)
     return result
 
 
-@router.post('/tasks/{task_id}/context/browser/action')
+@router.post('/tasks/{task_id}/monocle/browser/action')
 async def browser_action(task_id: int, body: dict):
     context.get_context(task_id)
-    result = await call('context', '/browser/manual', body)
+    result = await call('monocle', '/browser/manual', body)
     if body.get('action') != 'state':
         context.invalidate(task_id)
     return result

@@ -48,7 +48,7 @@ export default function Calendar({ features = {} }) {
   const end = addDays(start, view === 'week' ? 6 : 41);
   const calendar = useQuery({ queryKey: ['calendar', start, end], queryFn: () => request(`/calendar?start=${start}&end=${end}`), refetchInterval: 5000 });
   const tasks = useQuery({ queryKey: ['calendar-tasks'], queryFn: () => request('/tasks') });
-  const status = useQuery({ queryKey: ['straus-status'], queryFn: () => request('/integrations/context/schedule/import/status'), enabled: features.straus !== false, refetchInterval: 1000 });
+  const status = useQuery({ queryKey: ['straus-status'], queryFn: () => request('/integrations/monocle/schedule/import/status'), enabled: features.straus !== false, refetchInterval: 1000 });
   const refresh = () => Promise.all([
     client.invalidateQueries({ queryKey: ['calendar'] }),
     client.invalidateQueries({ queryKey: ['ameba-ranking'] }),
@@ -56,7 +56,7 @@ export default function Calendar({ features = {} }) {
   ]);
   const save = useMutation({ mutationFn: (config) => request('/calendar', { method: 'PUT', body: JSON.stringify(config) }), onSuccess: async () => { setEditor(null); setError(''); await refresh(); } });
   const editAgent = useMutation({ mutationFn: () => agentRequest('/calendar/agent', { method: 'POST', body: JSON.stringify({ instruction: command }) }), onSettled: refresh });
-  const stop = useMutation({ mutationFn: () => request('/integrations/context/schedule/import/stop', { method: 'POST' }), onSuccess: async () => { editAgent.reset(); await refresh(); } });
+  const stop = useMutation({ mutationFn: () => request('/integrations/monocle/schedule/import/stop', { method: 'POST' }), onSuccess: async () => { editAgent.reset(); await refresh(); } });
   const busy = Boolean(status.data?.running || editAgent.isPending || stop.isPending);
   useEffect(() => { if (viewport.current && view === 'week') viewport.current.scrollTop = 7 * 44; }, [start, view]);
   const events = (calendar.data?.events ?? []).filter((event) => event.source !== 'ameba' || (showAmeba && features.ameba !== false));

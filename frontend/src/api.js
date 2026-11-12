@@ -41,3 +41,5 @@ export function saveTask({ id, data }) {
 export function deleteTask({ id, permanent = false }) {
   return request(`/tasks/${id}?permanent=${permanent}`, { method: 'DELETE' });
 }
+
+export const agentName = (name) => ({ Lucheba: 'Monocle', Codex: 'Arrodes', '\u0410\u0440\u0440\u043e\u0434\u0435\u0441': 'Arrodes' })[name] ?? name;

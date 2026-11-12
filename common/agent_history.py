@@ -10,10 +10,10 @@ from common.identity import user_id
 from common.rpc import internal_token
 
 
-async def history_request(method, body=None):
+async def history_request(method, body=None, before=None):
     async with httpx.AsyncClient(timeout=15, transport=httpx.AsyncHTTPTransport(retries=1)) as client:
         response = await client.request(method, 'http://backend:8000/api/auth/agent-history/internal',
-            json=body, headers={'X-Service-Token': internal_token('context'), 'X-User-ID': str(user_id())})
+            params={'before': before} if before else None, json=body, headers={'X-Service-Token': internal_token('monocle'), 'X-User-ID': str(user_id())})
         response.raise_for_status()
         return response.json()
 

@@ -33,7 +33,7 @@ export default function BotSettings({ name, data }) {
     {!collector && <>
       <NumberInput label="Telegram ID владельца" allowNegative={false} allowDecimal={false} value={owner} onChange={setOwner} />
       <NumberInput label="Напоминать за сколько минут" min={1} max={1440} value={minutes} onChange={setMinutes} />
-      <Text size="xs" c="dimmed">Напишите /start именно этому боту. Он отправляет только владельцу напоминания о сроках, новых предложениях и готовых результатах Codex.</Text>
+      <Text size="xs" c="dimmed">Напишите /start именно этому боту. Он отправляет только владельцу напоминания о сроках, новых предложениях и готовых результатах Arrodes.</Text>
     </>}
     {collector && <Text size="xs" c="dimmed">Добавьте отдельного бота в нужные группы. Отключите Privacy Mode у BotFather для чтения обычных сообщений. Бот не читает вашу историю или личные переписки от имени аккаунта. После включения отправьте сообщение в группу и загрузите чаты. Текст сохраняется только для разрешённых чатов, очередь ограничена 500 сообщениями на чат.</Text>}
     <Group>

@@ -19,7 +19,7 @@ export default function Account({ user, initialTab = 'settings' }) {
   return <Stack>
     <Title className="page-heading" order={2}>Профиль · {user.username}</Title>
     <Tabs defaultValue={initialTab} keepMounted={false}>
-    <Tabs.List><Tabs.Tab value="settings">Обо мне</Tabs.Tab><Tabs.Tab value="agents">Агенты</Tabs.Tab>{(user.features?.context !== false || user.features?.straus !== false) && <Tabs.Tab value="access">Входы</Tabs.Tab>}<Tabs.Tab value="history">История агентов</Tabs.Tab>{user.is_admin && <Tabs.Tab value="admin">Админка</Tabs.Tab>}</Tabs.List>
+    <Tabs.List><Tabs.Tab value="settings">Обо мне</Tabs.Tab><Tabs.Tab value="agents">Агенты</Tabs.Tab>{(user.features?.monocle !== false || user.features?.straus !== false || user.features?.arrodes !== false) && <Tabs.Tab value="access">Входы</Tabs.Tab>}<Tabs.Tab value="history">История агентов</Tabs.Tab>{user.is_admin && <Tabs.Tab value="admin">Админка</Tabs.Tab>}</Tabs.List>
     <Tabs.Panel value="settings" pt="md"><Stack>
     <AgentMemory />
     <ProfileTimezone />
@@ -32,7 +32,7 @@ export default function Account({ user, initialTab = 'settings' }) {
       {change.isSuccess && <Alert color="green">Пароль изменён</Alert>}
     </Stack></form></Paper></details>
     </Stack></Tabs.Panel>
-    <Tabs.Panel value="access" pt="md">{(user.features?.context !== false || user.features?.straus !== false) && <Cabinets />}</Tabs.Panel>
+    <Tabs.Panel value="access" pt="md">{(user.features?.monocle !== false || user.features?.straus !== false || user.features?.arrodes !== false) && <Cabinets />}</Tabs.Panel>
     <Tabs.Panel value="agents" pt="md"><Stack>
     <Integrations features={user.features} />
     </Stack></Tabs.Panel>

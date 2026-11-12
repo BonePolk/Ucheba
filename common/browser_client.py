@@ -14,7 +14,7 @@ async def browser_request(path, body=None, method='POST'):
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=8), transport=httpx.AsyncHTTPTransport(retries=1)) as client:
             response = await client.request(method, f'http://browser:8000{path}', json=body,
-                headers={'X-Service-Token': internal_token('context'), 'X-User-ID': str(user_id()), 'X-Agent-Run': browser_run_id.get()})
+                headers={'X-Service-Token': internal_token('monocle'), 'X-User-ID': str(user_id()), 'X-Agent-Run': browser_run_id.get()})
     except httpx.HTTPError as exc:
         if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
             detail = 'Браузер недоступен после повторного подключения. Проверьте сервис browser.'

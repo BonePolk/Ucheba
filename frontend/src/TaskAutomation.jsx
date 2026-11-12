@@ -9,16 +9,38 @@ import AgentProgress from './AgentProgress';
 import RankingAssessment from './RankingAssessment';
 import TaskMarkdown from './TaskMarkdown';
 
+const runStatus = { queued: 'В очереди', running: 'Работает', succeeded: 'На проверку', failed: 'Ошибка', interrupted: 'Прервано' };
+
 function RunFiles({ run }) {
-  const files = useQuery({ queryKey: ['integrations', 'files', run.id], queryFn: () => request(`/integrations/codex/runs/${run.id}/files`), enabled: run.status === 'succeeded' });
-  return <Stack gap="xs">{files.data?.map((name) => <Anchor key={name} href={`/api/integrations/codex/runs/${run.id}/files/${name.split('/').map(encodeURIComponent).join('/')}`} download>{name}</Anchor>)}{files.error && <Text c="red">{files.error.message}</Text>}</Stack>;
+  const [opened, setOpened] = useState(false);
+  const files = useQuery({ queryKey: ['integrations', 'files', run.id], queryFn: () => request(`/integrations/arrodes/runs/${run.id}/files`), enabled: opened });
+  return <details onToggle={(event) => setOpened(event.currentTarget.open)}>
+    <summary style={{ cursor: 'pointer', fontSize: 13 }}>Файлы</summary>
+    <Stack gap={4} mt="xs">{files.data?.map((name) => <Anchor size="sm" key={name} href={`/api/integrations/arrodes/runs/${run.id}/files/${name.split('/').map(encodeURIComponent).join('/')}`} download>{name}</Anchor>)}
+      {files.isFetching && <Text size="xs" c="dimmed">Загрузка…</Text>}
+      {files.data?.length === 0 && <Text size="xs" c="dimmed">Файлов нет</Text>}
+      {files.error && <Text c="red" size="sm">{files.error.message}</Text>}
+    </Stack>
+  </details>;
+}
+
+function RunResult({ run, disabled, onContinue }) {
+  return <Stack gap="xs">
+    <Group justify="space-between" gap="xs">
+      <Group gap="xs"><Badge size="sm" variant="light">{runStatus[run.status] ?? run.status}</Badge><Text size="xs" c="dimmed">{new Date(run.created_at).toLocaleString()}</Text></Group>
+      <Button size="compact-xs" variant="subtle" disabled={disabled} onClick={() => onContinue(run.id)}>Исправить / продолжить</Button>
+    </Group>
+    {run.summary && <TaskMarkdown>{run.summary}</TaskMarkdown>}
+    {run.error && <Text c="red" size="sm">{run.error}</Text>}
+    <RunFiles run={run} />
+  </Stack>;
 }
 
 function ContextForm({ taskId, context }) {
   const client = useQueryClient();
   const [answer, setAnswer] = useState(null);
   const analyze = useMutation({
-    mutationFn: () => agentRequest(`/integrations/tasks/${taskId}/context/analyze`, { method: 'POST' }),
+    mutationFn: () => agentRequest(`/integrations/tasks/${taskId}/monocle/analyze`, { method: 'POST' }),
     onSuccess: async () => {
       await client.invalidateQueries({ queryKey: ['context', taskId] });
       await client.invalidateQueries({ queryKey: ['tasks'] });
@@ -27,7 +49,7 @@ function ContextForm({ taskId, context }) {
     onSettled: () => client.invalidateQueries({ queryKey: ['context-files', taskId] }),
   });
   const save = useMutation({
-    mutationFn: () => agentRequest(`/integrations/tasks/${taskId}/context`, { method: 'POST', body: JSON.stringify({ subject: context.data?.subject ?? '', answer: answer ?? context.data?.owner_notes ?? '' }) }),
+    mutationFn: () => agentRequest(`/integrations/tasks/${taskId}/monocle`, { method: 'POST', body: JSON.stringify({ subject: context.data?.subject ?? '', answer: answer ?? context.data?.owner_notes ?? '' }) }),
     onSuccess: async () => {
       await client.invalidateQueries({ queryKey: ['context', taskId] });
       await client.invalidateQueries({ queryKey: ['tasks'] });
@@ -62,16 +84,18 @@ function ContextForm({ taskId, context }) {
 export default function TaskAutomation({ task, features = {} }) {
   const client = useQueryClient();
   const [notice, setNotice] = useState('');
+  const [instruction, setInstruction] = useState('');
+  const [resumeRunId, setResumeRunId] = useState(null);
   const queue = useQuery({ queryKey: ['agent-queue'], queryFn: () => request('/integrations/queue'),
     enabled: features.ameba !== false, refetchInterval: 1000 });
-  const context = useQuery({ queryKey: ['context', task.id], queryFn: () => request(`/integrations/tasks/${task.id}/context`), refetchInterval: 5000, enabled: features.context !== false });
-  const runs = useQuery({ queryKey: ['integrations', 'runs', task.id], queryFn: () => request(`/integrations/tasks/${task.id}/runs`), refetchInterval: 5000, retry: false, enabled: features.codex !== false });
+  const context = useQuery({ queryKey: ['context', task.id], queryFn: () => request(`/integrations/tasks/${task.id}/monocle`), refetchInterval: 5000, enabled: features.monocle !== false });
+  const runs = useQuery({ queryKey: ['integrations', 'runs', task.id], queryFn: () => request(`/integrations/tasks/${task.id}/runs`), refetchInterval: 5000, retry: false, enabled: features.arrodes !== false });
   const action = useMutation({
     mutationFn: (provider) => (provider === 'ameba' ? agentRequest : request)(
       provider === 'ameba' && queue.data?.ameba_running ? '/integrations/ameba/rank' : `/integrations/tasks/${task.id}/${provider}`,
-      { method: 'POST' }),
+      { method: 'POST', ...(provider === 'arrodes' ? { body: JSON.stringify({ instruction, resume_run_id: resumeRunId }) } : {}) }),
     onSuccess: async (data, provider) => {
-      setNotice(provider === 'codex' ? 'Задача передана Codex' : data.unchanged ? data.status === 'running' ? 'Ameba уже работает с этими данными.' : 'Данные не изменились — порядок сохранён.' : data.metrics?.status === 'needs_context' ? `Monocle: недостаточно контекста. ${data.metrics.reason}` : data.rank != null ? `Порядок Ameba: ${data.rank} из ${data.ranked_count}` : 'Порядок Ameba обновлён');
+      setNotice(provider === 'arrodes' ? '' : data.unchanged ? data.status === 'running' ? 'Ameba уже работает с этими данными.' : 'Данные не изменились — порядок сохранён.' : data.metrics?.status === 'needs_context' ? `Monocle: недостаточно контекста. ${data.metrics.reason}` : data.rank != null ? `Порядок Ameba: ${data.rank} из ${data.ranked_count}` : 'Порядок Ameba обновлён');
       await client.invalidateQueries({ queryKey: ['ameba-ranking'] });
       await client.invalidateQueries({ queryKey: ['tasks'] });
       await client.invalidateQueries({ queryKey: ['context', task.id] });
@@ -79,25 +103,40 @@ export default function TaskAutomation({ task, features = {} }) {
       await client.invalidateQueries({ queryKey: ['integrations', 'runs', task.id] });
     },
   });
+  const stop = useMutation({
+    mutationFn: () => request('/integrations/arrodes/stop', { method: 'POST' }),
+    onSettled: () => client.invalidateQueries({ queryKey: ['integrations', 'runs', task.id] }),
+  });
+  const arrodesRunning = runs.data?.some((run) => ['queued', 'running'].includes(run.status));
+  const results = (runs.data ?? []).filter((run) => !['queued', 'running'].includes(run.status));
+  const continueRun = (id) => { setResumeRunId(id); setInstruction(''); };
   return <Stack>
     <Group className="page-heading" justify="space-between"><Title order={2}>{task.title}</Title><Button component="a" href={`/calendar?add_task=${task.id}`} variant="light" size="xs">В календарь</Button></Group>
     {task.description && <Text style={{ whiteSpace: 'pre-wrap' }}>{task.description}</Text>}
     {task.category && <Badge variant="light">{task.category}</Badge>}
-    {features.context !== false && (context.data?.full_markdown || context.data?.summary) && <Paper withBorder p="md"><Stack>
+    {features.monocle !== false && (context.data?.full_markdown || context.data?.summary) && <Paper withBorder p="md"><Stack>
       <Title order={4}>Полная версия задачи</Title>
       {context.data.status === 'new' && <Text size="sm" c="yellow">Контекст изменился. Полную версию нужно обновить через Monocle.</Text>}
       <TaskMarkdown>{context.data.full_markdown || context.data.summary}</TaskMarkdown>
     </Stack></Paper>}
-    <Group>{features.codex !== false && <Button disabled={action.isPending} onClick={() => action.mutate('codex')}>Поручить Codex</Button>}{features.ameba !== false && <Button variant="light" disabled={(action.isPending && !queue.data?.ameba_running) || queue.data?.browser_busy} onClick={() => action.mutate('ameba')}>{queue.data?.ameba_running ? 'Обновить при изменениях' : 'Обновить порядок Ameba'}</Button>}</Group>
-    {features.codex !== false && <AgentProgress taskId={task.id} providers={['codex']} active={(action.isPending && action.variables === 'codex') || runs.data?.some((run) => ['queued', 'running'].includes(run.status))} />}
-    {features.context !== false && <ContextForm key={task.id} taskId={task.id} context={context} />}
+    {features.arrodes !== false && <Paper withBorder p="sm"><Stack gap="sm">
+      <Group justify="space-between"><Title order={5}>Arrodes</Title>{resumeRunId && <Button variant="subtle" size="compact-xs" disabled={arrodesRunning} onClick={() => setResumeRunId(null)}>Новое поручение</Button>}</Group>
+      <Textarea aria-label="Поручение Arrodes" placeholder={resumeRunId ? 'Что исправить или продолжить?' : 'Что сделать по этой задаче?'} value={instruction} onChange={(event) => setInstruction(event.currentTarget.value)} autosize minRows={2} maxRows={6} maxLength={12000} />
+      <Group gap="xs">
+        <Button size="xs" loading={action.isPending && action.variables === 'arrodes'} disabled={action.isPending || arrodesRunning} onClick={() => action.mutate('arrodes')}>{resumeRunId ? 'Продолжить' : 'Выполнить'}</Button>
+        {arrodesRunning && <Button variant="subtle" color="red" size="xs" loading={stop.isPending} onClick={() => stop.mutate()}>Остановить</Button>}
+      </Group>
+      {(runs.data?.length > 0 || (action.isPending && action.variables === 'arrodes')) && (
+        <AgentProgress taskId={task.id} providers={['arrodes']} active={(action.isPending && action.variables === 'arrodes') || arrodesRunning} />
+      )}
+      {stop.error && <Text c="red" size="sm">{stop.error.message}</Text>}
+      {results[0] && <RunResult run={results[0]} disabled={arrodesRunning || action.isPending} onContinue={continueRun} />}
+      {results.length > 1 && <details><summary style={{ cursor: 'pointer', fontSize: 13 }}>Предыдущие запуски · {results.length - 1}</summary><Stack gap="md" mt="sm">{results.slice(1).map((run) => <details key={run.id}><summary style={{ cursor: 'pointer', fontSize: 13 }}>{new Date(run.created_at).toLocaleString()} · {runStatus[run.status] ?? run.status}</summary><Stack mt="xs"><RunResult run={run} disabled={arrodesRunning || action.isPending} onContinue={continueRun} /></Stack></details>)}</Stack></details>}
+    </Stack></Paper>}
+    {features.ameba !== false && <Group><Button size="xs" variant="subtle" disabled={(action.isPending && !queue.data?.ameba_running) || queue.data?.browser_busy} onClick={() => action.mutate('ameba')}>{queue.data?.ameba_running ? 'Обновить при изменениях' : 'Обновить порядок Ameba'}</Button></Group>}
+    {features.monocle !== false && <ContextForm key={task.id} taskId={task.id} context={context} />}
     {notice && <Alert color="purple">{notice}</Alert>}
     {(action.error || runs.error) && <Alert color="red">{(action.error || runs.error).message}</Alert>}
-    {features.codex !== false && runs.data?.map((run) => <Paper key={run.id} withBorder p="md"><Stack gap="sm">
-      <Group justify="space-between"><Title order={5}>Материалы Codex</Title><Badge>{({ queued: 'В очереди', running: 'Подготовка', succeeded: 'На проверку', failed: 'Ошибка', interrupted: 'Прервано' })[run.status]}</Badge></Group>
-      {run.summary && <Text size="sm" style={{ whiteSpace: 'pre-wrap' }}>{run.summary}</Text>}
-      {run.error && <Text c="red" size="sm">{run.error}</Text>}
-      <RunFiles run={run} />
-    </Stack></Paper>)}
+
   </Stack>;
 }

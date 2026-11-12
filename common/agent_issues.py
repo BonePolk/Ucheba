@@ -25,7 +25,7 @@ async def report_problem(arguments, agent):
     try:
         async with httpx.AsyncClient(timeout=15, transport=httpx.AsyncHTTPTransport(retries=1)) as client:
             response = await client.post('http://backend:8000/api/auth/agent-issues/internal',
-                json=arguments | {'agent': agent}, headers={'X-Service-Token': internal_token('context'), 'X-User-ID': str(user_id())})
+                json=arguments | {'agent': agent}, headers={'X-Service-Token': internal_token('monocle'), 'X-User-ID': str(user_id())})
             if not response.is_success:
                 return {'error': 'Не удалось передать проблему администратору'}
             return response.json()

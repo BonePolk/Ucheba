@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Button, Group, Select, Stack, TextInput } from '@mantine/core';
 import { request } from './api';
 
-export default function ModelPicker({ path, endpoint, apiKey, configured, value, onChange }) {
+export default function ModelPicker({ path, endpoint = '', apiKey = '', configured, value, onChange, chatgpt = false }) {
   const [items, setItems] = useState([]);
   const [manual, setManual] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -21,7 +21,7 @@ export default function ModelPicker({ path, endpoint, apiKey, configured, value,
     setLoading(true); setError('');
     try {
       const result = await request(path, { method: 'POST', signal: controller.signal,
-        body: JSON.stringify({ base_url: endpoint.trim(), api_key: apiKey.trim() }) });
+        body: JSON.stringify(chatgpt ? {} : { base_url: endpoint.trim(), api_key: apiKey.trim() }) });
       if (controller.signal.aborted) return;
       setItems([...new Set(result.filter((item) => typeof item === 'string' && item.trim()))]);
       setLoaded(true);
@@ -31,12 +31,12 @@ export default function ModelPicker({ path, endpoint, apiKey, configured, value,
       if (!controller.signal.aborted) setLoading(false);
     }
   }
-  const canLoad = Boolean(endpoint.trim() && (apiKey.trim() || configured));
+  const canLoad = chatgpt || Boolean(endpoint.trim() && (apiKey.trim() || configured));
   const options = [...new Set([value, ...items].filter(Boolean))];
   return <Stack gap={4}>
     {manual ? <TextInput label="ID модели" value={value} onChange={(event) => onChange(event.currentTarget.value)} error={error} />
-      : <Select label="Модель" searchable data={options} value={value || null} allowDeselect={false}
-        onChange={(model) => { if (model) onChange(model); }} onDropdownOpen={() => { if (canLoad && !loaded && !loading) load(); }}
+      : <Select label="Модель" searchable data={options} value={value || null} allowDeselect={chatgpt} clearable={chatgpt} placeholder={chatgpt ? 'По умолчанию' : undefined}
+        onChange={(model) => { if (chatgpt || model) onChange(model || ''); }} onDropdownOpen={() => { if (canLoad && !loaded && !loading) load(); }}
         nothingFoundMessage={loading ? 'Загрузка…' : 'Моделей нет — введите ID вручную'} error={error}
         filter={({ options: all, search }) => search === value ? all : all.filter((item) => item.label.toLowerCase().includes(search.toLowerCase()))} />}
     <Group gap="xs">
