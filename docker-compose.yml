@@ -210,7 +210,7 @@ services:
       INTERNAL_SECRET: ${INTEGRATION_ENCRYPTION_KEY:-}
     volumes:
       - browser-data:/browser
-    shm_size: 256mb
+    shm_size: 2gb
     networks:
       default:
       context-egress:
