@@ -48,6 +48,8 @@ async def run(name, args):
     elif name == 'write_silo_file':
         output = await asyncio.to_thread(workspace.save, memory, workspace.personal_path(args['path']), args['text'], args.get('version') or None)
         output['path'] = args['path']
+    elif name == 'delete_silo_file':
+        output = await asyncio.to_thread(workspace.delete_file, memory, args['path'])
     elif name == 'list_user_files':
         output = await asyncio.to_thread(workspace.tree, memory, False)
     elif name == 'read_user_file':

@@ -102,8 +102,14 @@ def workspace_save(body: WorkspaceFile):
     return workspace.save(Memory(), body.path, body.content, body.version)
 
 
+@app.delete('/workspace/file')
+def workspace_delete(path: str):
+    return workspace.delete_file(Memory(), path)
+
+
 TOOL_MESSAGES = {
     'list_user_files': 'Просматривает личные папки и файлы',
+    'delete_silo_file': 'Удаляет личный файл из Silo',
     'read_user_file': 'Читает выбранный личный файл',
     'list_memory': 'Просматривает память прошлых задач',
     'read_memory': 'Читает запись памяти',

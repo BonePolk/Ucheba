@@ -640,6 +640,11 @@ async def workspace_save(body: WorkspaceFile):
     return result
 
 
+@router.delete('/context/workspace/file')
+async def workspace_delete(path: str):
+    return await call('context', '/workspace/file?path=' + quote(path, safe=''), method='DELETE')
+
+
 class SavedContextFile(BaseModel):
     source_task_id: int = Field(gt=0)
     file_id: str = Field(pattern=r'^[a-f0-9]{32}$')

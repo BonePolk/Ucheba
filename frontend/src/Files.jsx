@@ -106,6 +106,14 @@ export default function Files() {
       for (const key of ['context-file-library', 'context-files', 'context', 'tasks', 'ameba-ranking']) client.invalidateQueries({ queryKey: [key] });
     },
   });
+  const deleteFile = useMutation({
+    mutationFn: (file) => request(`/integrations/context/workspace/file?path=${encodeURIComponent(file.path)}`, { method: 'DELETE' }),
+    onSuccess: (_, file) => {
+      setEditor((current) => current?.path === file.path ? null : current);
+      setNotice(`Файл «${file.name}» удалён`);
+      refresh();
+    },
+  });
   const createFolder = useMutation({
     mutationFn: (path) => request(`/integrations/context/workspace/folder?path=${encodeURIComponent(path)}`, { method: 'POST' }),
     onSuccess: () => { setCreating(null); setName(''); refresh(); },
@@ -126,7 +134,7 @@ export default function Files() {
     event.preventDefault(); event.stopPropagation(); setDragging(false);
     if (!busy && event.dataTransfer.files.length) upload.mutate({ files: Array.from(event.dataTransfer.files), target });
   }
-  const busy = open.isPending || save.isPending || createFolder.isPending || upload.isPending;
+  const busy = open.isPending || save.isPending || deleteFile.isPending || createFolder.isPending || upload.isPending;
   function select(file) {
     if (busy) return;
     if (file.folder) { setFolder(file.path); setSearch(''); return; }
@@ -144,7 +152,7 @@ export default function Files() {
   }
   const data = preview.data;
   const columns = [...new Set((data?.table?.rows ?? []).flatMap((row) => Object.keys(row.cells)))];
-  const error = tree.error || open.error || save.error || createFolder.error || upload.error;
+  const error = tree.error || open.error || save.error || deleteFile.error || createFolder.error || upload.error;
   return <Stack gap="md">
     <Group justify="space-between"><div><Title order={2}>Мои файлы</Title><Text c="dimmed" size="sm">{total.length} файлов · {sizeLabel(total.reduce((sum, file) => sum + (file.size ?? 0), 0))}</Text></div><Button variant="subtle" loading={tree.isFetching} onClick={refresh}>Обновить</Button></Group>
     {error && <Alert color="red">{error.message}</Alert>}
@@ -165,7 +173,7 @@ export default function Files() {
       </section>
       {editor && <aside className="file-preview"><Group justify="space-between" wrap="nowrap"><Group gap="xs" wrap="nowrap"><FileIcon file={editor} /><Text fw={600} size="sm" style={{ overflowWrap: 'anywhere' }}>{editor.name}</Text></Group><Button variant="subtle" size="compact-xs" disabled={busy} aria-label="Закрыть просмотр" onClick={() => { if (!dirty || window.confirm('Закрыть без сохранения изменений?')) setEditor(null); }}>✕</Button></Group>
         <Text size="xs" c="dimmed" mt="xs" style={{ overflowWrap: 'anywhere' }}>{editor.path}</Text>
-        <Group my="sm" gap="xs">{editor.url && <Button component="a" href={editor.url} download variant="light" size="compact-xs">Скачать</Button>}{editor.editable && <SegmentedControl size="xs" value={mode} onChange={setMode} data={[{ value: 'preview', label: 'Просмотр' }, { value: 'edit', label: 'Редактор' }]} />}{dirty && <Badge size="xs" variant="dot">Не сохранено</Badge>}</Group>
+        <Group my="sm" gap="xs">{editor.url && <Button component="a" href={editor.url} download variant="light" size="compact-xs">Скачать</Button>}{editor.url && !editor.path.startsWith('@tasks/') && <Button color="red" variant="light" size="compact-xs" loading={deleteFile.isPending} disabled={busy} onClick={() => { const changes = dirty ? ' Несохранённые изменения будут потеряны.' : ''; if (window.confirm(`Удалить файл «${editor.name}» без возможности восстановления?${changes}`)) deleteFile.mutate(editor); }}>Удалить</Button>}{editor.editable && <SegmentedControl size="xs" value={mode} onChange={setMode} data={[{ value: 'preview', label: 'Просмотр' }, { value: 'edit', label: 'Редактор' }]} />}{dirty && <Badge size="xs" variant="dot">Не сохранено</Badge>}</Group>
         {open.isPending ? <Loader /> : mode === 'edit' && editor.editable ? <Stack gap="sm"><Textarea aria-label="Содержимое файла" minRows={18} autosize maxRows={30} value={editor.content} onChange={(event) => { const content = event.currentTarget.value; setEditor((current) => ({ ...current, content })); }} styles={{ input: { fontFamily: 'monospace', fontSize: 12 } }} /><Button loading={save.isPending} disabled={!dirty || open.isPending} onClick={() => save.mutate(editor)}>Сохранить файл</Button></Stack> : <Stack gap="sm">
           {preview.isFetching && <Loader size="sm" />}{preview.error && <Alert color="yellow">{preview.error.message}</Alert>}
           {data?.notice && <Text size="xs" c="dimmed">{data.notice}</Text>}

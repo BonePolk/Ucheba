@@ -51,6 +51,8 @@ FILE_INSTRUCTION = ('Скачивание кнопкой/JavaScript перехв
     'read_silo_file читает документ и возвращает version, save_file_to_silo сохраняет оригинал '
     'загрузки браузера, write_silo_file сохраняет текст/Markdown/CSV/JSON. Сохраняй полезные '
     'источники и результаты для повторного использования, затем сообщай путь. Не сохраняй секреты. '
+    'Удаляй через delete_silo_file только личные файлы по точному path и только по прямой просьбе владельца; '
+    'файлы задач и память этим инструментом не удаляются. '
     'Для нового пути version пустая; существующий файл меняй только по просьбе владельца '
     'с актуальной версией после чтения, иначе используй новый путь. '
     'PDF можно смотреть постранично картинками. Бинарные данные разбирай python_binary: ZIP/Office XML '
@@ -107,6 +109,7 @@ FILE_TOOLS = [
 ]
 LIBRARY_TOOLS = [
     tool('read_silo_file', 'Прочитать личный файл Silo по path из list_user_files: текст/Office, изображение или страница PDF. Возвращает version для безопасного сохранения. page начинается с 1.', {'path': {'type': 'string', 'maxLength': 500}, 'page': {'type': 'integer', 'minimum': 1}}),
+    tool('delete_silo_file', 'Удалить личный файл Silo по точному path из list_user_files. Удаляет файл без возможности восстановления; не принимает папки, вложения задач или файлы памяти. Используй только по прямой просьбе владельца.', {'path': {'type': 'string', 'maxLength': 500}}),
     tool('write_silo_file', 'Создать или изменить личный текстовый файл в Silo: заметку, Markdown, CSV, JSON. version пустая для нового файла, иначе версия из read_silo_file/read_user_file. Существующий файл без правильной версии не заменяется.', {'path': {'type': 'string', 'maxLength': 500}, 'text': {'type': 'string', 'maxLength': 100000}, 'version': {'type': 'string', 'pattern': '^([a-f0-9]{64})?$'}}),
     tool('save_file_to_silo', 'Сохранить оригинал загрузки браузера в личную папку Silo для следующих поручений. file_id из list_downloads. version пустая для нового пути; для замены нужна версия из read_silo_file. Байты передаются между сервисами без участия модели.', {'file_id': {'type': 'string'}, 'path': {'type': 'string', 'maxLength': 500}, 'version': {'type': 'string', 'pattern': '^([a-f0-9]{64})?$'}}),
 {'type': 'function', 'name': 'list_user_files',
@@ -168,7 +171,7 @@ async def run_file_tool(name, args, browser_request, progress):
         return await file_result(name, output | result['output'], progress)
     if name in LIBRARY_NAMES:
         from common.library_client import library_request
-        progress.add({'write_silo_file': 'Сохраняет текстовый файл в Silo', 'list_user_files': 'Просматривает личные папки и файлы', 'read_user_file': 'Читает личный файл',
+        progress.add({'write_silo_file': 'Сохраняет текстовый файл в Silo', 'delete_silo_file': 'Удаляет личный файл из Silo', 'list_user_files': 'Просматривает личные папки и файлы', 'read_user_file': 'Читает личный файл',
                       'list_memory': 'Просматривает сохранённые записи задач', 'read_memory': 'Читает сохранённую запись задачи',
                       'list_saved_files': 'Ищет сохранённые документы', 'read_file': 'Читает выбранный документ',
                       'view_pdf_page': 'Просматривает страницу PDF'}[name])

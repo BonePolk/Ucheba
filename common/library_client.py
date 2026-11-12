@@ -7,7 +7,7 @@ from common.rpc import internal_token
 
 
 async def library_request(name, args):
-    attempts = 1 if name in ('save_file_to_silo', 'write_silo_file', 'export_table') else 2
+    attempts = 1 if name in ('save_file_to_silo', 'write_silo_file', 'delete_silo_file', 'export_table') else 2
     for attempt in range(attempts):
         try:
             async with httpx.AsyncClient(timeout=60) as client:
@@ -26,6 +26,6 @@ async def library_request(name, args):
             return response.json()
         except httpx.TransportError:
             if attempt + 1 == attempts:
-                detail = ('Ответ Silo потерян. Проверьте файл перед повторным сохранением: операция могла выполниться.'
+                detail = ('Ответ Silo потерян. Проверьте результат операции перед повтором: она могла выполниться.'
                           if attempts == 1 else 'Библиотека файлов недоступна после повторного подключения')
                 raise HTTPException(503, detail) from None

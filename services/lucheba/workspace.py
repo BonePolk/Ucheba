@@ -164,6 +164,19 @@ def save_binary(memory, path, content, version=None):
     return {'path': path, 'size': len(content), 'version': hashlib.sha256(content).hexdigest(), 'status': 'saved'}
 
 
+def delete_file(memory, path):
+    path = personal_path(path)
+    key = 'files/' + path
+    with write_lock:
+        if optional_read(memory, key) is None:
+            raise HTTPException(404, 'Файл не найден')
+        download = next((item for item in browser_downloads(memory) if item['path'] == path), None)
+        memory.client.remove_object(memory.bucket, memory.prefix + key)
+        if download and re.fullmatch(r'[a-f0-9]{32}', download['file_id']):
+            memory.client.remove_object(memory.bucket, memory.prefix + 'downloads/' + download['file_id'] + '.json')
+    return {'ok': True, 'path': path}
+
+
 
 def save_browser_download(memory, info, content):
     file_id = info['file_id']
