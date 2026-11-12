@@ -7,7 +7,9 @@ import asyncio
 from collections import OrderedDict
 import json
 import logging
-from datetime import datetime, timezone
+from uuid import uuid4
+from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from fastapi import HTTPException
@@ -63,6 +65,49 @@ def read_ranking(text, expected):
             or len(reasons) != len(expected) or set(reasons) != set(expected)):
         raise ValueError('Incomplete task IDs')
     return result
+
+
+@app.post('/check')
+async def check_model(body: dict):
+    config = body['config']
+    async with AsyncOpenAI(api_key=body['api_key'], base_url=config.get('base_url') or 'https://lenec.tech/v1',
+                           max_retries=0, timeout=180) as client:
+        response = await client.responses.create(model=config['model'], input='Ответь одним словом: готова.',
+                                                  reasoning={'effort': 'low'}, max_output_tokens=1000)
+    if response.status != 'completed' or not response.output_text.strip():
+        raise HTTPException(502, 'Модель не завершила проверочный ответ')
+    return {'ok': True, 'comparisons': 0}
+
+
+@app.post('/refresh')
+async def refresh_plan(body: dict):
+    previous = body['previous_plan']
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    now = (now + timedelta(minutes=1)).isoformat()
+    week = planning.restore_week(body.get('weekly_schedule'), previous, now, body.get('timezone', 'UTC'))
+    plans = {item['id']: item['plan'] for item in previous['timeline']}
+    planning.validate_rest(week, now)
+    draft = block_plan.initial(previous.get('schedule'), previous['task_ids'], now, week['timezone'])
+    block_plan.validate(draft, week, plans, body['tasks'], now)
+    occupied_week = dict(week, events=list(week.get('events', [])))
+    origin = datetime.fromisoformat(draft['start_at'])
+    zone = ZoneInfo(week['timezone'])
+    for block in draft['blocks']:
+        left = (origin + timedelta(minutes=block['start'])).astimezone(zone)
+        right = (origin + timedelta(minutes=block['start'] + block['minutes'])).astimezone(zone)
+        occupied_week['events'].append({'kind': 'busy', 'date': left.date().isoformat(), 'title': '',
+            'start': left.strftime('%H:%M'), 'end': right.strftime('%H:%M') if right.date() == left.date() else '24:00'})
+    remaining = {item['task_id']: item['remaining_work_minutes'] for item in block_plan.remaining(draft, plans, previous['task_ids'])}
+    pending = {task_id: plan | {'work_max_minutes': remaining[task_id]} for task_id, plan in plans.items()}
+    additions = planning.weekly_timeline(previous['task_ids'], pending, occupied_week, draft['start_at'], tasks=body['tasks'])
+    draft['blocks'].extend(block | {'id': uuid4().hex} for block in additions if block['kind'] == 'task' and not block.get('permanent'))
+    block_plan.validate(draft, week, plans, body['tasks'], now)
+    schedule = planning.reorder(json.dumps({'task_ids': previous['task_ids'], 'keep_previous_times': True}),
+                               plans, previous['task_ids'], week, draft['start_at'], tasks=body['tasks'],
+                               placed_blocks=block_plan.calendar_blocks(draft, week))
+    if schedule['timeline_error']:
+        raise HTTPException(409, schedule['timeline_error'])
+    return previous | {'schedule': schedule}
 
 
 @app.get('/ranking/progress')
@@ -134,22 +179,15 @@ async def rank(body: dict):
             memory_checked = False
             plans = {}
             schedule = None
-            planning_week = planning.with_rest(body.get('weekly_schedule'), body['now'], timezone_name=body.get('timezone', 'UTC'))
             old_plan = body.get('previous_plan', {})
-            old_rest = old_plan.get('rest_patterns', [])
-            if old_rest:
-                for day in planning_week['days']:
-                    day[:] = [slot for slot in day if not slot.get('temporary') or slot['kind'] == 'work']
-                for pattern in old_rest:
-                    for weekday in pattern['weekdays']:
-                        planning_week['days'][weekday].append(dict(pattern, temporary=True))
-            planning_week['day_plans'] = old_plan.get('day_plans', {})
+            planning_week = planning.restore_week(body.get('weekly_schedule'), old_plan, body['now'], body.get('timezone', 'UTC'))
             draft = block_plan.initial(old_plan.get('schedule'), expected, body['now'], planning_week['timezone'])
             plan_read = False
             rest_assumption = 'Предварительные рабочие окна и отдых; постоянный календарь не изменяется.'
             rest_planned = False
             order = list(expected)
             repaired = False
+            failed_actions = {}
             # Первое действие — чтение памяти. Полный контекст нужен после него,
             # а не для выбора уже принудительно заданного инструмента.
             messages = [{'role': 'user', 'content': 'Перед планированием прочитай общую память владельца.'}]
@@ -182,27 +220,20 @@ async def rank(body: dict):
                         'черновик блоков, постоянный календарь, недельный режим и исключения по датам. '
                         'Сохраняй подходящие прежние блоки. После оценки всех задач через plan_tasks '
                         'добавляй точные блоки через edit_task_blocks небольшими наборами. '
-                        'Инструмент возвращает только принятые added_blocks, removed_ids и остаток полезной '
-                        'работы по каждой задаче. Рабочие минуты блока = его длительность минус focus_minutes. '
+                        'Инструмент возвращает принятые added_blocks, removed_ids, рассчитанные free_windows и остаток полезной '
+                        'работы по каждой задаче. Выбирай время из free_windows вместо перебора часов. Рабочие минуты блока = его длительность минус focus_minutes. '
                         'Для переноса передай remove_ids и новые блоки одним вызовом; при ошибке весь вызов '
                         'отклоняется и прежний черновик остаётся. Не отправляй принятые блоки повторно. '
                         'После ошибки прочитай план при необходимости и попробуй другие часы или дни. '
                         'Время date/start/end — местное в timezone плана. Постоянные события менять нельзя. '
-                        'Не более 90 минут нагрузки подряд, затем не менее 15 минут отдыха. '
+                        'Соблюдай заданные владельцем интервалы отдыха и ограничения нагрузки; не выдумывай обязательные нормы. '
                         'Планируй точно только текущую неделю (7 дней от сегодня). '
-                        'Задачи, которые не помещаются на этой неделе, не размещай в таймлайн — '
-                        'они останутся в общем порядке по приоритету. '
+                        'Большую задачу можно разместить частично: remaining_work_minutes сохраняет остаток за горизонтом. '
                         'reorder_tasks только проверяет/суммирует уже вставленные блоки и фиксирует порядок ID, '
                         'он больше не размещает задачи автоматически. keep_previous_times оставь true; '
                         'фактические переносы выполняй через edit_task_blocks. После изменений режима '
                         'через plan_rest/plan_day проверь старые блоки и перенеси те, что больше не подходят. '
-                        'Не заканчивай, пока remaining_work_minutes или excess_work_minutes не равны нулю '
-                        'для всех задач, которые ты разместила на этой неделе. '
-                        'Задачи без блоков на этой неделе (unscheduled) не блокируют итог — '
-                        'они получают только порядок по приоритету. '
-                        'Не уменьшай оценки ради вида готовности. Если при реальных '
-                        'ограничениях закончить невозможно, объясни конкретную нехватку и спроси владельца '
-                        'через ask_user, какие ограничения/объём можно изменить; продолжи после ответа. '
+                        'Частичный план допустим. Не уменьшай оценки ради готовности. Остаток и конфликты жёстких сроков покажи в объяснении; не обещай полное завершение при нехватке времени. '
                         'Перед любым планированием обязательно вызови read_user_memory и проверь, '
                         'нет ли важных фактов о владельце: сон, еда, время подъёма, энергия, работа, '
                         'обязательства, предпочтения и ограничения. Слова владельца важнее догадок. '
@@ -265,7 +296,7 @@ async def rank(body: dict):
                         'зависимости, готовность и ручной приоритет. Просрочка — один из факторов, а не безусловное преимущество: срочная непросроченная задача может быть важнее просроченной. '
                         'Для каждой задачи оцени время выполнения, необходимые силы и ожидаемый эффект. '
                         'Ты Ameba, говори о себе в женском роде. Monocle и Straus — мужской род. '
-                        'Твой план задач, сна, еды и отдыха временный и сбрасывается при новом запуске. '
+                        'Твой план временный; предыдущий корректный план сохраняется до успешной замены. '
                         'Постоянные события calendar_events принадлежат владельцу/Straus: их нельзя менять или удалять. '
                         'Для сна и еды выбирай содержательные собственные названия в title, например '
                         '«Ночной сон перед занятиями», «Обед после лабораторной»; сохраняй названия, заданные владельцем. '
@@ -308,7 +339,7 @@ async def rank(body: dict):
                         'не обещай 20 баллов, если рабочий бюджет не позволяет сдачу в срок. '
                         'Итоговые task_ids должны совпадать с последним проверенным reorder_tasks. '
 
-                        'Разбей оставшуюся работу на конкретные этапы: подготовка, изучение, реализация, '
+                        'Оцени полный объём этапов, включая подтверждённое выполненное время completed_work_minutes. Python сам вычтет его один раз. Не вычитай его из steps повторно. Этапы: подготовка, изучение, реализация, '
                         'проверка, исправления, оформление и сдача — только применимые к задаче этапы. '
                         'Учитывай уже выполненное и не считай готовые части повторно. '
                         'Оцени min_minutes/max_minutes активной работы владельца по этапам и wait_minutes '
@@ -371,14 +402,13 @@ async def rank(body: dict):
                     raise HTTPException(502, 'Ameba не завершила планирование. Старый порядок сохранён.')
                 if not calls:
                     remaining_items = block_plan.remaining(draft, plans, expected)
-                    # Задачи без блоков на этой неделе — нормально, они идут по приоритету.
+                    # Частичное размещение не блокирует итог; остаток хранится в schedule.
                     missing = [item for item in remaining_items
-                               if item.get('needs_estimate') or item.get('excess_work_minutes')
-                               or (item.get('remaining_work_minutes') and not item.get('unscheduled'))]
+                               if item.get('needs_estimate') or item.get('excess_work_minutes')]
                     if missing or schedule is None or not rest_planned:
                         messages.extend(response.output)
                         messages.append({'role': 'user', 'content': json.dumps({
-                            'error': 'Черновик не готов. Продолжи размещать/переносить блоки через edit_task_blocks, затем вызови reorder_tasks. Задачи, которые не помещаются на текущей неделе, оставь без блоков — они получат порядок по приоритету.',
+                            'error': 'Черновик не проверен. Исправь оценки/лишние блоки и вызови reorder_tasks. Частичное размещение и остаток за горизонтом допустимы.',
                             'remaining': missing}, ensure_ascii=False)})
                         continue
                     try:
@@ -455,7 +485,7 @@ async def rank(body: dict):
                             progress.add('Перестраивает отдельный день: ' + output['date'])
                         elif call.name == 'plan_tasks':
                             progress.add('Рассчитывает время и нагрузку задач', description='Оценивает оставшуюся работу, чтобы сравнить выполнимость и пользу задач.')
-                            calculated = planning.calculate(call.arguments, expected)
+                            calculated = planning.calculate(call.arguments, expected, {task['id']: task.get('completed_work_minutes', 0) for task in tasks})
                             plans.update(calculated)
                             for block in draft['blocks']:
                                 if block['task_id'] in calculated:
@@ -481,6 +511,8 @@ async def rank(body: dict):
                             output = schedule
                         else:
                             raise ValueError('Unknown tool')
+                        if call.name in ('plan_tasks', 'plan_rest', 'plan_day', 'edit_task_blocks'):
+                            failed_actions.clear()
                         titles = {task['id']: task['title'] for task in tasks}
                         progress.update(stage='planning', total=len(expected), completed=len(plans),
                                         schedule=schedule or (draft | {'blocks': block_plan.calendar_blocks(draft, planning_week)}),
@@ -494,6 +526,10 @@ async def rank(body: dict):
                         else:
                             reason = str(exc)
                             errors = [{'message': reason}]
+                        failed_key = (call.name, call.arguments, reason)
+                        failed_actions[failed_key] = failed_actions.get(failed_key, 0) + 1
+                        if failed_actions[failed_key] >= 3:
+                            raise HTTPException(502, 'Ameba трижды повторила одинаковое неудачное действие. Предыдущий план сохранён.')
                         logging.getLogger('uvicorn.error').warning('Ameba tool %s: %s', call.name, reason)
                         progress.add('Исправляет параметры ' + call.name + ': ' + reason)
                         output = {'error': 'Исправь указанные поля инструмента; уже принятые планы сохранены.',

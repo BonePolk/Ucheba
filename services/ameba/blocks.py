@@ -26,12 +26,15 @@ READ_TOOL = {'type': 'function', 'name': 'read_current_plan', 'strict': True,
     'description': 'Прочитать весь текущий черновик: все блоки задач, недельный режим, постоянный календарь, исключения по датам и остаток работы. Используй перед вставкой новых блоков.',
     'parameters': {'type': 'object', 'properties': {}, 'required': [], 'additionalProperties': False}}
 EDIT_TOOL = {'type': 'function', 'name': 'edit_task_blocks', 'strict': True,
-    'description': 'Вставить блоки задач в текущий план или перенести выбранные блоки. Остальной план сохраняется. Время блока включает концентрацию. Проверяет рабочие окна, отдых, пересечения, объём работы и жёсткие сроки. При ошибке ничего не меняет. Возвращает только добавленные/удалённые блоки и остаток работы. Повторяй с исправленными часами до готовности.',
+    'description': 'Вставить блоки задач в текущий план или перенести выбранные блоки. Остальной план сохраняется. Время блока включает концентрацию. Проверяет рабочие окна, отдых, пересечения, объём работы и жёсткие сроки. При ошибке ничего не меняет. Возвращает только добавленные/удалённые блоки и остаток работы. Используй рассчитанные free_windows; частичное размещение допустимо.',
     'parameters': Edit.model_json_schema()}
 
 
 def initial(previous, expected, now, timezone_name):
-    origin = datetime.fromisoformat(now).astimezone(timezone.utc).replace(second=0, microsecond=0) + timedelta(minutes=1)
+    clock = datetime.fromisoformat(now).astimezone(timezone.utc)
+    origin = clock.replace(second=0, microsecond=0)
+    if origin < clock:
+        origin += timedelta(minutes=1)
     result = {'start_at': origin.isoformat(), 'timezone': timezone_name, 'blocks': []}
     if not previous or not previous.get('start_at'):
         return result
@@ -40,7 +43,7 @@ def initial(previous, expected, now, timezone_name):
         if block['kind'] != 'task' or block.get('permanent') or block.get('task_id') not in expected:
             continue
         left = old_origin + timedelta(minutes=block['start'])
-        if left >= origin:
+        if left >= origin and (left.astimezone(ZoneInfo(timezone_name)).date() - origin.astimezone(ZoneInfo(timezone_name)).date()).days < 7:
             result['blocks'].append(block | {'start': int((left - origin).total_seconds() / 60)})
     return result
 
@@ -62,7 +65,7 @@ def remaining(draft, plans, expected):
 
 
 def read(draft, week, plans, expected):
-    return {'schedule': draft, 'weekly_schedule': week, 'remaining': remaining(draft, plans, expected)}
+    return {'schedule': draft, 'weekly_schedule': week, 'free_windows': planning.free_windows(week, draft['start_at'], draft['blocks']), 'remaining': remaining(draft, plans, expected)}
 
 
 def validate(draft, week, plans, tasks, now):
@@ -70,7 +73,6 @@ def validate(draft, week, plans, tasks, now):
     zone = ZoneInfo(week['timezone'])
     tasks_by_id = {task['id']: task for task in tasks}
     previous_end = None
-    streak = 0
     for block in sorted(draft['blocks'], key=lambda value: value['start']):
         task_id = block['task_id']
         plan = plans[task_id]
@@ -81,11 +83,8 @@ def validate(draft, week, plans, tasks, now):
             raise ValueError(label + ': начало уже в прошлом; перенеси блок')
         if previous_end is not None and left < previous_end:
             raise ValueError(label + ': пересекается с предыдущей задачей')
-        if previous_end is None or left - previous_end >= timedelta(minutes=15):
-            streak = 0
-        streak += block['minutes']
-        if block['minutes'] <= plan['focus_minutes'] or streak > 90:
-            raise ValueError(label + ': нужно время на полезную работу после концентрации и отдых не менее 15 минут после 90 минут нагрузки')
+        if block['minutes'] <= plan['focus_minutes']:
+            raise ValueError(label + ': нужно время на полезную работу после концентрации')
         previous_end = right
         day = left.astimezone(zone).date()
         midnight = datetime.combine(day, time(), zone)
@@ -141,7 +140,8 @@ def edit(arguments, draft, week, plans, expected, tasks, now):
     candidate['blocks'].sort(key=lambda value: value['start'])
     validate(candidate, week, plans, tasks, now)
     return candidate, {'added_blocks': added, 'removed_ids': body.remove_ids,
-                       'remaining': remaining(candidate, plans, expected)}
+                       'remaining': remaining(candidate, plans, expected),
+                       'free_windows': planning.free_windows(week, draft['start_at'], candidate['blocks'])}
 
 
 def calendar_blocks(draft, week):
@@ -149,7 +149,6 @@ def calendar_blocks(draft, week):
     origin = datetime.fromisoformat(draft['start_at'])
     zone = ZoneInfo(week['timezone'])
     first = origin.astimezone(zone).date()
-    last = max((origin + timedelta(minutes=b['start'] + b['minutes']) for b in draft['blocks']), default=origin).astimezone(zone).date()
     result = list(draft['blocks'])
     for offset in range(7):
         day = first + timedelta(days=offset)

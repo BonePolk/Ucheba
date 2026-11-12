@@ -19,6 +19,7 @@ class TaskCreate(SQLModel):
     priority: Priority = "medium"
     status: TaskStatus = "todo"
     category: str | None = None
+    completed_work_minutes: int = Field(default=0, ge=0)
     agent_notes: str = Field(default="", max_length=12000)
 
     @field_validator("deadline")
@@ -36,6 +37,7 @@ class Task(SQLModel, table=True):
     priority: str = "medium"
     status: str = "todo"
     category: str | None = None
+    completed_work_minutes: int = Field(default=0, ge=0)
     source_url: str | None = None
     source_chat_id: int | None = None
     ai_score: float | None = None

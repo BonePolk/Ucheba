@@ -409,9 +409,6 @@ async def ameba_rank(background: bool = False, body: RankingRequest | None = Non
     if not status['needs_refresh']:
         return status | {'unchanged': True}
     await scheduler.interrupt_ranking(own_only=True)
-    from common.calendar import reset_ameba_plan
-    from uuid import uuid4
-    reset_ameba_plan(uuid4().hex)
     if background:
         return jobs.start(lambda: provider_call('ameba', ameba.rank_all()))
     return await provider_call('ameba', ameba.rank_all())

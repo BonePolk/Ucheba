@@ -1,4 +1,4 @@
-import { Alert, Button, Checkbox, FileButton, Group, Modal, Select, SimpleGrid, Stack, Text, Textarea, TextInput } from '@mantine/core';
+import { Alert, Button, Checkbox, FileButton, Group, Modal, NumberInput, Select, SimpleGrid, Stack, Text, Textarea, TextInput } from '@mantine/core';
 import { useEffect, useState } from 'react';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
@@ -39,6 +39,7 @@ export default function TaskForm({ task, onClose, onSubmit, pending, error, allo
       priority: task?.priority ?? 'medium',
       status: task?.status ?? 'todo',
       category: task?.category ?? '',
+      completed_work_minutes: task?.completed_work_minutes ?? 0,
       ...(!task && allowContext ? { agent_notes: '' } : {}),
     },
     validate: { title: (value) => value.trim() ? null : 'Укажите название' },
@@ -49,6 +50,7 @@ export default function TaskForm({ task, onClose, onSubmit, pending, error, allo
       <form onSubmit={form.onSubmit((values) => onSubmit({
         ...values,
         title: values.title.trim(),
+        completed_work_minutes: Number(values.completed_work_minutes) || 0,
         deadline: values.deadline ? dayjs(values.deadline).toISOString() : null,
         description: values.description.trim() || null,
         category: values.category.trim() || null,
@@ -67,6 +69,7 @@ export default function TaskForm({ task, onClose, onSubmit, pending, error, allo
           {fileError && <Alert color="red">{fileError}</Alert>}
           <details open={task ? true : undefined}><summary style={{ cursor: 'pointer', fontSize: 12, color: 'var(--mantine-color-dimmed)' }}>Дополнительно</summary><Stack gap="xs" mt="xs">
             {!task && allowContext && <Textarea label="Заметки для Monocle" placeholder="Что проверить и учесть" autosize minRows={1} maxRows={4} maxLength={12000} {...form.getInputProps('agent_notes')} />}
+            {task && <NumberInput label="Выполнено полезной работы, мин" description="Всего подтверждено вами. Прошедшие блоки не засчитываются автоматически." min={0} allowDecimal={false} allowNegative={false} {...form.getInputProps('completed_work_minutes')} />}
             <SimpleGrid cols={2} spacing="xs"><Select label="Статус" data={statuses} allowDeselect={false} {...form.getInputProps('status')} /><TextInput label="Категория" {...form.getInputProps('category')} /></SimpleGrid>
           </Stack></details>
           {allowAutomation && <Checkbox label="Открыть действия ИИ после сохранения" checked={openAutomation} onChange={(event) => setOpenAutomation(event.currentTarget.checked)} />}

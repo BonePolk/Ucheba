@@ -46,7 +46,7 @@ def task_state(session):
                                   'questions': context.questions, 'full_context': usage.get('full_markdown'),
                                   'time_estimate': usage.get('time_estimate'), 'effort': usage.get('effort'),
                                   'impact': usage.get('impact')} if context else None,
-                      'ready': valid})
+                      'ready': valid, 'completed_work_minutes': task.completed_work_minutes})
         if valid:
             ready.append({'id': task.id, 'title': task.title, 'description': task.description or '',
                           'category': task.category, 'subject': context.subject, 'owner_notes': context.owner_notes,
@@ -54,7 +54,8 @@ def task_state(session):
                           'full_context': usage['full_markdown'],
                           'time_estimate': usage.get('time_estimate'),
                           'effort': usage.get('effort'), 'impact': usage.get('impact'),
-                          'deadline': normalize_utc(task.deadline), 'priority': task.priority})
+                          'deadline': normalize_utc(task.deadline), 'priority': task.priority,
+                          'completed_work_minutes': task.completed_work_minutes})
         else:
             waiting.append(task.id)
     # При равном сравнении сохраняем ручной приоритет, затем ближайший дедлайн.
@@ -62,7 +63,7 @@ def task_state(session):
                                  task['deadline'].isoformat() if task['deadline'] else '9999', task['id']))
     from agent_memory import read as read_facts
     calendar = read_calendar()
-    signature = json.dumps({'version': 31, 'tasks': state, 'calendar': {'events': sorted(calendar['events'], key=lambda event: event['id']), 'timezone': calendar['timezone']},
+    signature = json.dumps({'version': 32, 'tasks': state, 'calendar': {'events': sorted(calendar['events'], key=lambda event: event['id']), 'timezone': calendar['timezone']},
         'facts': sorted(({'key': fact['key'], 'text': fact['text']} for fact in read_facts() if fact['agent'] in ('Владелец', 'user')), key=lambda fact: fact['key']),
         'feedback': plan_feedback(),
         'provider': {key: read_config('ameba')[key] for key in ('model', 'base_url')}}, sort_keys=True)
@@ -70,7 +71,7 @@ def task_state(session):
 
 
 def automatic_inputs():
-    # Только входные данные аккаунта: результаты агентов и ход времени не являются изменениями.
+    # Только изменения владельца; течение времени обрабатывается worker отдельно.
     from agent_memory import read as read_facts
     with Session(get_engine()) as session:
         tasks = session.exec(select(Task).where(Task.archived == False, Task.status != 'done').order_by(Task.id)).all()
@@ -78,7 +79,7 @@ def automatic_inputs():
         for task in tasks:
             context = session.get(TaskContext, task.id)
             inputs.append({'id': task.id, 'task': snapshot(task),
-                           'notes': context.owner_notes if context else ''})
+                           'notes': context.owner_notes if context else '', 'completed_work_minutes': task.completed_work_minutes})
     calendar = read_calendar()
     return json.dumps({'tasks': inputs,
         'calendar': {'events': sorted(calendar['events'], key=lambda event: event['id']), 'timezone': calendar['timezone']},
@@ -107,6 +108,19 @@ def calendar_schedule():
             'rest_assumption': 'Постоянное расписание. Ameba учитывает его до размещения задач.'}
 
 
+def plan_expired(result):
+    from zoneinfo import ZoneInfo
+    schedule = result.get('schedule') or {}
+    if not schedule.get('start_at'):
+        return True
+    zone = ZoneInfo(read_calendar()['timezone'])
+    now = datetime.now(timezone.utc)
+    origin = datetime.fromisoformat(schedule['start_at'])
+    return (origin.astimezone(zone).date() != now.astimezone(zone).date()
+            or any(origin + timedelta(minutes=block['start']) < now
+                   for block in schedule.get('blocks', []) if block['kind'] == 'task' and not block.get('permanent')))
+
+
 def ranking_status():
     with Session(get_engine()) as session:
         signature, ready, waiting = task_state(session)
@@ -120,7 +134,7 @@ def ranking_status():
                          'reasons': [item for item in result.get('reasons', []) if item['task_id'] in ids],
                          'pending_count': len(waiting), 'total_count': len(ready) + len(waiting),
                          'feedback': plan_feedback(),
-                         'needs_refresh': not saved or saved.snapshot != signature,
+                         'needs_refresh': not saved or saved.snapshot != signature or plan_expired(result),
                          'uncertain_comparisons': result.get('uncertain_comparisons', 0),
                          'calendar_schedule': calendar_schedule()}
 
@@ -142,7 +156,7 @@ async def clear_plan():
     return {'ok': True}
 
 
-async def request_ranking(tasks, task_id=0, checked_contexts=()):
+async def request_ranking(tasks, task_id=0, checked_contexts=(), refresh=False):
     config, secrets = read_settings('ameba')
     if not config['enabled']:
         raise HTTPException(400, 'Ameba выключена в настройках профиля')
@@ -154,8 +168,8 @@ async def request_ranking(tasks, task_id=0, checked_contexts=()):
         previous = json.loads(saved.result) if saved else {}
     return await scheduler.run_ranking({'input_signature': input_signature, 'api_key': secrets['api_key'], 'config': config, 'tasks': tasks,
                       'now': datetime.now(timezone.utc).isoformat(), 'weekly_schedule': read_week(), 'timezone': read_calendar()['timezone'], 'task_id': task_id,
-                      'previous_plan': {key: previous[key] for key in ('schedule', 'timeline', 'task_ids', 'generated_at', 'rest_patterns', 'day_plans') if key in previous},
-                      'user_feedback': plan_feedback(), 'checked_contexts': list(checked_contexts)})
+                      'previous_plan': previous,
+                      'user_feedback': plan_feedback(), 'checked_contexts': list(checked_contexts)}, endpoint='/refresh' if refresh else '/rank')
 
 
 async def rank_all(force=False, task_id=0):
@@ -166,7 +180,7 @@ async def rank_all(force=False, task_id=0):
         with Session(get_engine()) as session:
             signature = task_state(session)[0]
             saved = session.get(TaskRanking, 1)
-            if not force and saved and saved.snapshot == signature:
+            if not force and saved and saved.snapshot == signature and not plan_expired(json.loads(saved.result)):
                 return json.loads(saved.result) | {'unchanged': True}
         # Сначала собираем недостающий контекст, затем один раз сортируем весь список.
         with Session(get_engine()) as session:
@@ -183,7 +197,7 @@ async def rank_all(force=False, task_id=0):
         with Session(get_engine()) as session:
             signature, ready, waiting = task_state(session)
             saved = session.get(TaskRanking, 1)
-            if not force and saved and saved.snapshot == signature:
+            if not force and saved and saved.snapshot == signature and not plan_expired(json.loads(saved.result)):
                 return json.loads(saved.result)
         checked_contexts = set()
         while ready:
@@ -191,7 +205,9 @@ async def rank_all(force=False, task_id=0):
                 # Пока ждали браузер, задачи и контекст могли измениться.
                 with Session(get_engine()) as session:
                     signature, ready, waiting = task_state(session)
-                result = await request_ranking(ready, task_id, checked_contexts)
+                    saved = session.get(TaskRanking, 1)
+                    refresh = not force and bool(saved and saved.snapshot == signature)
+                result = await request_ranking(ready, task_id, checked_contexts, refresh=refresh)
             requests = result.get('context_requests', [])
             if not requests:
                 break
@@ -222,12 +238,17 @@ async def rank_all(force=False, task_id=0):
             session.add(saved)
             for task_id in ids:
                 task = session.get(Task, task_id)
-                task.ai_details = json.dumps({'version': 31, 'status': 'ranked'})
+                task.ai_details = json.dumps({'version': 32, 'status': 'ranked'})
                 task.ai_scored_at = datetime.now(timezone.utc)
                 session.add(task)
+            if result.get('plan_run_id'):
+                save_ameba_plan(result['plan_run_id'], result, result['calendar_revision'], session)
+            elif not ids:
+                temporary = session.get(IntegrationSetting, 'ameba_plan')
+                if temporary:
+                    temporary.config = '{}'
+                    session.add(temporary)
             session.commit()
-        if result.get('plan_run_id'):
-            save_ameba_plan(result['plan_run_id'], result, result['calendar_revision'])
         report('ameba', success=True)
         return result
 
@@ -240,21 +261,10 @@ async def evaluate(task_id=None):
 
 
 async def check_model():
-    # Проверка подключения по кнопке в профиле, без обращений к Monocle.
-    now = datetime.now(timezone.utc)
-    result = await request_ranking([
-        {'id': 1, 'title': 'Обновить оформление внутренней презентации',
-         'deadline': (now + timedelta(days=14)).isoformat(),
-         'full_context': 'Необязательная косметическая правка внутреннего черновика. '
-                         'Текущее оформление подходит, работа команды не заблокирована.'},
-        {'id': 2, 'title': 'Отправить клиенту согласованный договор',
-         'deadline': (now + timedelta(hours=1)).isoformat(),
-         'full_context': 'Договор уже согласован и готов к отправке. Клиент ждёт его в течение часа '
-                         'для подписания и оплаты. Задержка сорвёт сегодняшнюю сделку и отложит оплату.'},
-    ])
-    if result.get('task_ids') != [2, 1]:
-        raise HTTPException(502, 'Ameba не поставила срочную отправку договора клиенту выше косметической правки презентации. На порядок модели пока нельзя полагаться.')
-    return {'ok': True, 'comparisons': result['comparisons']}
+    config, secrets = read_settings('ameba')
+    if not secrets.get('api_key'):
+        raise HTTPException(400, 'Для Ameba не сохранён API-ключ')
+    return await call('ameba', '/check', {'config': config, 'api_key': secrets['api_key']}, timeout=None)
 
 
 async def evaluate_task(task_id):
@@ -267,7 +277,7 @@ async def evaluate_task(task_id):
     # Monocle мог уточнить поля задачи. Дальше сравниваем уже с её результатом.
     original = context['task_snapshot']
     if context['status'] != 'ready':
-        metrics = {'version': 31, 'status': 'needs_context', 'reason': ' '.join(context['questions'])}
+        metrics = {'version': 32, 'status': 'needs_context', 'reason': ' '.join(context['questions'])}
         with Session(get_engine()) as session:
             task = session.get(Task, task_id)
             if not task:
@@ -282,4 +292,4 @@ async def evaluate_task(task_id):
     result = await rank_all(task_id=task_id)
     ids = result['task_ids']
     return result | {'rank': ids.index(task_id) + 1 if task_id in ids else None,
-                     'metrics': {'status': 'ranked', 'version': 31}}
+                     'metrics': {'status': 'ranked', 'version': 32}}

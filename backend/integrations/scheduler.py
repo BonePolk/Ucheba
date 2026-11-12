@@ -27,7 +27,7 @@ async def interrupt_ranking(own_only=False):
         await asyncio.gather(request['task'], return_exceptions=True)
 
 
-async def run_ranking(body):
+async def run_ranking(body, endpoint='/rank'):
     from common import calendar
     run_id = uuid4().hex
     calendar.reset_ameba_plan(run_id)
@@ -35,7 +35,7 @@ async def run_ranking(body):
 
     async def request():
         try:
-            return await call('ameba', '/rank', {key: value for key, value in body.items() if key != 'input_signature'} | {'run_id': run_id}, timeout=None)
+            return await call('ameba', endpoint, {key: value for key, value in body.items() if key != 'input_signature'} | {'run_id': run_id}, timeout=None)
         except asyncio.CancelledError:
             # Сначала останавливаем модель в отдельном сервисе, затем отдаём очередь.
             await call('ameba', '/cancel', {'run_id': run_id}, timeout=None)

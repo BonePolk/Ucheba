@@ -167,7 +167,8 @@ def view_events(start, end):
 def reset_ameba_plan(run_id):
     with Session(get_engine()) as session:
         row = session.get(IntegrationSetting, 'ameba_plan') or IntegrationSetting(name='ameba_plan')
-        row.config = json.dumps({'run_id': run_id})
+        previous = json.loads(row.config)
+        row.config = json.dumps(previous | {'pending_run_id': run_id})
         session.add(row)
         session.commit()
 
@@ -178,19 +179,17 @@ def read_ameba_plan():
         return json.loads(row.config) if row else {}
 
 
-def save_ameba_plan(run_id, result, revision):
+def save_ameba_plan(run_id, result, revision, session):
     if not result.get('schedule'):
         return
-    with Session(get_engine()) as session:
-        row = session.get(IntegrationSetting, 'ameba_plan')
-        if not row or json.loads(row.config).get('run_id') != run_id:
-            return  # Ответ отменённого запуска не возвращает старый план.
-        row.config = json.dumps({'run_id': run_id, 'revision': revision,
-            'schedule': result['schedule'], 'rest_patterns': result.get('rest_patterns', []),
-            'day_plans': result.get('day_plans', {}),
-            'tasks': result.get('timeline', [])}, ensure_ascii=False)
-        session.add(row)
-        session.commit()
+    row = session.get(IntegrationSetting, 'ameba_plan')
+    if not row or json.loads(row.config).get('pending_run_id') != run_id:
+        raise ValueError('Запуск Ameba уже заменён')
+    row.config = json.dumps({'run_id': run_id, 'revision': revision,
+        'schedule': result['schedule'], 'rest_patterns': result.get('rest_patterns', []),
+        'day_plans': result.get('day_plans', {}),
+        'tasks': result.get('timeline', [])}, ensure_ascii=False)
+    session.add(row)
 
 
 def ameba_events(start, end):
