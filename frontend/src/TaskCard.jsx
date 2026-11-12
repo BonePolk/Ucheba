@@ -36,7 +36,7 @@ export default function TaskCard({ task, archived, completing, busy, removing, p
       {!archived && <Select size="xs" aria-label={`Статус: ${task.title}`} data={statuses} value={done ? 'done' : task.status} allowDeselect={false} disabled={busy} onChange={(status) => onUpdate({ status })} />}
       {archived && <Badge size="xs" color="gray">Архив</Badge>}
     </div>
-    {assessment && <details className="task-assessment"><summary>Оценка Амёбы</summary><RankingAssessment assessment={assessment} /></details>}
+    {assessment && <details className="task-assessment"><summary>Оценка Амёбы</summary><RankingAssessment assessment={assessment} compact /></details>}
     {agents && !archived && <Button component="a" href={`/?task=${task.id}`} variant="subtle" size="xs" fullWidth mt="xs">Открыть задачу и агента →</Button>}
   </Paper>;
 }

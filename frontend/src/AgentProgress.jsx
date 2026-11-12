@@ -98,7 +98,7 @@ export default function AgentProgress({ taskId = 0, providers, active = false, c
   const browserUsed = current?.available && run?.status === 'running'
     && ['Monocle', 'Lucheba', 'Straus'].includes(run.agent)
     && allEvents.some((event) => event.kind !== 'note'
-      && /^(Входит через сохранённый вход|Читает (текущую )?страницу|Переходит по выбранной ссылке|Скачивает документ из браузера|Ищет в Google|Смотрит снимок браузера|Нажимает|Вводит текст|Прокручивает страницу|Открывает страницу|Возвращается назад|Переходит вперёд|Рассматривает изображение|Ждёт, пока владелец завершит CAPTCHA)/.test(event.message));
+      && /^(Входит через сохранённый вход|Читает (текущую )?страницу|Переходит по выбранной ссылке|Скачивает документ из браузера|Ищет в Google|Смотрит снимок браузера|Перемещает курсор|Нажимает|Вводит текст|Прокручивает страницу|Открывает страницу|Возвращается назад|Переходит вперёд|Рассматривает изображение|Ждёт, пока владелец завершит CAPTCHA)/.test(event.message));
   const events = allEvents.map((event) => ({
     ...event, provider: current.provider, key: `${current.run.id}:${event.id}`,
   }));
@@ -116,11 +116,11 @@ export default function AgentProgress({ taskId = 0, providers, active = false, c
   return <Paper withBorder p="sm" radius="md" className="agent-progress">
     <Group justify="space-between" align="center" wrap="wrap">
       <Group gap="xs"><Text size="sm" fw={600}>{agentName}</Text><Badge color={statusColor} variant="light">{statusLabel}</Badge></Group>
-      <Button variant="subtle" size="xs" className="agent-log-toggle" leftSection={<Loader size="xs" style={{ visibility: running && !run?.pending_question ? 'visible' : 'hidden' }} />} onClick={toggle}>
-        {opened ? 'Скрыть журнал' : 'Показать журнал'}
+      <Button variant="subtle" size="xs" className="agent-log-toggle" aria-label={opened ? 'Скрыть журнал' : 'Показать журнал'} aria-expanded={opened} rightSection={<span aria-hidden="true">{opened ? '▴' : '▾'}</span>} leftSection={<Loader size="xs" style={{ visibility: running && !run?.pending_question ? 'visible' : 'hidden' }} />} onClick={toggle}>
+        Журнал
       </Button>
     </Group>
-    <div className="agent-activity">
+    {(run?.status === 'running' || run?.agent_comment) && <div className="agent-activity">
     {run?.status === 'running' && <Group gap="xs" align="start" role="status" aria-live="polite">
       {run.pending_question ? <Text size="sm" fw={500}>Ждёт вашего ответа</Text> : run.model_waiting ? <Text component="span" className="agent-thinking">Думает</Text> : <>
         <Loader size={12} mt={3} />
@@ -130,13 +130,15 @@ export default function AgentProgress({ taskId = 0, providers, active = false, c
       </>}
     </Group>}
     {run?.agent_comment && <Text size="xs" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>Пояснение агента: <AgentExplanation text={run.agent_comment} initialText={seenExplanations.current.get(`${run.id}:comment`) ?? (receivedLog.current ? '' : run.agent_comment)} /></Text>}
-    </div>
+    </div>}
     {run?.status === 'failed' && <Alert color="red">{run.error || 'Агент завершился с ошибкой. Повторите поручение.'}</Alert>}
     {run?.pending_question && <AgentQuestion key={run.pending_question.id} question={run.pending_question} agent={run.agent} />}
 
     <Collapse in={opened}><Stack gap="xs" mt="xs">
       {typeof children === 'function' ? children(query.data ?? [], current) : children}
+      <div className="agent-log-body">
       {opened && browserUsed && <MonocleBrowser key={run.id} active />}
+      <div className="agent-log-content">
       <Text size="xs" c="dimmed">{run?.token_usage ? `Подтверждённые токены: вход ${run.token_usage.input_tokens ?? 'нет данных'} · выход ${run.token_usage.output_tokens ?? 'нет данных'}` : 'Токены: нет данных'}{run?.model_waiting && !run.current_usage_known && run.token_usage ? ' · текущий запрос: нет данных' : ''}</Text>
       {current?.available && !streamError && run?.status === 'running' && !run.pending_question && quietMinutes >= 2 && <Text size="xs" c="yellow">Агент не передавал новых данных {quietMinutes} мин.</Text>}
       <div ref={viewport} onScroll={(event) => {
@@ -156,6 +158,8 @@ export default function AgentProgress({ taskId = 0, providers, active = false, c
           </div>;
         })}
         </div>
+      </div>
+      </div>
       </div>
       {(query.data ?? []).filter((entry) => !entry.available).map((entry) => <Text key={entry.provider} size="xs" c="yellow">{names[entry.provider]}: журнал пока недоступен</Text>)}
       {streamError && <Alert color="yellow">Соединение с журналом потеряно. Переподключаемся…</Alert>}

@@ -66,7 +66,7 @@ function IntegrationForms({ data, features }) {
   return <Stack>
     {error && <Alert color="red">{error.message}</Alert>}
     {notice && <Alert color="purple" withCloseButton onClose={() => setNotice('')}>{notice}</Alert>}
-    <SimpleGrid cols={{ base: 1, md: 2 }}>
+    <SimpleGrid cols={{ base: 1, md: 2 }} style={{ alignItems: 'start' }}>
       {features.context !== false && <AgentSettings name="context" title="Monocle" data={data.context} />}
       {features.ameba !== false && data.ameba && <AgentSettings name="ameba" title="Ameba" data={data.ameba} />}
       {features.straus !== false && data.straus && <AgentSettings name="straus" title="Straus" data={data.straus} />}

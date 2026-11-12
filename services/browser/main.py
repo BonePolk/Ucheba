@@ -14,6 +14,7 @@ import re
 import socket
 from urllib.parse import parse_qs, unquote, urlencode, urljoin, urlsplit, urlunsplit
 from uuid import uuid4
+from weakref import WeakKeyDictionary
 
 from cryptography.fernet import Fernet
 from fastapi import HTTPException, Request
@@ -37,6 +38,63 @@ browser_downloads = {}
 agent_runs = {}
 deferred_browser_close = set()
 playwright = None
+
+# Chromium не рисует системный курсор на screenshots. Маркер не перехватывает
+# события и не добавляет текст в представление страницы для агента.
+CURSOR_SCRIPT = """(() => {
+    if (window.__uchebaCursorReady) return window.__uchebaCursorReady;
+    window.__uchebaCursorReady = (async () => {
+        let marker;
+        function move(x, y) {
+            if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+            if (window !== window.top) {
+                window.parent.postMessage({ uchebaCursor: { x, y } }, '*');
+                return;
+            }
+            x = Math.max(0, Math.min(innerWidth - 1, x));
+            y = Math.max(0, Math.min(innerHeight - 1, y));
+            window.__uchebaCursor = { x, y };
+            window.__uchebaCursorPosition({ x, y });
+            if (!document.documentElement) return;
+            if (!marker) {
+                marker = document.createElement('div');
+                marker.setAttribute('aria-hidden', 'true');
+                marker.style.cssText = 'position:fixed;inset:0;z-index:2147483647;pointer-events:none;overflow:hidden;contain:strict;';
+                const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+                icon.setAttribute('viewBox', '0 0 20 26');
+                icon.style.cssText = 'position:absolute;width:20px;height:26px;pointer-events:none;';
+                const arrow = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                for (const [name, value] of Object.entries({d: 'M1 1 L1 20 L6 15 L10 24 L14 22 L10 14 L18 14 Z', fill: '#7f49b4', stroke: 'white', 'stroke-width': '2', 'stroke-linejoin': 'round'})) arrow.setAttribute(name, value);
+                icon.append(arrow);
+                marker.append(icon);
+            }
+            if (!marker.isConnected) document.documentElement.append(marker);
+            marker.firstElementChild.style.left = (x - 1) + 'px';
+            marker.firstElementChild.style.top = (y - 1) + 'px';
+        }
+        window.__uchebaMoveCursor = ({ x, y }) => move(x, y);
+        addEventListener('mousemove', (event) => move(event.clientX, event.clientY), true);
+        addEventListener('message', (event) => {
+            const point = event.data?.uchebaCursor;
+            if (!point) return;
+            const frame = Array.from(document.querySelectorAll('iframe, frame')).find((item) => item.contentWindow === event.source);
+            if (!frame) return;
+            const bounds = frame.getBoundingClientRect();
+            const scaleX = frame.offsetWidth ? bounds.width / frame.offsetWidth : 1;
+            const scaleY = frame.offsetHeight ? bounds.height / frame.offsetHeight : 1;
+            move(bounds.left + (frame.clientLeft + point.x) * scaleX, bounds.top + (frame.clientTop + point.y) * scaleY);
+        });
+        if (window === window.top) {
+            const point = await window.__uchebaCursorPosition();
+            addEventListener('DOMContentLoaded', () => {
+                const current = window.__uchebaCursor ?? point;
+                move(current.x, current.y);
+            }, { once: true });
+            move(point.x, point.y);
+        }
+    })();
+    return window.__uchebaCursorReady;
+})()"""
 
 
 @asynccontextmanager
@@ -267,6 +325,16 @@ async def page():
             str(root() / 'profile'), headless=True, viewport={'width': 1100, 'height': 750},
             accept_downloads=True, service_workers='block',
         )
+        cursor_positions = WeakKeyDictionary()
+
+        def cursor_position(source, point=None):
+            tab = source['page']
+            if point is not None:
+                cursor_positions[tab] = point
+            return cursor_positions.get(tab, {'x': 0, 'y': 0})
+
+        await context.expose_binding('__uchebaCursorPosition', cursor_position)
+        await context.add_init_script(script=CURSOR_SCRIPT)
         capture_downloads(context)
         context.set_default_timeout(8000)
         context.set_default_navigation_timeout(25000)
@@ -322,11 +390,13 @@ async def capture_screen(state):
         async with state['capture_lock']:
             if asyncio.get_running_loop().time() - state['frame_time'] >= 0.25:
                 try:
+                    await tab.evaluate(CURSOR_SCRIPT)
                     image = await tab.screenshot(type='jpeg', quality=65, timeout=1500,
                                                  mask=[tab.locator('input[type="password"]')])
                     state['frame'] = {'image': base64.b64encode(image).decode(), 'mime': 'image/jpeg',
                                       'url': safe_url(tab.url), 'at': datetime.now(timezone.utc).isoformat(),
-                                      'width': 1100, 'height': 750}
+                                      'width': 1100, 'height': 750,
+                                      'cursor': await tab.evaluate('window.__uchebaCursor')}
                     state['frame_time'] = asyncio.get_running_loop().time()
                 except BrowserError:
                     pass
@@ -376,6 +446,7 @@ async def screen_stream(request: Request):
 
 
 async def visual_frame(tab, full_page=False, image=None, timeout=8000):
+    await tab.evaluate(CURSOR_SCRIPT)
     # Парольные поля не передаются модели даже на снимке страницы входа.
     masks = [tab.locator('input[type="password"], input[autocomplete="one-time-code"], '
                          'input[autocomplete="current-password"], input[autocomplete="new-password"]')]
@@ -395,7 +466,8 @@ async def visual_frame(tab, full_page=False, image=None, timeout=8000):
         content = await tab.screenshot(type='jpeg', quality=85, full_page=full_page,
                                        mask=masks, timeout=timeout)
     return {'image': base64.b64encode(content).decode(), 'mime': 'image/jpeg',
-            'url': safe_url(tab.url), 'full_page': full_page, 'viewport': {'width': 1100, 'height': 750}}
+            'url': safe_url(tab.url), 'full_page': full_page, 'viewport': {'width': 1100, 'height': 750},
+            'cursor': await tab.evaluate('window.__uchebaCursor') if image is None else None}
 
 
 async def action_frame(tab, full_page=False, image=None):
@@ -410,7 +482,7 @@ async def action_frame(tab, full_page=False, image=None):
 
 
 class VisualAction(BaseModel):
-    action: Literal['screenshot', 'click', 'type', 'press', 'scroll', 'open', 'back', 'forward', 'image']
+    action: Literal['screenshot', 'move', 'click', 'type', 'press', 'scroll', 'open', 'back', 'forward', 'image']
     full_page: bool = False
     x: int = Field(default=0, ge=0, lt=1100)
     y: int = Field(default=0, ge=0, lt=750)
@@ -418,7 +490,7 @@ class VisualAction(BaseModel):
     text: SecretStr = SecretStr('')
     url: str = Field(default='', max_length=2000)
     index: int = Field(default=0, ge=0, lt=100)
-    target: Literal['coordinates', 'role', 'text', 'selector', 'css', 'xpath', 'element'] = 'coordinates'
+    target: Literal['coordinates', 'cursor', 'role', 'text', 'selector', 'css', 'xpath', 'element'] = 'coordinates'
     element: str = Field(default='', max_length=16)
     role: str = Field(default='button', max_length=40)
     name: str = Field(default='', max_length=500)
@@ -481,16 +553,26 @@ async def run_visual_action(body):
         tab = state['tab'] if state else None
         if tab is None or tab.is_closed():
             raise HTTPException(400, 'Сначала откройте страницу через web_read или browser_login')
+        await tab.evaluate(CURSOR_SCRIPT)
         before_url = safe_url(tab.url)
         before = await schedule_snapshot(tab) if body.action in ('click', 'type', 'press', 'scroll') else None
         clicked = None
-        if body.action == 'click':
-            if body.target == 'coordinates':
+        if body.action == 'move':
+            await tab.mouse.move(body.x, body.y)
+            await tab.evaluate(CURSOR_SCRIPT)
+            await tab.evaluate('''async point => {
+                window.__uchebaMoveCursor(point);
+                await window.__uchebaCursorPosition(point);
+            }''', {'x': body.x, 'y': body.y})
+        elif body.action == 'click':
+            if body.target in ('coordinates', 'cursor'):
+                point = await tab.evaluate('window.__uchebaCursor') if body.target == 'cursor' else {'x': body.x, 'y': body.y}
+                x, y = point['x'], point['y']
                 clicked = await tab.evaluate('''({x, y}) => {
                     const el = document.elementFromPoint(x, y)?.closest('button,a,input,[role="button"],[role="link"]');
                     return el ? (el.getAttribute('aria-label') || el.innerText || el.getAttribute('title') || el.tagName).slice(0, 250) : 'Элемент без подписи';
-                }''', {'x': body.x, 'y': body.y})
-                await tab.mouse.click(body.x, body.y)
+                }''', {'x': x, 'y': y})
+                await tab.mouse.click(x, y)
             else:
                 if body.target == 'role':
                     role = {'a': 'link', 'textarea': 'textbox', 'select': 'combobox'}.get(body.role, body.role)
@@ -588,7 +670,7 @@ async def run_visual_action(body):
                         frame = original
                 except HTTPException:
                     pass  # Если оригинал не отдаётся, рассматриваем отрисованное изображение.
-        if frame is None and body.action in ('screenshot', 'image'):
+        if frame is None and body.action in ('screenshot', 'image', 'move'):
             frame = await action_frame(tab, body.full_page, image)
         snapshot = await schedule_snapshot(tab)
         text = snapshot['text']
@@ -598,7 +680,8 @@ async def run_visual_action(body):
         current_url = safe_url(tab.url)
         result = {'status': 'success', 'action': body.action, 'url': current_url,
                   'navigation': {'from': before_url, 'to': current_url} if before_url != current_url else None,
-                  'clicked': clicked, 'downloads': download_status()}
+                  'clicked': clicked, 'downloads': download_status(),
+                  'cursor': await tab.evaluate('window.__uchebaCursor')}
         changed = before is None or before_url != current_url or before['title'] != snapshot['title'] or before['text'] != snapshot['text']
         if changed or body.action in ('open', 'back', 'forward', 'screenshot', 'image'):
             result.update({'title': snapshot['title'], 'text': text, 'headings': snapshot['headings'],

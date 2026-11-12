@@ -1,6 +1,6 @@
 """Одинаковые инструменты и вызовы браузера для Monocle и Straus."""
 VISUAL_ACTIONS = {
-    'browser_screenshot': 'screenshot', 'browser_click': 'click',
+    'browser_screenshot': 'screenshot', 'browser_move': 'move', 'browser_click': 'click',
     'browser_type': 'type', 'browser_press': 'press', 'browser_scroll': 'scroll',
     'browser_navigate': 'open', 'browser_view_image': 'image',
 }
@@ -16,8 +16,11 @@ BROWSER_TOOLS = [
     visual_tool('browser_wait_for_user', 'Попросить владельца пройти CAPTCHA/2FA и передать ему браузер. message — понятная просьба: что мешает, что сделать и нажать «Готово — продолжить работу агента». После возврата получишь актуальную страницу и elements. Не обходи проверку сам.', {'message': {'type': 'string', 'minLength': 1, 'maxLength': 500}}),
     visual_tool('browser_screenshot', 'Получить снимок текущего браузера, только если текстового представления недостаточно. full_page=true показывает всю страницу, false — видимую область 1100×750.',
                 {'full_page': {'type': 'boolean'}}),
-    visual_tool('browser_click', 'Нажать элемент. Сначала используй актуальный id из elements как target=element и name=id, затем role + точное name. CSS/XPath — только если ID и роль не подходят; координаты — крайний вариант. Для неиспользуемых строк передай пустую строку, x/y=0.',
-                {'target': {'type': 'string', 'enum': ['element', 'role', 'text', 'css', 'xpath', 'selector', 'coordinates']},
+    visual_tool('browser_move', 'Переместить курсор без клика в видимой области 1100×750. Возвращает снимок с курсором и cursor.x/y; проверь положение и hover-эффект, затем отдельно вызови browser_click с target=cursor. Не используй координаты полностраничного снимка.',
+                {'x': {'type': 'integer', 'minimum': 0, 'maximum': 1099},
+                 'y': {'type': 'integer', 'minimum': 0, 'maximum': 749}}),
+    visual_tool('browser_click', 'Нажать элемент. Сначала используй актуальный id из elements как target=element и name=id, затем role + точное name. CSS/XPath — только если ID и роль не подходят; координаты — крайний вариант. После browser_move можно нажать в текущей позиции через target=cursor; x/y тогда игнорируются. Для неиспользуемых строк передай пустую строку, x/y=0.',
+                {'target': {'type': 'string', 'enum': ['element', 'role', 'text', 'css', 'xpath', 'selector', 'coordinates', 'cursor']},
                  'role': {'type': 'string', 'maxLength': 40}, 'name': {'type': 'string', 'maxLength': 500},
                  'selector': {'type': 'string', 'maxLength': 1000},
                  'x': {'type': 'integer', 'minimum': 0, 'maximum': 1099}, 'y': {'type': 'integer', 'minimum': 0, 'maximum': 749}}),
@@ -96,6 +99,8 @@ async def run_browser_tool(name, args, request, progress, known_elements):
             label = known_elements.get(args.get('name'), 'элемент #' + str(args.get('name')))
         elif mode in ('css', 'xpath', 'selector'):
             label = args.get('selector', '')
+        elif mode == 'cursor':
+            label = 'текущая позиция курсора'
         elif mode == 'coordinates':
             label = f"({args.get('x')}, {args.get('y')})"
         else:
@@ -103,7 +108,7 @@ async def run_browser_tool(name, args, request, progress, known_elements):
         role = ' ' + args.get('role', '') if mode == 'role' else ''
         progress.add(f'Нажимает ({mode}{role}): {label[:500]}')
     else:
-        labels = {'screenshot': 'Смотрит снимок браузера', 'type': 'Вводит текст', 'press': 'Нажимает клавишу',
+        labels = {'move': f"Перемещает курсор в ({args.get('x')}, {args.get('y')})", 'screenshot': 'Смотрит снимок браузера', 'type': 'Вводит текст', 'press': 'Нажимает клавишу',
                   'scroll': 'Прокручивает страницу', 'open': 'Открывает страницу', 'back': 'Возвращается назад',
                   'forward': 'Переходит вперёд', 'image': 'Рассматривает изображение'}
         progress.add(labels[action])

@@ -21,7 +21,7 @@ export default function AppNavigation({ user, path, onLogout, leaving, collapsed
     { href: '/profile', label: 'Профиль', icon: 'profile' }];
   const extra = <>
     <a href="/inbox" onClick={() => setMore(false)}>Входящие</a>
-    <Button variant="subtle" color="gray" loading={leaving} onClick={onLogout}>Выйти из аккаунта</Button>
+    <Button variant="subtle" color="gray" loading={leaving} onClick={onLogout} aria-label="Выйти из аккаунта">Выйти</Button>
   </>;
   return <>
     <aside className={`app-navigation ${collapsed ? 'is-collapsed' : ''}`}>

@@ -84,7 +84,7 @@ export default function AgentTimeline({ tasks = [], finished = false, schedule, 
         <strong>{label}</strong><small>{duration(block.minutes)}</small>
       </a>;
     })}{!agenda.length && <Text size="xs" c="dimmed">{calendarOnly ? 'В календаре пока пусто' : 'План появится по мере расчёта'}</Text>}</div> : <div style={{ overflowX: 'auto', padding: '5px 0' }}>
-      <div ref={chart} style={{ position: 'relative', minWidth: 760, height: (expanded ? visibleDays : 3) * 66 + 18 }}>
+      <div ref={chart} style={{ position: 'relative', minWidth: 760, height: visibleDays * 66 + 18 }}>
         {Array.from({ length: visibleDays }, (_, day) => <div key={day} style={{ position: 'absolute', top: day * 66, width: '100%' }}>
           <Text size="xs" c="dimmed">{dayLabel(day)}</Text>
           <div style={{ position: 'absolute', top: 24, width: '100%', height: 34, borderRadius: 0, background: 'var(--mantine-color-dark-7)' }} />

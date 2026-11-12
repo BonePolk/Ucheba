@@ -23,7 +23,7 @@ export default function Cabinets() {
   return <Paper withBorder p="md" radius="md"><Stack gap="sm">
     <Group justify="space-between"><Title order={4}>Сохранённые входы</Title><Button size="xs" onClick={() => { setForm(empty); setEditing({}); }}>Добавить вход</Button></Group>
     <TextInput placeholder="Найти кабинет, группу или адрес" value={search} onChange={(event) => setSearch(event.currentTarget.value)} />
-    <SimpleGrid cols={{ base: 1, sm: 2 }}>
+    <SimpleGrid cols={{ base: 1, sm: 2 }} style={{ alignItems: 'start' }}>
       {visible.map((site) => <Paper key={site.id} withBorder p="sm" radius="md" style={{ borderTop: `3px solid ${site.color}` }}><Stack gap={6}>
         <Group justify="space-between"><Text fw={600} size="sm">{site.name}</Text>{site.group && <Badge size="xs" variant="light">{site.group}</Badge>}</Group>
         <Text size="xs" c="dimmed" lineClamp={1}>{site.url}</Text>

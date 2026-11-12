@@ -25,6 +25,7 @@ const queryClient = new QueryClient();
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     <MantineProvider forceColorScheme="dark" theme={{ primaryColor: 'purple', primaryShade: 6, defaultRadius: 0,
+      spacing: { xs: '0.375rem', sm: '0.625rem', md: '0.75rem', lg: '1rem', xl: '1.25rem' },
       radius: { xs: '0', sm: '0', md: '0', lg: '0', xl: '0' },
       shadows: { xs: 'none', sm: 'none', md: 'none', lg: 'none', xl: 'none' },
       components: {
