@@ -1,5 +1,6 @@
 import AgentExplanation from './AgentExplanation';
 import AgentQuestion from './AgentQuestion';
+import MonocleBrowser from './LuchebaBrowser';
 import { useEffect, useRef, useState } from 'react';
 import { useMediaQuery } from '@mantine/hooks';
 import { Alert, Badge, Button, Collapse, Group, Loader, Paper, Stack, Text } from '@mantine/core';
@@ -13,7 +14,8 @@ export default function AgentProgress({ taskId = 0, providers, active = false, c
   const compact = useMediaQuery('(max-width: 767px)', window.innerWidth < 768);
   const providerList = providers.join(',');
   const openKey = ['agent-progress-open', taskId, providerList];
-  const [opened, setOpened] = useState(() => client.getQueryData(openKey) ?? !compact);
+  const [opened, setOpened] = useState(() => new URLSearchParams(window.location.search).get('browser') === '1'
+    || (client.getQueryData(openKey) ?? !compact));
   const viewport = useRef(null);
   const logContent = useRef(null);
   const followLog = useRef(true);
@@ -82,6 +84,10 @@ export default function AgentProgress({ taskId = 0, providers, active = false, c
     Number(b.run.status === 'running') - Number(a.run.status === 'running') ||
     (b.run.started_at ?? '').localeCompare(a.run.started_at ?? ''))[0];
   const run = current?.run;
+  const agentName = (run?.agent === 'Lucheba' ? 'Monocle' : run?.agent) ??
+    (providers.length === 1 ? names[providers[0]] : providers.map((provider) => names[provider] ?? provider).join(' · '));
+  const statusLabel = run?.pending_question ? 'Ждёт ответа' : run ? statuses[run.status] : queued ? 'В очереди' : active ? 'Запускается' : 'Нет активной работы';
+  const statusColor = run?.status === 'failed' ? 'red' : run?.status === 'blocked' || run?.pending_question ? 'yellow' : running ? 'purple' : 'gray';
   const lastActivity = run?.last_activity_at ?? run?.events?.at(-1)?.at ?? run?.started_at;
   // Длительность считаем по серверным часам; часы пользователя могут отличаться.
   const serverTime = Date.parse(current?.server_time);
@@ -89,6 +95,10 @@ export default function AgentProgress({ taskId = 0, providers, active = false, c
   const quietMinutes = lastActivity && Number.isFinite(serverTime)
     ? Math.max(0, Math.floor((serverTime + elapsed - Date.parse(lastActivity)) / 60000)) : 0;
   const allEvents = current?.run.events ?? [];
+  const browserUsed = current?.available && run?.status === 'running'
+    && ['Monocle', 'Lucheba', 'Straus'].includes(run.agent)
+    && allEvents.some((event) => event.kind !== 'note'
+      && /^(Входит через сохранённый вход|Читает (текущую )?страницу|Переходит по выбранной ссылке|Скачивает документ из браузера|Ищет в Google|Смотрит снимок браузера|Нажимает|Вводит текст|Прокручивает страницу|Открывает страницу|Возвращается назад|Переходит вперёд|Рассматривает изображение|Ждёт, пока владелец завершит CAPTCHA)/.test(event.message));
   const events = allEvents.map((event) => ({
     ...event, provider: current.provider, key: `${current.run.id}:${event.id}`,
   }));
@@ -103,11 +113,14 @@ export default function AgentProgress({ taskId = 0, providers, active = false, c
     ]);
   });
   if (!providers.length) return null;
-  return <Paper withBorder p="sm" radius="md">
-    {queued && <Text size="xs" c="dimmed">Следующий запрос ожидает в очереди</Text>}
-    <Button variant="subtle" size="xs" leftSection={running && !run?.pending_question ? <Loader size="xs" /> : null} onClick={toggle}>
-      Работа агента
-    </Button>
+  return <Paper withBorder p="sm" radius="md" className="agent-progress">
+    <Group justify="space-between" align="center" wrap="wrap">
+      <Group gap="xs"><Text size="sm" fw={600}>{agentName}</Text><Badge color={statusColor} variant="light">{statusLabel}</Badge></Group>
+      <Button variant="subtle" size="xs" className="agent-log-toggle" leftSection={<Loader size="xs" style={{ visibility: running && !run?.pending_question ? 'visible' : 'hidden' }} />} onClick={toggle}>
+        {opened ? 'Скрыть журнал' : 'Показать журнал'}
+      </Button>
+    </Group>
+    <div className="agent-activity">
     {run?.status === 'running' && <Group gap="xs" align="start" role="status" aria-live="polite">
       {run.pending_question ? <Text size="sm" fw={500}>Ждёт вашего ответа</Text> : run.model_waiting ? <Text component="span" className="agent-thinking">Думает</Text> : <>
         <Loader size={12} mt={3} />
@@ -116,21 +129,22 @@ export default function AgentProgress({ taskId = 0, providers, active = false, c
         </Stack>
       </>}
     </Group>}
+    {run?.agent_comment && <Text size="xs" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>Пояснение агента: <AgentExplanation text={run.agent_comment} initialText={seenExplanations.current.get(`${run.id}:comment`) ?? (receivedLog.current ? '' : run.agent_comment)} /></Text>}
+    </div>
     {run?.status === 'failed' && <Alert color="red">{run.error || 'Агент завершился с ошибкой. Повторите поручение.'}</Alert>}
     {run?.pending_question && <AgentQuestion key={run.pending_question.id} question={run.pending_question} agent={run.agent} />}
-    {run?.agent_comment && <Text size="xs" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>Пояснение агента: <AgentExplanation text={run.agent_comment} initialText={seenExplanations.current.get(`${run.id}:comment`) ?? (receivedLog.current ? '' : run.agent_comment)} /></Text>}
 
-    {typeof children === 'function' ? children(query.data ?? [], current) : children}
     <Collapse in={opened}><Stack gap="xs" mt="xs">
-      <Group gap="xs">{(current ? [current] : []).map(({ provider, run }) => <Badge key={provider} color={run.status === 'failed' ? 'red' : run.status === 'blocked' ? 'yellow' : run.status === 'running' ? 'purple' : 'gray'} variant="light">{(run.agent === 'Lucheba' ? 'Monocle' : run.agent) ?? names[provider]} · {run.pending_question ? 'Ждёт ответа' : statuses[run.status]}</Badge>)}</Group>
+      {typeof children === 'function' ? children(query.data ?? [], current) : children}
+      {opened && browserUsed && <MonocleBrowser key={run.id} active />}
       <Text size="xs" c="dimmed">{run?.token_usage ? `Подтверждённые токены: вход ${run.token_usage.input_tokens ?? 'нет данных'} · выход ${run.token_usage.output_tokens ?? 'нет данных'}` : 'Токены: нет данных'}{run?.model_waiting && !run.current_usage_known && run.token_usage ? ' · текущий запрос: нет данных' : ''}</Text>
       {current?.available && !streamError && run?.status === 'running' && !run.pending_question && quietMinutes >= 2 && <Text size="xs" c="yellow">Агент не передавал новых данных {quietMinutes} мин.</Text>}
-      {events.length === 0 && <Text size="xs" c="dimmed">{running ? 'Ожидаем события агента…' : 'Журналов пока нет'}</Text>}
       <div ref={viewport} onScroll={(event) => {
         const element = event.currentTarget;
         followLog.current = element.scrollHeight - element.scrollTop - element.clientHeight < 32;
-      }} role="log" aria-live="polite" style={{ maxHeight: 280, overflowY: 'auto' }}>
+      }} role="log" aria-live="polite" className="agent-log">
         <div ref={logContent}>
+        {events.length === 0 && <Text size="xs" c="dimmed">{running ? 'Ожидаем события агента…' : 'Журналов пока нет'}</Text>}
         {events.map((event, index) => {
           const initialText = seenExplanations.current.get(event.key) ?? (receivedLog.current ? '' : event.message);
           return <div key={event.key} style={{ padding: '4px 0', overflowWrap: 'anywhere' }}>

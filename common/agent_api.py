@@ -40,9 +40,10 @@ def agent_routes(app, label):
 
 
 async def stream_model_response(client, progress, **arguments):
-    """Первые данные и паузы потока — до 3 минут. Один повтор при сбое."""
+    """Первые данные и паузы потока — до 3 минут; временные сбои повторяются до ответа."""
     retryable = (APIConnectionError, httpx.TransportError, TimeoutError)
-    for attempt in range(2):
+    attempt = 0
+    while True:
         received_data = False
         try:
             # Счётчик включает открытие соединения. Служебные created/in_progress
@@ -63,18 +64,15 @@ async def stream_model_response(client, progress, **arguments):
             progress.finish_response(response)
             return response
         except (APIConnectionError, APIStatusError, httpx.TransportError, TimeoutError) as exc:
-            transient = isinstance(exc, retryable) or getattr(exc, 'status_code', None) in (502, 503, 504)
+            transient = isinstance(exc, retryable) or getattr(exc, 'status_code', None) in (408, 429, 500, 502, 503, 504)
             if not transient:
                 raise
+            attempt += 1
             timeout_reason = ('Модель не передавала новые данные 3 минуты' if received_data
                               else 'Модель не начала ответ за 3 минуты')
-            if attempt:
-                detail = (timeout_reason + ' после повторной попытки. Поручение не завершено.'
-                          if isinstance(exc, TimeoutError) else 'Соединение с моделью не восстановилось после повторной попытки. Поручение не завершено.')
-                raise HTTPException(502, detail) from None
             logging.getLogger('uvicorn.error').warning('model stream retry: %s', type(exc).__name__)
             progress.update(model_waiting=False)
-            progress.add(timeout_reason + '; повторяет текущий запрос'
-                         if isinstance(exc, TimeoutError) else 'Соединение с моделью оборвалось; повторяет текущий запрос')
-            await asyncio.sleep(0.5)
+            progress.add((timeout_reason if isinstance(exc, TimeoutError) else 'Соединение с моделью оборвалось')
+                         + f'; повторяет запрос (попытка {attempt + 1})')
+            await asyncio.sleep(min(30, 0.5 * 2 ** min(attempt - 1, 6)))
             progress.begin_response()

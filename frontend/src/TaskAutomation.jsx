@@ -8,7 +8,6 @@ import ContextBrowser from './ContextBrowser';
 import AgentProgress from './AgentProgress';
 import RankingAssessment from './RankingAssessment';
 import TaskMarkdown from './TaskMarkdown';
-import MonocleBrowser from './LuchebaBrowser';
 
 function RunFiles({ run }) {
   const files = useQuery({ queryKey: ['integrations', 'files', run.id], queryFn: () => request(`/integrations/codex/runs/${run.id}/files`), enabled: run.status === 'succeeded' });
@@ -43,7 +42,6 @@ function ContextForm({ taskId, context }) {
       <Button size="xs" loading={save.isPending} disabled={analyze.isPending || !(answer ?? context.data?.owner_notes ?? '').trim()} onClick={() => save.mutate()}>Передать Monocle</Button>
       <Button size="xs" variant="subtle" loading={analyze.isPending} disabled={save.isPending} onClick={() => analyze.mutate()}>Обновить контекст</Button>
     </Group>
-    <MonocleBrowser active={analyze.isPending || save.isPending} />
     <details><summary style={{ cursor: 'pointer', fontSize: 13 }}>Файлы и управление браузером</summary><Stack gap="xs" mt="xs">
       <ContextFiles taskId={taskId} disabled={analyze.isPending || save.isPending} />
       <ContextBrowser taskId={taskId} disabled={analyze.isPending || save.isPending} />
@@ -82,7 +80,7 @@ export default function TaskAutomation({ task, features = {} }) {
     },
   });
   return <Stack>
-    <Group justify="space-between"><Title order={2}>{task.title}</Title><Button component="a" href={`/calendar?add_task=${task.id}`} variant="light" size="xs">В календарь</Button></Group>
+    <Group className="page-heading" justify="space-between"><Title order={2}>{task.title}</Title><Button component="a" href={`/calendar?add_task=${task.id}`} variant="light" size="xs">В календарь</Button></Group>
     {task.description && <Text style={{ whiteSpace: 'pre-wrap' }}>{task.description}</Text>}
     {task.category && <Badge variant="light">{task.category}</Badge>}
     {features.context !== false && (context.data?.full_markdown || context.data?.summary) && <Paper withBorder p="md"><Stack>

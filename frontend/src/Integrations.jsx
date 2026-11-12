@@ -14,7 +14,7 @@ function ConnectionInfo({ value }) {
 
 export default function Integrations({ features = {} }) {
   const query = useQuery({ queryKey: ['integrations'], queryFn: () => request('/integrations'), refetchInterval: 15000, retry: false });
-  if (query.isPending) return <Loader />;
+  if (query.isPending) return <div className="page-loading"><Loader /></div>;
   if (query.error && !query.data) return <Alert color="red">{query.error.message}</Alert>;
   return <>
     {query.error && <Alert color="red">{query.error.message}</Alert>}
@@ -72,7 +72,7 @@ function IntegrationForms({ data, features }) {
       {features.straus !== false && data.straus && <AgentSettings name="straus" title="Straus" data={data.straus} />}
 
       {features.telegram !== false && <Paper withBorder p="md"><Stack gap="sm">
-        <Group justify="space-between"><Title order={3}>Telegram</Title><Badge color={data.telegram_connected ? 'green' : 'gray'}>{data.telegram_connected ? 'Подключён' : 'Не подключён'}</Badge></Group>
+        <Group justify="space-between"><Title order={4}>Telegram</Title><Badge color={data.telegram_connected ? 'green' : 'gray'}>{data.telegram_connected ? 'Подключён' : 'Не подключён'}</Badge></Group>
         <PasswordInput label="API ID" placeholder={data.telegram.configured.api_id ? 'Сохранён' : ''} value={telegram.api_id} onChange={field(setTelegram, 'api_id')} />
         <PasswordInput label="API Hash" placeholder={data.telegram.configured.api_hash ? 'Сохранён' : ''} value={telegram.api_hash} onChange={field(setTelegram, 'api_hash')} />
         <PasswordInput label="Телефон" placeholder={data.telegram.configured.phone ? 'Сохранён' : '+7…'} value={telegram.phone} onChange={field(setTelegram, 'phone')} />
@@ -86,7 +86,7 @@ function IntegrationForms({ data, features }) {
         <ConnectionInfo value={data.telegram} />
       </Stack></Paper>}
       {features.codex !== false && <Paper withBorder p="md"><Stack gap="sm">
-        <Group justify="space-between"><Title order={3}>Codex</Title><Badge color={codexState.data?.authorized ? 'green' : 'gray'}>{codexState.data?.authorized ? 'Вход выполнен' : 'Нет авторизации'}</Badge></Group>
+        <Group justify="space-between"><Title order={4}>Codex</Title><Badge color={codexState.data?.authorized ? 'green' : 'gray'}>{codexState.data?.authorized ? 'Вход выполнен' : 'Нет авторизации'}</Badge></Group>
         <Text size="sm">Официальный Python SDK openai-codex с входом ChatGPT по device code. Включите device code login в настройках безопасности ChatGPT. Доступ зависит от подписки и лимитов аккаунта.</Text>
         {codexState.data && !codexState.data.sandbox_available && <Alert color="yellow">Linux sandbox недоступен в этом окружении. Выполнение заблокировано; режим без защиты не используется.</Alert>}
         <Group><Button disabled={mutation.isPending} onClick={() => { setCodexOpened(true); run('codex/connect'); }}>Подключить через ChatGPT</Button><Button variant="default" disabled={mutation.isPending} onClick={() => { setCodexOpened(true); run('codex/check'); }}>Проверить доступность</Button></Group>
@@ -98,8 +98,8 @@ function IntegrationForms({ data, features }) {
         <Group><Button loading={saving('codex')} disabled={mutation.isPending} onClick={() => save('codex', codex)}>Сохранить</Button><Button color="red" variant="subtle" disabled={mutation.isPending} onClick={() => run('codex/disconnect')}>Отключить</Button></Group>
         <ConnectionInfo value={data.codex} />
       </Stack></Paper>}
-      {features.collector !== false && <Paper withBorder p="lg"><BotSettings name="collector" data={data.collector} /></Paper>}
-      {features.notifications !== false && <Paper withBorder p="lg"><BotSettings name="notifications" data={data.notifications} /></Paper>}
+      {features.collector !== false && <Paper withBorder p="md"><BotSettings name="collector" data={data.collector} /></Paper>}
+      {features.notifications !== false && <Paper withBorder p="md"><BotSettings name="notifications" data={data.notifications} /></Paper>}
     </SimpleGrid>
   </Stack>;
 }

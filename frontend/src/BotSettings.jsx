@@ -26,7 +26,7 @@ export default function BotSettings({ name, data }) {
       await client.invalidateQueries({ queryKey: ['tasks'] });
     },
   });
-  return <Stack mt="md" gap="sm">
+  return <Stack gap="sm">
     <Title order={4}>{collector ? 'Бот-сборщик задач · aiogram' : 'Бот уведомлений · aiogram'}</Title>
     <PasswordInput label="Токен BotFather" value={token} placeholder={data.configured.bot_token ? 'Сохранён' : ''} onChange={(event) => setToken(event.currentTarget.value)} />
     <Switch label="Включить бота" checked={enabled} onChange={(event) => setEnabled(event.currentTarget.checked)} />

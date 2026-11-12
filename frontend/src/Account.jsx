@@ -1,5 +1,5 @@
-import { lazy, useState } from 'react';
-import { Alert, Button, Paper, PasswordInput, Stack, Tabs, Title } from '@mantine/core';
+import { lazy, Suspense, useState } from 'react';
+import { Alert, Button, Loader, Paper, PasswordInput, Stack, Tabs, Title } from '@mantine/core';
 import { useMutation } from '@tanstack/react-query';
 import Integrations from './Integrations';
 import Cabinets from './Cabinets';
@@ -17,7 +17,7 @@ export default function Account({ user, initialTab = 'settings' }) {
     onSuccess: () => setPasswords({ current_password: '', new_password: '' }),
   });
   return <Stack>
-    <Title order={2}>Профиль · {user.username}</Title>
+    <Title className="page-heading" order={2}>Профиль · {user.username}</Title>
     <Tabs defaultValue={initialTab} keepMounted={false}>
     <Tabs.List><Tabs.Tab value="settings">Обо мне</Tabs.Tab><Tabs.Tab value="agents">Агенты</Tabs.Tab>{(user.features?.context !== false || user.features?.straus !== false) && <Tabs.Tab value="access">Входы</Tabs.Tab>}<Tabs.Tab value="history">История агентов</Tabs.Tab>{user.is_admin && <Tabs.Tab value="admin">Админка</Tabs.Tab>}</Tabs.List>
     <Tabs.Panel value="settings" pt="md"><Stack>
@@ -37,7 +37,7 @@ export default function Account({ user, initialTab = 'settings' }) {
     <Integrations features={user.features} />
     </Stack></Tabs.Panel>
     <Tabs.Panel value="history" pt="md"><AgentHistory /></Tabs.Panel>
-    {user.is_admin && <Tabs.Panel value="admin" pt="md"><Admin /></Tabs.Panel>}
+    {user.is_admin && <Tabs.Panel value="admin" pt="md"><Suspense fallback={<div className="page-loading"><Loader /></div>}><Admin /></Suspense></Tabs.Panel>}
     </Tabs>
   </Stack>;
 }

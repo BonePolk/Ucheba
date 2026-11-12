@@ -3,7 +3,6 @@ import { Alert, Badge, Button, ColorInput, Group, Modal, Paper, PasswordInput, S
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { request } from './api';
 import ContextBrowser from './ContextBrowser';
-import MonocleBrowser from './LuchebaBrowser';
 
 const empty = { name: '', url: '', username: '', password: '', description: '', group: '', color: '#7f49b4' };
 
@@ -47,7 +46,7 @@ export default function Cabinets() {
       </Stack>
     </Modal>
     <Modal opened={Boolean(viewing)} onClose={() => setViewing(null)} title={viewing?.name} size="xl">
-      {viewing && <Stack><ContextBrowser key={viewing.id} initialSiteId={viewing.id} disabled={queue.data?.busy} /><MonocleBrowser active /></Stack>}
+      {viewing && <Stack><ContextBrowser key={viewing.id} initialSiteId={viewing.id} disabled={queue.data?.busy} /></Stack>}
       {queue.data?.busy && <Text size="xs" c="dimmed">Агенты используют браузер; ручное управление доступно после их завершения.</Text>}
     </Modal>
   </Stack></Paper>;

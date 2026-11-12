@@ -6,7 +6,6 @@ import { useMediaQuery } from '@mantine/hooks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { agentRequest, request } from './api';
 import AgentProgress from './AgentProgress';
-import MonocleBrowser from './LuchebaBrowser';
 
 const names = { task: 'Задача', busy: 'Занятость', sleep: 'Сон', meal: 'Еда', break: 'Отдых', work: 'Рабочее время', personal: 'Личное время' };
 const units = [{ value: 'none', label: 'Не повторять' }, { value: 'day', label: 'Дни' }, { value: 'week', label: 'Недели' }, { value: 'month', label: 'Месяцы' }];
@@ -119,11 +118,12 @@ export default function Calendar({ features = {} }) {
     </Tooltip>;
   }
 
-  return <Paper withBorder p="md" radius="md"><Stack gap="sm">
-    <Group justify="space-between">
-      <Group gap="xs"><Title order={3}>Календарь</Title></Group>
-      <Group gap="xs"><Button size="xs" variant="default" disabled={!config} onClick={() => create(date)}>Добавить событие</Button><Button size="xs" variant="light" onClick={() => setDate(calendar.data?.today ?? dateKey(new Date()))}>Сегодня</Button><Button size="xs" variant="subtle" aria-label="Назад" onClick={() => shift(-1)}>‹</Button><Button size="xs" variant="subtle" aria-label="Вперёд" onClick={() => shift(1)}>›</Button><Select size="xs" w={110} value={view} onChange={setView} allowDeselect={false} data={[{ value: 'week', label: 'Неделя' }, { value: 'month', label: 'Месяц' }]} /></Group>
+  return <Stack gap="md">
+    <Group className="page-heading" justify="space-between">
+      <Group gap="xs"><Title order={2}>Календарь</Title></Group>
+      <Group gap="xs"><Button variant="default" disabled={!config} onClick={() => create(date)}>Добавить событие</Button><Button size="xs" variant="light" onClick={() => setDate(calendar.data?.today ?? dateKey(new Date()))}>Сегодня</Button><Button size="xs" variant="subtle" aria-label="Назад" onClick={() => shift(-1)}>‹</Button><Button size="xs" variant="subtle" aria-label="Вперёд" onClick={() => shift(1)}>›</Button><Select size="xs" w={110} value={view} onChange={setView} allowDeselect={false} data={[{ value: 'week', label: 'Неделя' }, { value: 'month', label: 'Месяц' }]} /></Group>
     </Group>
+    <Paper withBorder p="md" radius="md"><Stack gap="sm">
     <Text fw={500}>{asDate(view === 'month' ? monthStart(date) : start).toLocaleDateString('ru-RU', view === 'month' ? { month: 'long', year: 'numeric' } : { day: 'numeric', month: 'long' })}{view === 'week' && ` — ${asDate(end).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' })}`}</Text>
     {features.ameba !== false && <Group gap="xs"><Switch size="xs" label="Временный план Ameba" checked={showAmeba} onChange={(event) => setShowAmeba(event.currentTarget.checked)} /></Group>}
     {calendar.error && <Alert color="red">{calendar.error.message}</Alert>}
@@ -156,7 +156,7 @@ export default function Calendar({ features = {} }) {
       {editAgent.isSuccess && (editAgent.data?.changed ? <Text size="xs" c="green">Календарь обновлён.</Text> : <Alert color={editAgent.data?.status === 'blocked' ? 'yellow' : 'gray'} title={editAgent.data?.status === 'blocked' ? 'Изменения не внесены' : 'Изменения не нужны'}>{editAgent.data?.reason}</Alert>)}
       {(editAgent.error || (editAgent.isSuccess && editAgent.data?.status === 'blocked')) && <AgentProblemReport agent="Straus" toolName="calendar_edit" />}
       {status.data?.error && !busy && <Alert color="yellow">{status.data.error}</Alert>}
-      <AgentProgress providers={['straus']} active={busy} /><MonocleBrowser active={busy} />
+      <AgentProgress providers={['straus']} active={busy} />
     </>}
     {(save.error || editAgent.error || stop.error) && !editor && <Alert color="red">{(save.error || editAgent.error || stop.error).message}</Alert>}
     <Modal opened={Boolean(editor)} onClose={() => setEditor(null)} title="Событие" centered>
@@ -176,5 +176,5 @@ export default function Calendar({ features = {} }) {
         <Group><Button loading={save.isPending} onClick={saveEvent}>Сохранить</Button>{config?.events.some((event) => event.id === editor.id) && <Button color="red" variant="subtle" disabled={save.isPending} onClick={() => save.mutate({ ...config, events: config.events.filter((event) => event.id !== editor.id) })}>Удалить {editor.repeat_unit !== 'none' ? 'серию' : 'событие'}</Button>}</Group>
       </Stack>}
     </Modal>
-  </Stack></Paper>;
+  </Stack></Paper></Stack>;
 }

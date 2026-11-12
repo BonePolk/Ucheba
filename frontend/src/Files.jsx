@@ -98,6 +98,7 @@ export default function Files() {
     queryKey: ['file-preview', editor?.path, editor?.version, page, sheet, offset],
     queryFn: () => request(`/integrations/context/workspace/preview?${new URLSearchParams({ path: editor.path, page, sheet, offset })}`),
     enabled: Boolean(editor?.url) && mode === 'preview',
+    placeholderData: (previous, query) => query?.queryKey[1] === editor?.path ? previous : undefined,
     retry: false,
   });
   const save = useMutation({
@@ -165,7 +166,7 @@ export default function Files() {
   const columns = [...new Set((data?.table?.rows ?? []).flatMap((row) => Object.keys(row.cells)))];
   const error = tree.error || open.error || save.error || deleteFile.error || createFolder.error || upload.error || archive.error;
   return <Stack gap="md">
-    <Group justify="space-between"><div><Title order={2}>Мои файлы</Title><Text c="dimmed" size="sm">{total.length} файлов · {sizeLabel(total.reduce((sum, file) => sum + (file.size ?? 0), 0))}</Text></div><Button variant="subtle" loading={tree.isFetching} onClick={refresh}>Обновить</Button></Group>
+    <Group className="page-heading" justify="space-between"><div><Title order={2}>Мои файлы</Title><Text c="dimmed" size="sm">{total.length} файлов · {sizeLabel(total.reduce((sum, file) => sum + (file.size ?? 0), 0))}</Text></div><Button variant="subtle" loading={tree.isFetching} onClick={refresh}>Обновить</Button></Group>
     {error && <Alert color="red">{error.message}</Alert>}
     {tree.data?.warning && <Alert color="yellow">{tree.data.warning}</Alert>}
     {notice && <Text size="sm" c="dimmed">{notice}</Text>}
@@ -186,7 +187,7 @@ export default function Files() {
         <Text size="xs" c="dimmed" mt="xs" style={{ overflowWrap: 'anywhere' }}>{editor.path}</Text>
         <Group my="sm" gap="xs">{editor.url && <Button component="a" href={editor.url} download variant="light" size="compact-xs">Скачать</Button>}{editor.url && !editor.path.startsWith('@tasks/') && <Button color="red" variant="light" size="compact-xs" loading={deleteFile.isPending} disabled={busy} onClick={() => { const changes = dirty ? ' Несохранённые изменения будут потеряны.' : ''; if (window.confirm(`Удалить файл «${editor.name}» без возможности восстановления?${changes}`)) deleteFile.mutate(editor); }}>Удалить</Button>}{editor.editable && <SegmentedControl size="xs" value={mode} onChange={setMode} data={[{ value: 'preview', label: 'Просмотр' }, { value: 'edit', label: 'Редактор' }]} />}{dirty && <Badge size="xs" variant="dot">Не сохранено</Badge>}</Group>
         {open.isPending ? <Loader /> : mode === 'edit' && editor.editable ? <Stack gap="sm"><Textarea aria-label="Содержимое файла" minRows={18} autosize maxRows={30} value={editor.content} onChange={(event) => { const content = event.currentTarget.value; setEditor((current) => ({ ...current, content })); }} styles={{ input: { fontFamily: 'monospace', fontSize: 12 } }} /><Button loading={save.isPending} disabled={!dirty || open.isPending} onClick={() => save.mutate(editor)}>Сохранить файл</Button></Stack> : <Stack gap="sm">
-          {preview.isFetching && <Loader size="sm" />}{preview.error && <Alert color="yellow">{preview.error.message}</Alert>}
+          <div className="file-preview-loading" role="status">{preview.isFetching && <Loader size="sm" aria-label="Загрузка предпросмотра" />}</div>{preview.error && <Alert color="yellow">{preview.error.message}</Alert>}
           {data?.notice && <Text size="xs" c="dimmed">{data.notice}</Text>}
           {data?.image && <img className="file-preview-image" src={`data:${data.mime ?? 'image/jpeg'};base64,${data.image}`} alt={editor.name} />}
           {data?.pages > 1 && <Group justify="space-between"><Button size="compact-xs" variant="default" disabled={page <= 1} onClick={() => setPage(page - 1)}>←</Button><Text size="xs">Страница {page} из {data.pages}</Text><Button size="compact-xs" variant="default" disabled={page >= data.pages} onClick={() => setPage(page + 1)}>→</Button></Group>}

@@ -83,8 +83,8 @@ export default function AgentTimeline({ tasks = [], finished = false, schedule, 
         <span>{start ? start.toLocaleString('ru-RU', { timeZone: zone, weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : `+${duration(block.start)}`}</span>
         <strong>{label}</strong><small>{duration(block.minutes)}</small>
       </a>;
-    })}{!agenda.length && <Text size="xs" c="dimmed">{calendarOnly ? 'В календаре пока пусто' : 'План появится по мере расчёта'}</Text>}</div> : blocks.length > 0 || planned.length > 0 || !finished ? <div style={{ overflowX: 'auto', padding: '5px 0' }}>
-      <div ref={chart} style={{ position: 'relative', minWidth: 760, height: visibleDays * 66 + 18 }}>
+    })}{!agenda.length && <Text size="xs" c="dimmed">{calendarOnly ? 'В календаре пока пусто' : 'План появится по мере расчёта'}</Text>}</div> : <div style={{ overflowX: 'auto', padding: '5px 0' }}>
+      <div ref={chart} style={{ position: 'relative', minWidth: 760, height: (expanded ? visibleDays : 3) * 66 + 18 }}>
         {Array.from({ length: visibleDays }, (_, day) => <div key={day} style={{ position: 'absolute', top: day * 66, width: '100%' }}>
           <Text size="xs" c="dimmed">{dayLabel(day)}</Text>
           <div style={{ position: 'absolute', top: 24, width: '100%', height: 34, borderRadius: 0, background: 'var(--mantine-color-dark-7)' }} />
@@ -99,7 +99,7 @@ export default function AgentTimeline({ tasks = [], finished = false, schedule, 
         })}
         <Group justify="space-between" style={{ position: 'absolute', bottom: 0, width: '100%' }}><Text size="xs" c="dimmed">{origin ? '00:00' : 'Начало условного дня'}</Text><Text size="xs" c="dimmed">24 ч</Text></Group>
       </div>
-    </div> : <Text size="xs" c="dimmed">{calendarOnly ? 'В календаре пока нет постоянных событий' : 'Оцениваем задачи…'}</Text>}
+    </div>}
     {(compact ? agenda.length > 6 : days > 3) && <Button size="compact-xs" variant="subtle" onClick={() => setExpanded(!expanded)}>{expanded ? 'Свернуть' : compact ? 'Весь план' : `Все ${days} дней`}</Button>}
     <Group gap={6}><Badge size="xs" variant="light">Работа</Badge><Badge size="xs" color={calendarColors.sleep} variant="light">Сон</Badge><Badge size="xs" color={calendarColors.meal} variant="light">Еда</Badge><Badge size="xs" color={calendarColors.break} variant="light">Отдых</Badge><Badge size="xs" color={calendarColors.busy} variant="light">Календарь</Badge>{!schedule?.start_at && <Text size="xs" c="dimmed">Условные дни, не часы личного расписания</Text>}</Group>
     {schedule && <Group gap={6}>{Object.entries(schedule.potential_rewards ?? {}).map(([unit, value]) => <Badge key={unit} size="xs" variant="light">≈ {value} {unit}</Badge>)}</Group>}

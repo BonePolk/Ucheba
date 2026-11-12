@@ -17,7 +17,7 @@ export default function AgentHistory() {
     <Group justify="space-between"><Title order={4}>История агентов</Title><Button size="xs" variant="subtle" onClick={() => { setBefore(null); history.refetch(); }}>Обновить</Button></Group>
     <Text size="xs" c="dimmed">Straus, Monocle и Ameba используют недавние поручения и результаты из этой истории. Она сохраняется между запусками.</Text>
     {history.error && <Alert color="red">{history.error.message}</Alert>}
-    {!history.isPending && !items.length && <Text c="dimmed">История пока пуста.</Text>}
+    {!items.length && <Text c="dimmed" role="status">{history.isPending ? 'Загрузка истории…' : 'История пока пуста.'}</Text>}
     {items.map((item) => <Paper key={item.id} withBorder p="xs"><details>
       <summary style={{ cursor: 'pointer' }}>
         <Group gap="xs" component="span"><Text component="span" size="sm" fw={600}>{item.agent === 'Lucheba' ? 'Monocle' : item.agent}</Text><Badge size="xs" variant="light">{statuses[item.status] ?? item.status}</Badge><Text component="span" size="xs" c="dimmed">{new Date(item.created_at).toLocaleString()}</Text></Group>

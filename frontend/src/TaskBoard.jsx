@@ -114,7 +114,7 @@ export default function TaskBoard({ features = {} }) {
   return (
     <Container size="xl" py="md" className="task-board">
       <Stack gap="md">
-        <Group justify="space-between" className="task-heading">
+        <Group justify="space-between" className="page-heading task-heading">
           <Group gap="sm">
             <div><Text size="xs" c="dimmed" className="page-eyebrow">МОЙ ДЕНЬ</Text>
             <Title order={2}>Задачи <span className="task-count">{rows.length}</span></Title></div>
@@ -151,7 +151,7 @@ export default function TaskBoard({ features = {} }) {
           <Text size="sm" c="dimmed">{ranking.data?.needs_refresh ? 'Порядок нужно обновить.' : `Сравнено задач: ${ranking.data?.ranked_count ?? 0}.`}{ranking.data?.pending_count > 0 && ` Ожидают контекста Monocle: ${ranking.data.pending_count}.`}{ranking.data?.uncertain_comparisons > 0 && ' При неуверенном сравнении сохранён ручной приоритет и дедлайн.'}</Text>
         </Group>{rank.data?.unchanged && <Text size="xs" c="dimmed">{rank.data.status === 'running' ? 'Ameba уже работает с этими данными.' : 'Данные не изменились — сохранённый порядок остаётся.'}</Text>}{ranking.data?.explanation && <Tooltip multiline w={320} label={ranking.data.explanation} events={{ hover: true, focus: true, touch: true }}><Text component="button" type="button" size="xs" c="dimmed" style={{ cursor: 'help', background: 'none', border: 0, padding: 0, width: 'fit-content' }}>{ranking.data.needs_refresh ? 'О последней сортировке' : 'Почему такой порядок'}</Text></Tooltip>}<div className="planner-progress"><AmebaProgress active={rank.isPending} /></div></Stack></Paper>}
         {error && <Alert color="red">{error.message}</Alert>}
-        {tasks.isPending ? <Loader aria-label="Загрузка задач" /> : (
+        {tasks.isPending ? <div className="page-loading"><Loader aria-label="Загрузка задач" /></div> : (
           compact ? <div className="task-card-grid">{rows.map((task) => <TaskCard key={task.id} task={task} archived={archived}
             completing={completing === task.id} busy={update.isPending} removing={remove.isPending}
             position={features.ameba !== false ? positions.get(task.id) : null} assessment={features.ameba !== false ? rankingReasons.get(task.id) : null}

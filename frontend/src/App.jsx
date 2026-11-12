@@ -50,7 +50,7 @@ function Login() {
 
 function TaskPanel({ id, features }) {
   const task = useQuery({ queryKey: ['tasks', id], queryFn: () => request(`/tasks/${id}`) });
-  if (task.isPending) return <Loader />;
+  if (task.isPending) return <div className="page-loading"><Loader /></div>;
   if (task.error) return <Alert color="red">{task.error.message}</Alert>;
   return <TaskAutomation key={id} task={task.data} features={features} />;
 }
@@ -85,7 +85,7 @@ export default function App() {
     <AppNavigation user={user} path={path} collapsed={menuCollapsed} onToggle={() => setMenuCollapsed(!menuCollapsed)} onLogout={() => logout.mutate()} leaving={logout.isPending} />
     <main className="app-content">
       {logout.error && <Container py="sm"><Alert color="red">{logout.error.message}</Alert></Container>}
-    <PageError key={location}><Suspense fallback={<Container py="xl"><Loader /></Container>}>{board ? <TaskBoard features={user.features} /> : <Container size="xl" w="100%" py="lg">{task ? <TaskPanel id={task} features={user.features} /> : path === '/calendar' ? <Calendar features={user.features} /> : path === '/files' ? user.features.context !== false ? <Files /> : <Alert>Функция отключена</Alert> : path.startsWith('/profile') ? <Account key="profile" user={user} /> : path.startsWith('/admin') ? user.is_admin ? <Account key="profile-admin" user={user} initialTab="admin" /> : <Alert color="red">Требуется доступ администратора</Alert> : path.startsWith('/inbox') ? <Inbox /> : <Alert>Страница не найдена</Alert>}</Container>}</Suspense></PageError>
+    <PageError key={location}><Suspense fallback={<Container size="xl" w="100%" py="md"><div className="page-loading"><Loader /></div></Container>}>{board ? <TaskBoard features={user.features} /> : <Container size="xl" w="100%" py="md">{task ? <TaskPanel id={task} features={user.features} /> : path === '/calendar' ? <Calendar features={user.features} /> : path === '/files' ? user.features.context !== false ? <Files /> : <Alert>Функция отключена</Alert> : path.startsWith('/profile') ? <Account key="profile" user={user} /> : path.startsWith('/admin') ? user.is_admin ? <Account key="profile-admin" user={user} initialTab="admin" /> : <Alert color="red">Требуется доступ администратора</Alert> : path.startsWith('/inbox') ? <Inbox /> : <Alert>Страница не найдена</Alert>}</Container>}</Suspense></PageError>
     </main>
   </div>;
 }

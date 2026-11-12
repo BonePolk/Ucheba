@@ -18,13 +18,13 @@ export default function AmebaProgress({ taskId = 0, active = false }) {
       const schedule = plan ?? ranking.data?.calendar_schedule;
       const calendarOnly = !plan;
       const percent = run?.total ? Math.floor(run.completed / run.total * 100) : 0;
-      if (current && current.provider !== 'ameba') return <AgentTimeline schedule={ranking.data?.calendar_schedule} calendarOnly finished />;
+      if (!current || current.provider !== 'ameba') return null;
       return <Stack gap={8} mt="xs">
-        {(running || queued) && <>
-          <Group gap={6}><Badge size="xs" variant="light">Ameba</Badge><Text size="xs" c="dimmed">{queued ? 'В очереди' : run.stage === 'planning' ? 'Планирует' : 'Сортирует'}</Text></Group>
+        {(running || queued) && <Stack gap={8}>
+          <Group gap={6}><Badge size="xs" variant="light">Ameba</Badge><Text size="xs" c="dimmed">{queued ? 'В очереди' : run?.stage === 'planning' ? 'Планирует' : 'Сортирует'}</Text></Group>
           <Progress size={3} radius="xl" value={!run?.total ? 100 : percent} animated striped aria-label="Прогресс Ameba" />
-        </>}
-        <AgentTimeline tasks={tasks} schedule={schedule} calendarOnly={calendarOnly} finished={!running && !queued} />
+        </Stack>}
+        {(schedule?.blocks?.length > 0 || tasks?.some((task) => task.plan)) && <AgentTimeline tasks={tasks} schedule={schedule} calendarOnly={calendarOnly} finished={!running && !queued} />}
       </Stack>;
     }}
   </AgentProgress>;

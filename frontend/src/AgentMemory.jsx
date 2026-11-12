@@ -25,7 +25,7 @@ export default function AgentMemory() {
     <Group justify="space-between"><Title order={4}>Память агентов</Title><Button size="compact-xs" variant="light" onClick={() => setAdding(!adding)}>Добавить факт</Button></Group>
     {adding && <Stack gap="xs"><Textarea label="Факт обо мне" placeholder="Например: не хочу просыпаться рано, утром мне тяжело сосредоточиться" value={newFact} onChange={(event) => setNewFact(event.currentTarget.value)} autosize minRows={2} maxLength={1500} /><Group gap="xs"><Button size="compact-xs" loading={create.isPending} disabled={!newFact.trim()} onClick={() => create.mutate({ text: newFact.trim() })}>Сохранить факт</Button><Button size="compact-xs" variant="subtle" onClick={() => setAdding(false)}>Отмена</Button></Group></Stack>}
     {(memory.error || save.error || remove.error || create.error) && <Alert color="red">{(memory.error || save.error || remove.error || create.error).message}</Alert>}
-    {!memory.isPending && !memory.data?.length && <Text size="sm" c="dimmed">Сохранённых фактов пока нет.</Text>}
+    {!memory.data?.length && <Text size="sm" c="dimmed" role="status">{memory.isPending ? 'Загрузка памяти…' : 'Сохранённых фактов пока нет.'}</Text>}
     {(memory.data ?? []).map((fact) => <Paper key={fact.key} withBorder p="xs">
       {editing?.key === fact.key ? <Stack gap="xs">
         <Textarea value={editing.text} onChange={(event) => setEditing({ ...editing, text: event.currentTarget.value })} autosize maxLength={1500} />

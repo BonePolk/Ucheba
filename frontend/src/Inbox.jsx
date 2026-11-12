@@ -20,9 +20,9 @@ export default function Inbox() {
     },
   });
   const accept = (item, values) => decision.mutate({ id: item.id, action: 'accept', values, target_task_id: targets[item.id] ? Number(targets[item.id]) : item.target_task_id });
-  if (query.isPending) return <Loader />;
   return <Stack>
-    <Title order={2}>На подтверждение</Title>
+    <Title className="page-heading" order={2}>На подтверждение</Title>
+    {query.isPending && <div className="page-loading"><Loader /></div>}
     {(query.error || decision.error) && <Alert color="red">{(query.error || decision.error).message}</Alert>}
     {query.data?.length === 0 && <Text c="dimmed">Новых предложений нет</Text>}
     {query.data?.map((item) => <Paper key={item.id} withBorder p="lg"><Stack gap="sm">

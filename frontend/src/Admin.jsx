@@ -13,7 +13,7 @@ export default function Admin() {
     mutationFn: ({ name, enabled }) => request(`/admin/features/${name}`, { method: 'PATCH', body: JSON.stringify({ enabled }) }),
     onSuccess: async () => { await client.invalidateQueries({ queryKey: ['admin'] }); await client.invalidateQueries({ queryKey: ['me'] }); },
   });
-  if (state.isPending) return <Loader />;
+  if (state.isPending) return <div className="page-loading"><Loader /></div>;
   if (state.error) return <Alert color="red">{state.error.message}</Alert>;
   return <Stack><Title order={2}>Администрирование</Title>
     <Paper withBorder p="lg"><Text>Пользователей: {state.data.user_count}</Text></Paper>

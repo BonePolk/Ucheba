@@ -10,7 +10,7 @@ export default function useBrowserScreen(enabled) {
     stream.onmessage = (event) => {
       try {
         const next = JSON.parse(event.data);
-        if (next) setFrame(next);
+        setFrame(next);
         setError(false);
       } catch {
         setError(true);

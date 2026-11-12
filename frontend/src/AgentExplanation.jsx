@@ -25,5 +25,8 @@ export default function AgentExplanation({ text = '', animate = true, initialTex
     frame = requestAnimationFrame(reveal);
     return () => cancelAnimationFrame(frame);
   }, [text, animate]);
-  return <span style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{animate ? visible : text}</span>;
+  return <span className="agent-explanation">
+    <span aria-hidden="true" className="agent-explanation-space">{text}</span>
+    <span className="agent-explanation-text">{animate ? visible : text}</span>
+  </span>;
 }
