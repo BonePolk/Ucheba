@@ -190,6 +190,8 @@ def save_browser_download(memory, info, content):
             return json.loads(previous)
         if not content or len(content) > 10 * 1024 * 1024:
             raise HTTPException(413, 'Размер загрузки должен быть от 1 байта до 10 МБ')
+        if optional_read(memory, 'files/Загрузки/') is None:
+            memory.put_bytes('files/Загрузки/', b'', 'application/x-directory')
         saved = {'file_id': file_id, 'name': name, 'size': len(content), 'path': path,
                  'created_at': datetime.now(timezone.utc).isoformat()}
         memory.put_bytes('files/' + path, content, 'application/octet-stream')

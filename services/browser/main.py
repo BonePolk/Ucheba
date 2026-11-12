@@ -34,6 +34,8 @@ schedule_pages = {}
 active_actions = {}
 cancelled_actions = OrderedDict()
 browser_downloads = {}
+agent_runs = {}
+deferred_browser_close = set()
 playwright = None
 
 
@@ -89,9 +91,11 @@ async def browser_error(request, exc):
 
 
 async def open_page(tab, url):
-    # Достаточно начала нового документа; ресурсы продолжают грузиться в фоне.
-    await tab.goto(url, wait_until='commit', timeout=0)
-    return False  # Полная загрузка не ожидалась; вызывающий код покажет notice.
+    try:
+        await tab.goto(url, wait_until='domcontentloaded', timeout=15000)
+        return True
+    except BrowserTimeoutError:
+        return False
 
 
 async def schedule_snapshot(tab):
@@ -213,10 +217,14 @@ def capture_downloads(context):
         token = current_user_id.set(owner)
         try:
             path = await download.path()
-            if path is None or not 0 < Path(path).stat().st_size <= files.LIMIT:
+            if path is None:
                 record.update(status='failed', error='Файл пустой или больше 10 МБ')
                 return
-            info = await asyncio.to_thread(files.save, download.suggested_filename, Path(path).read_bytes())
+            content = await asyncio.to_thread(Path(path).read_bytes)
+            if not 0 < len(content) <= files.LIMIT:
+                record.update(status='failed', error='Файл пустой или больше 10 МБ')
+                return
+            info = await asyncio.to_thread(files.save, download.suggested_filename, content)
             record.update(info, status='saved')
         except asyncio.CancelledError:
             record.update(status='cancelled')
@@ -296,24 +304,32 @@ async def screenshot(tab):
 
 def watch_screen(tab):
     owner = user_id()
-    screens[owner] = {'tab': tab, 'frame': screens.get(owner, {}).get('frame')}
+    state = screens.get(owner)
+    if state:
+        state['tab'] = tab
+    else:
+        state = screens[owner] = {'tab': tab, 'frame': None, 'frame_time': 0, 'capture_lock': asyncio.Lock()}
     screens.move_to_end(owner)
     while len(screens) > 32:
         screens.popitem(last=False)
 
 
 async def capture_screen(state):
+    if state is None:
+        return None
     tab = state['tab']
     if tab is not None and not tab.is_closed():
-        try:
-            image = await tab.screenshot(type='jpeg', quality=65, timeout=1500,
-                                         mask=[tab.locator('input[type="password"]')])
-            state['frame'] = {'image': base64.b64encode(image).decode(), 'mime': 'image/jpeg',
-                              'url': safe_url(tab.url), 'at': datetime.now(timezone.utc).isoformat(),
-                              'width': 1100, 'height': 750}
-        except BrowserError:
-            # Во время перехода временно показываем последний удачный снимок.
-            pass
+        async with state['capture_lock']:
+            if asyncio.get_running_loop().time() - state['frame_time'] >= 0.25:
+                try:
+                    image = await tab.screenshot(type='jpeg', quality=65, timeout=1500,
+                                                 mask=[tab.locator('input[type="password"]')])
+                    state['frame'] = {'image': base64.b64encode(image).decode(), 'mime': 'image/jpeg',
+                                      'url': safe_url(tab.url), 'at': datetime.now(timezone.utc).isoformat(),
+                                      'width': 1100, 'height': 750}
+                    state['frame_time'] = asyncio.get_running_loop().time()
+                except BrowserError:
+                    pass
     return state['frame']
 
 
@@ -547,12 +563,12 @@ async def run_visual_action(body):
         elif body.action == 'scroll':
             await tab.mouse.wheel(0, body.delta)
         elif body.action == 'open' or body.action == 'image' and body.url:
-            await public_url(body.url)
-            await tab.goto(body.url, wait_until='commit')
+            origin(body.url)
+            await tab.goto(body.url, wait_until='domcontentloaded')
         elif body.action == 'back':
-            await tab.go_back(wait_until='commit')
+            await tab.go_back(wait_until='domcontentloaded')
         elif body.action == 'forward':
-            await tab.go_forward(wait_until='commit')
+            await tab.go_forward(wait_until='domcontentloaded')
         tabs = [item for item in tab.context.pages if not item.is_closed()]
         if tabs and tabs[-1] != tab:
             tab = tabs[-1]
@@ -680,6 +696,11 @@ async def browser_handoff(body: dict):
             pass
     elif action == 'resume':
         browser_ready().set()
+        owner = user_id()
+        if owner in deferred_browser_close:
+            async with lock():
+                deferred_browser_close.discard(owner)
+                await close_browser_locked(owner)
     elif action != 'status':
         if browser_ready().is_set():
             raise HTTPException(409, 'Сначала возьмите управление браузером')
@@ -710,6 +731,8 @@ async def tracked_action(request, operation):
     key = (user_id(), run_id)
     if key in cancelled_actions:
         raise HTTPException(409, 'Действие остановлено')
+    async with lock():
+        agent_runs.setdefault(key[0], set()).add(run_id)
     task = asyncio.create_task(operation())
     active_actions[key] = task
     try:
@@ -726,17 +749,13 @@ async def cancel_action(body: dict):
     cancelled_actions[key] = True
     while len(cancelled_actions) > 256:
         cancelled_actions.popitem(last=False)
-    downloads = [entry['task'] for entry in browser_downloads.get(user_id(), []) if entry.get('task')]
-    for download_task in downloads:
-        download_task.cancel()
-    if downloads:
-        await asyncio.gather(*downloads, return_exceptions=True)
     task = active_actions.get(key)
     if task:
         if not task.cancelling():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
-        for context in (contexts.get(user_id()),):
+        other_runs = agent_runs.get(user_id(), set()) - {body['run_id']}
+        for context in (contexts.get(user_id()) if not other_runs else None,):
             if context:
                 for tab in context.pages:
                     if not tab.is_closed():
@@ -746,6 +765,55 @@ async def cancel_action(body: dict):
                         finally:
                             await session.detach()
     return {'ok': True}
+
+
+async def close_browser_locked(owner):
+    if agent_runs.get(owner) or not browser_ready().is_set():
+        return False
+    context = contexts.get(owner)
+    if context is None:
+        return False
+    tasks = [entry['task'] for entry in browser_downloads.get(owner, []) if entry.get('task')]
+    if tasks:
+        try:
+            await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=30)
+        except asyncio.TimeoutError:
+            logging.getLogger('uvicorn.error').warning('browser download did not finish before session cleanup')
+    contexts.pop(owner, None)
+    screens.pop(owner, None)
+    schedule_pages.pop(owner, None)
+    await context.close()
+    return True
+
+
+@app.post('/session/start')
+async def start_agent_session(request: Request):
+    run_id = request.headers.get('x-agent-run')
+    if not run_id:
+        raise HTTPException(400, 'Не указан запуск агента')
+    async with lock():
+        agent_runs.setdefault(user_id(), set()).add(run_id)
+    return {'ok': True}
+
+
+@app.post('/session/end')
+async def end_agent_session(request: Request):
+    run_id = request.headers.get('x-agent-run')
+    if not run_id:
+        raise HTTPException(400, 'Не указан запуск агента')
+    owner = user_id()
+    async with lock():
+        runs = agent_runs.get(owner)
+        if runs:
+            runs.discard(run_id)
+            if not runs:
+                agent_runs.pop(owner, None)
+        if not browser_ready().is_set():
+            deferred_browser_close.add(owner)
+            closed = False
+        else:
+            closed = await close_browser_locked(owner)
+    return {'ok': True, 'closed': closed}
 
 
 @app.post('/schedule/read')
@@ -770,10 +838,12 @@ async def read_schedule_page(body):
                 url = None
                 notice = 'Список ссылок обновлён. Выбери нужную ссылку из этого ответа заново.'
         if url:
-            await public_url(url)
+            origin(url)
             if not await open_page(tab, url):
                 notice = 'Страница ещё загружается. Если данных мало, перечитай её без повторного открытия URL.'
         snapshot = await schedule_snapshot(tab)
+        if not notice and not snapshot['text'].strip():
+            notice = 'Страница открылась без текста. Возможно, приложение ещё загружает данные; перечитай страницу без повторного перехода.'
         if snapshot['needs_login']:
             return {'status': 'needs_login', 'reason': 'Завершите вход через основной ЛК в этом браузере'}
         text = snapshot['text']
@@ -807,9 +877,9 @@ async def delete_site(site_id: str):
 
 
 async def login(tab, site):
-    await public_url(site['url'])
+    origin(site['url'])
     await open_page(tab, site['url'])
-    # Ждём появления формы входа: open_page возвращается при commit, DOM может ещё строиться.
+    # Ждём форму штатным locator ожиданием после DOMContentLoaded.
     try:
         await tab.locator('input[type="password"]:visible, input[name*="login" i]:visible, input[name*="user" i]:visible, input[autocomplete="username"]:visible').first.wait_for(timeout=8000)
     except BrowserTimeoutError:
@@ -852,7 +922,8 @@ async def read_page(tab, site):
     return {'status': 'page', 'url': safe_url(snapshot['url']), 'text': text,
             'headings': snapshot['headings'],
             'title': snapshot['title'], 'ready_state': snapshot['ready_state'],
-            'notice': 'Страница ещё загружается. При нехватке данных перечитай её без перехода.' if snapshot['ready_state'] != 'complete' else '',
+            'notice': 'Страница ещё загружается. При нехватке данных перечитай её без перехода.'
+            if snapshot['ready_state'] != 'complete' or not text.strip() else '',
             'links': [{'index': index, 'text': item['text']} for index, item in enumerate(snapshot['links'])]}
 
 
@@ -924,8 +995,8 @@ async def manual(body: Action):
         watch_screen(tab)
         notice = None
         if body.action == 'open':
-            await public_url(site['url'])
-            await tab.goto(site['url'], wait_until='commit')
+            origin(site['url'])
+            await tab.goto(site['url'], wait_until='domcontentloaded')
         elif body.action == 'login':
             notice = await login(tab, site)
         elif body.action == 'click':
@@ -940,7 +1011,7 @@ async def manual(body: Action):
         elif body.action == 'scroll':
             await tab.mouse.wheel(0, body.delta)
         elif body.action == 'back':
-            await tab.go_back(wait_until='commit')
+            await tab.go_back(wait_until='domcontentloaded')
         elif body.action != 'state':
             raise HTTPException(400, 'Неизвестное действие браузера')
         return await screenshot(tab) | {'notice': notice}
@@ -973,11 +1044,11 @@ async def agent_action(body):
         if body.index >= len(links):
             raise HTTPException(400, 'Ссылка больше не доступна. Перечитайте страницу.')
         url = links[body.index]['href']
-        await public_url(url)
+        origin(url)
         if body.action == 'download' or Path(urlsplit(url).path).suffix.lower() in ('.pdf', '.docx', '.xlsx', '.pptx', '.txt', '.md', '.csv', '.json', '.zip', '.png', '.jpg', '.jpeg', '.webp'):
             return await download_link(tab, site, url)
         try:
-            await tab.goto(url, wait_until='commit')
+            await tab.goto(url, wait_until='domcontentloaded')
         except BrowserError as exc:
             if 'Download is starting' not in str(exc):
                 raise
@@ -1015,11 +1086,11 @@ async def browse_web(body):
         url = body.url
     else:
         raise HTTPException(400, 'Неизвестное действие поиска')
-    await public_url(url)
+    origin(url)
     tab = await public_page()
     watch_screen(tab)
     tab.set_default_timeout(8000)
-    response = await tab.goto(url, wait_until='commit', timeout=25000)
+    response = await tab.goto(url, wait_until='domcontentloaded', timeout=25000)
     if response and response.status >= 400:
         return {'status': 'unavailable', 'reason': f'Сайт вернул HTTP {response.status}'}
     if body.action == 'search':
@@ -1030,7 +1101,9 @@ async def browse_web(body):
     text = snapshot['text']
     if body.action == 'read':
         return {'status': 'page', 'title': snapshot['title'], 'url': safe_url(snapshot['url']),
-                'text': text, 'headings': snapshot['headings'], 'ready_state': snapshot['ready_state']}
+                'text': text, 'headings': snapshot['headings'], 'ready_state': snapshot['ready_state'],
+                'notice': 'Страница ещё загружается. При нехватке данных перечитай её без перехода.'
+                if snapshot['ready_state'] != 'complete' or not text.strip() else ''}
     links = await tab.locator('a:has(h3)').evaluate_all('(items) => items.map(a => ({title: a.innerText.slice(0, 250), url: a.href}))')
     results = []
     for link in links:

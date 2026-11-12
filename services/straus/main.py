@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from collections import OrderedDict
 
 from fastapi import HTTPException
@@ -39,6 +40,10 @@ async def edit_schedule(body: dict):
     if any(owner == user_id() for owner, _ in active_runs):
         raise HTTPException(409, 'Straus уже работает')
     token = browser_run_id.set(run_id)
+    try:
+        await browser_request('/session/start', {})
+    except HTTPException as exc:
+        logging.getLogger('uvicorn.error').warning('Straus browser session start failed: %s', exc.status_code)
     task = asyncio.create_task(agent.run(body))
     active_runs[key] = task
     try:
@@ -47,4 +52,8 @@ async def edit_schedule(body: dict):
         raise HTTPException(409, 'Работа Straus остановлена') from None
     finally:
         active_runs.pop(key, None)
+        try:
+            await browser_request('/session/end', {})
+        except HTTPException as exc:
+            logging.getLogger('uvicorn.error').warning('Straus browser session cleanup failed: %s', exc.status_code)
         browser_run_id.reset(token)

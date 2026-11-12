@@ -12,6 +12,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Literal
 from urllib.parse import quote
+from uuid import uuid4
 
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse, Response
@@ -29,7 +30,7 @@ from common.models.context import ContextTaskUpdate
 from memory import Memory
 import materials
 import workspace
-from browser_client import browser_request
+from browser_client import browser_request, browser_run_id
 
 app = private_app('context')
 agent_routes(app, 'Monocle')
@@ -302,11 +303,23 @@ async def analyze(body: dict):
 
 
 async def analyze_task(key, task_id, body, progress):
-    memory = await asyncio.to_thread(Memory)
-    http = httpx.AsyncClient(timeout=httpx.Timeout(None, connect=8))
-    async with AsyncOpenAI(api_key=key, base_url=body.pop('_base_url', 'https://lenec.tech/v1'),
-                          http_client=http, max_retries=0) as client:
-        return await run_agent(client, memory, task_id, body, progress)
+    token = browser_run_id.set(uuid4().hex)
+    try:
+        await browser_request('/session/start', {})
+    except HTTPException as exc:
+        logging.getLogger('uvicorn.error').warning('Monocle browser session start failed: %s', exc.status_code)
+    try:
+        memory = await asyncio.to_thread(Memory)
+        http = httpx.AsyncClient(timeout=httpx.Timeout(None, connect=8))
+        async with AsyncOpenAI(api_key=key, base_url=body.pop('_base_url', 'https://lenec.tech/v1'),
+                              http_client=http, max_retries=0) as client:
+            return await run_agent(client, memory, task_id, body, progress)
+    finally:
+        try:
+            await browser_request('/session/end', {})
+        except HTTPException as exc:
+            logging.getLogger('uvicorn.error').warning('Monocle browser session cleanup failed: %s', exc.status_code)
+        browser_run_id.reset(token)
 
 
 async def run_agent(client, memory, task_id, body, progress):
