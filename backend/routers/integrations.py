@@ -383,6 +383,12 @@ def ameba_ranking():
     return ameba.ranking_status()
 
 
+@router.delete('/ameba/plan')
+async def delete_ameba_plan():
+    check_feature('ameba')
+    return await ameba.clear_plan()
+
+
 class RankingRequest(BaseModel):
     feedback: str | None = Field(default=None, max_length=4000)
 

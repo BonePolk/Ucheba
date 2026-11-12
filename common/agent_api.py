@@ -9,7 +9,7 @@ from openai import AsyncOpenAI, APIConnectionError, APIStatusError
 
 
 MODEL_FIRST_DATA_TIMEOUT = 180
-MODEL_IDLE_TIMEOUT = 30
+MODEL_IDLE_TIMEOUT = 180
 
 
 def agent_routes(app, label):
@@ -40,7 +40,7 @@ def agent_routes(app, label):
 
 
 async def stream_model_response(client, progress, **arguments):
-    """Первые данные — до 3 минут, паузы потока — до 30с. Один повтор при сбое."""
+    """Первые данные и паузы потока — до 3 минут. Один повтор при сбое."""
     retryable = (APIConnectionError, httpx.TransportError, TimeoutError)
     for attempt in range(2):
         received_data = False
@@ -66,7 +66,7 @@ async def stream_model_response(client, progress, **arguments):
             transient = isinstance(exc, retryable) or getattr(exc, 'status_code', None) in (502, 503, 504)
             if not transient:
                 raise
-            timeout_reason = ('Модель не передавала новые данные 30 секунд' if received_data
+            timeout_reason = ('Модель не передавала новые данные 3 минуты' if received_data
                               else 'Модель не начала ответ за 3 минуты')
             if attempt:
                 detail = (timeout_reason + ' после повторной попытки. Поручение не завершено.'

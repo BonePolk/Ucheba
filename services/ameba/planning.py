@@ -1,5 +1,5 @@
 """Инструмент Ameba: складывает оценки этапов, саму работу не выполняет."""
-from typing import Literal
+from typing import Annotated, Literal
 from datetime import date as calendar_date, datetime, timedelta, timezone, time
 from zoneinfo import ZoneInfo
 from common.schedule import slots_for_date
@@ -48,7 +48,7 @@ class Order(BaseModel):
 
 ORDER_TOOL = {
     'type': 'function', 'name': 'reorder_tasks', 'strict': True,
-    'description': 'Переставить все задачи и пересчитать накопленное время, нагрузку и ожидаемые результаты по сохранённым планам.',
+    'description': 'Зафиксировать общий порядок задач и проверить текущие точные блоки, размещённые через edit_task_blocks. Пересчитать время, нагрузку и результаты. Сам не добавляет и не перемещает блоки.',
     'parameters': Order.model_json_schema(),
 }
 
@@ -121,7 +121,7 @@ def weekly_timeline(order, plans, week, now, previous=None):
                        'title': title, 'permanent': permanent, 'focus_minutes': focus_minutes, 'start': int((cursor - start).total_seconds() / 60), 'minutes': length})
         cursor = end
 
-    for offset in range(366):
+    for offset in range(7):
         date = day + timedelta(days=offset)
         midnight = datetime.combine(date, time(), zone)
         slots = day_slots(week, date)
@@ -183,7 +183,7 @@ def weekly_timeline(order, plans, week, now, previous=None):
                      if task_id in reserved and date.isoformat() >= last_reserved_date[task_id]}
         if exhausted:
             raise ValueError('В именных окнах не хватает полезных минут (ID: остаток): ' + str(exhausted) + '. Расширь/добавь окна через plan_day; концентрация и перерывы тоже занимают время')
-    raise ValueError('Не хватает рабочих окон. Осталось полезной работы (ID: минуты): ' + str({task_id: remaining[task_id] for task_id in todo}))
+    raise ValueError('Не хватает рабочих окон на текущей неделе. Осталось полезной работы (ID: минуты): ' + str({task_id: remaining[task_id] for task_id in todo}) + '. Задачи, не поместившиеся на этой неделе, останутся в списке по приоритету без точного времени.')
 
 
 def validate_blocks(blocks, week=None, now=None):
@@ -213,7 +213,7 @@ def validate_blocks(blocks, week=None, now=None):
             day += timedelta(days=1)
 
 
-def reorder(arguments, plans, expected, week=None, now=None, previous=None, tasks=()):
+def reorder(arguments, plans, expected, week=None, now=None, previous=None, tasks=(), placed_blocks=None):
     if now:
         clock = datetime.fromisoformat(now).astimezone(timezone.utc)
         minute = clock.replace(second=0, microsecond=0)
@@ -243,40 +243,62 @@ def reorder(arguments, plans, expected, week=None, now=None, previous=None, task
                          'end_active_minutes': high,
                          'expected_result': plan['expected_result']})
     timeline_error = None
-    try:
-        blocks = weekly_timeline(order, plans, week, now, previous if request.keep_previous_times else None) if week and now else rest_timeline(order, plans)
-        validate_blocks(blocks, week, now)
-    except ValueError as exc:
-        # Недостаток рабочих окон не делает оценки задач или их порядок неверными.
-        blocks = []
-        timeline_error = str(exc)
     deadline_conflicts = []
-    if now and tasks:
-        origin = datetime.fromisoformat(now).astimezone(timezone.utc)
-        for task in tasks:
-            task_id = task['id']
-            policy = plans[task_id].get('deadline_policy', 'soft')
-            if policy == 'soft' or not task.get('deadline'):
-                continue
-            raw = task['deadline']
-            deadline = datetime.fromisoformat(raw.replace('Z', '+00:00')) if isinstance(raw, str) else raw
-            if deadline.tzinfo is None:
-                deadline = deadline.replace(tzinfo=timezone.utc)
-            placed = [block for block in blocks if block['kind'] == 'task' and not block.get('permanent') and block.get('task_id') == task_id]
-            finish = max((origin + timedelta(minutes=block['start'] + block['minutes']) for block in placed), default=None)
-            # Проверяем завершение всей работы, а не только время начала.
-            if deadline < origin or finish is not None and finish > deadline:
-                reason = (f"{task['title']}: после срока выполнение недопустимо." if policy == 'expires' and deadline < origin
-                          else f"{task['title']}: в этом плане не успевает завершиться к сроку.")
-                deadline_conflicts.append({'task_id': task_id, 'policy': policy, 'deadline': deadline.isoformat(), 'reason': reason})
-        blocked = {item['task_id'] for item in deadline_conflicts}
-        blocks = [block for block in blocks if block.get('permanent') or block.get('task_id') not in blocked]
-        # Не обещаем выгоду от работы, для которой нет допустимого размещения.
-        rewards = {}
-        for task_id in order:
-            plan = plans[task_id]
-            if task_id not in blocked and plan['reward'] is not None:
-                rewards[plan['reward_unit']] = rewards.get(plan['reward_unit'], 0) + plan['reward']
+    scheduled_order = list(order)
+    tasks_by_id = {task['id']: task for task in tasks}
+    preserved = previous if request.keep_previous_times else None
+    while True:
+        try:
+            if placed_blocks is not None:
+                blocks = list(placed_blocks)
+            elif week and now:
+                blocks = weekly_timeline(scheduled_order, plans, week, now, preserved)
+            else:
+                blocks = rest_timeline(scheduled_order, plans)
+            validate_blocks(blocks, week, now)
+        except ValueError as exc:
+            # Недостаток окон не делает оценки задач или их порядок неверными.
+            blocks = []
+            timeline_error = str(exc)
+            break
+        conflict = None
+        if now:
+            origin = datetime.fromisoformat(now).astimezone(timezone.utc)
+            for task_id in scheduled_order:
+                task = tasks_by_id.get(task_id, {})
+                policy = plans[task_id].get('deadline_policy', 'soft')
+                if policy == 'soft' or not task.get('deadline'):
+                    continue
+                raw = task['deadline']
+                deadline = datetime.fromisoformat(raw.replace('Z', '+00:00')) if isinstance(raw, str) else raw
+                if deadline.tzinfo is None:
+                    deadline = deadline.replace(tzinfo=timezone.utc)
+                placed = [block for block in blocks if block['kind'] == 'task'
+                          and not block.get('permanent') and block.get('task_id') == task_id]
+                finish = max((origin + timedelta(minutes=block['start'] + block['minutes']) for block in placed), default=None)
+                if deadline < origin or finish is not None and finish > deadline:
+                    reason = (f"{task['title']}: после срока выполнение недопустимо." if policy == 'expires' and deadline < origin
+                              else f"{task['title']}: в этом плане не успевает завершиться к сроку.")
+                    conflict = {'task_id': task_id, 'policy': policy, 'deadline': deadline.isoformat(), 'reason': reason}
+                    break
+        if conflict is None:
+            break
+        if placed_blocks is not None:
+            raise ValueError(conflict['reason'] + ' Перенеси блоки через edit_task_blocks.')
+        # Сначала освобождаем старые часы: прежний план мог сам мешать дедлайну.
+        if preserved:
+            preserved = None
+            continue
+        deadline_conflicts.append(conflict)
+        scheduled_order.remove(conflict['task_id'])
+        # После исключения одной задачи пересчитываем остальные с самого начала.
+        # Иначе удалённые блоки оставляют пустые недели и ложные конфликты сроков.
+    blocked = {item['task_id'] for item in deadline_conflicts}
+    rewards = {}
+    for task_id in order:
+        plan = plans[task_id]
+        if task_id not in blocked and plan['reward'] is not None:
+            rewards[plan['reward_unit']] = rewards.get(plan['reward_unit'], 0) + plan['reward']
     focus_total = sum(block.get('focus_minutes', 0) for block in blocks if block['kind'] == 'task' and not block.get('permanent'))
     additional_focus = max(0, focus_total - sum(plans[task_id].get('focus_minutes', 0) for task_id in order if plans[task_id].get('work_max_minutes', plans[task_id]['max_minutes']) > 0))
     low += additional_focus
@@ -334,7 +356,7 @@ class RestPattern(BaseModel):
     model_config = {'extra': 'forbid'}
     kind: Literal['sleep', 'meal', 'break']
     title: str = Field(min_length=1, max_length=150)
-    weekdays: list[int] = Field(min_length=1, max_length=7)
+    weekdays: list[Annotated[int, Field(ge=0, le=6)]] = Field(min_length=1, max_length=7)
     start: str = Field(pattern=r'^(?:[01]\d|2[0-3]):[0-5]\d$')
     end: str = Field(pattern=r'^(?:(?:[01]\d|2[0-3]):[0-5]\d|24:00)$')
 
@@ -369,11 +391,14 @@ def with_rest(week, now, arguments=None, timezone_name='UTC'):
     if arguments is None:
         return configured
     body = RestPlan.model_validate_json(arguments)
-    if not week:
-        configured['days'] = [[slot for slot in day if slot['kind'] == 'work'] for day in configured['days']]
-    for pattern in body.patterns:
-        if pattern.end <= pattern.start or len(set(pattern.weekdays)) != len(pattern.weekdays) or any(day < 0 or day > 6 for day in pattern.weekdays):
-            raise ValueError('Проверь weekdays=0..6 без повторов и end > start; сон через полночь раздели')
+    configured['days'] = [[slot for slot in day if not slot.get('temporary') or slot['kind'] == 'work']
+                          for day in configured['days']]
+    for index, pattern in enumerate(body.patterns):
+        if pattern.end <= pattern.start:
+            raise ValueError(f'patterns.{index}.end: {pattern.start}–{pattern.end}; конец должен быть позже начала. '
+                             'Интервал через полночь раздели на два: до 24:00 и с 00:00 следующего дня')
+        if len(set(pattern.weekdays)) != len(pattern.weekdays):
+            raise ValueError(f'patterns.{index}.weekdays: дни повторяются: {pattern.weekdays}; нужны уникальные значения 0..6')
         for day in pattern.weekdays:
             configured['days'][day].append({'kind': pattern.kind, 'title': pattern.title,
                 'start': pattern.start, 'end': pattern.end, 'temporary': True})
@@ -389,7 +414,10 @@ def with_rest(week, now, arguments=None, timezone_name='UTC'):
         for index, slot in enumerate(occupied):
             for other in occupied[:index]:
                 if slot['start'] < other['end'] and slot['end'] > other['start'] and (slot.get('temporary') or other.get('temporary')):
-                    raise ValueError(f'Временный отдых пересекается с другим событием {date.isoformat()}. Постоянное событие нельзя менять')
+                    raise ValueError(f'{date.isoformat()}: {slot["kind"]} «{slot.get("title", "") }» '
+                                     f'{slot["start"]}–{slot["end"]} пересекается с '
+                                     f'{other["kind"]} «{other.get("title", "") }» {other["start"]}–{other["end"]}. '
+                                     'Измени временный отдых или задай исключение через plan_day; постоянный календарь менять нельзя')
     return configured
 
 
@@ -405,12 +433,12 @@ class DaySlot(BaseModel):
 class DayPlan(BaseModel):
     model_config = {'extra': 'forbid'}
     date: str = Field(pattern=r'^\d{4}-\d{2}-\d{2}$')
-    slots: list[DaySlot] = Field(max_length=48, description='Полный временный план конкретной даты: работа, сон, еда, отдых и именные окна задач. Пустой список отменяет настройку этого дня.')
+    slots: list[DaySlot] = Field(max_length=48, description='Рабочие окна и необязательные изменения отдыха конкретной даты. Неуказанные виды отдыха сохраняются. Пустой список отменяет настройку этого дня.')
     reason: str = Field(min_length=1, max_length=500)
 
 
 DAY_TOOL = {'type': 'function', 'name': 'plan_day', 'strict': True,
-    'description': 'Настроить или пересобрать одну конкретную дату. Можно задать свой сон/еду, расширить рабочие окна перед дедлайном и выделить разным задачам разные часы. task — именное рабочее окно с учётом концентрации; одна задача может иметь окна в разные дни. Постоянные события не меняются. После изменений вызови reorder_tasks.',
+    'description': 'Настроить или пересобрать одну конкретную дату. Передай рабочие окна и при необходимости новый отдых. Неуказанные виды отдыха сохраняются из текущего плана дня. Можно расширить рабочие окна перед дедлайном и выделить разным задачам разные часы. task — именное рабочее окно с учётом концентрации; одна задача может иметь окна в разные дни. Постоянные события не меняются. После изменений вызови reorder_tasks.',
     'parameters': DayPlan.model_json_schema()}
 
 
@@ -431,20 +459,27 @@ def plan_day(arguments, week, expected, now):
     body = DayPlan.model_validate_json(arguments)
     day = calendar_date.fromisoformat(body.date)
     today = datetime.fromisoformat(now).astimezone(ZoneInfo(week['timezone'])).date()
-    if not 0 <= (day - today).days <= 365:
-        raise ValueError('Выбери дату от сегодня до года вперёд')
+    if not 0 <= (day - today).days <= 6:
+        raise ValueError('Выбери дату от сегодня до конца текущей недели (7 дней). Задачи на более поздний срок не размещай в таймлайн.')
     configured = deepcopy(week)
     overrides = configured.setdefault('day_plans', {})
     if not body.slots:
         overrides.pop(body.date, None)
         return configured, {'date': body.date, 'status': 'reset'}
     slots = []
+    # При изменении рабочих часов не заставляем модель заново описывать сон и еду.
+    # Переданный вид отдыха заменяется целиком; остальные берём из текущего дня.
+    changed_rest = {item.kind for item in body.slots if item.kind in ('sleep', 'meal', 'break')}
+    for slot in day_slots(week, day):
+        if slot.get('temporary') and slot['kind'] in ('sleep', 'meal', 'break') and slot['kind'] not in changed_rest:
+            slots.append(dict(slot))
     for item in body.slots:
         if item.end <= item.start:
             raise ValueError('Нужен end > start; сон через полночь раздели на два дня')
         if (item.kind == 'task' and item.task_id not in expected) or (item.kind != 'task' and item.task_id is not None):
             raise ValueError('Для task укажи ID из задач, для остальных task_id=null')
-        if any(item.start < slot['end'] and item.end > slot['start'] for slot in slots):
+        if any(item.start < slot['end'] and item.end > slot['start']
+               and ((item.kind in ('work', 'task')) == (slot['kind'] == 'work')) for slot in slots):
             raise ValueError('Интервалы временного дня не должны пересекаться')
         slots.append(item.model_dump() | {'kind': 'work' if item.kind == 'task' else item.kind, 'temporary': True})
     overrides[body.date] = slots

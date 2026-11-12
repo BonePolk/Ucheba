@@ -20,6 +20,7 @@ from common.progress import NOTE_TOOL, NOTE_INSTRUCTION, Progress, get_progress,
 from common.dates import deadline_facts
 from common.agent_api import agent_routes
 import planning
+import blocks as block_plan
 
 app = private_app('ameba')
 agent_routes(app, 'Ameba')
@@ -134,6 +135,17 @@ async def rank(body: dict):
             plans = {}
             schedule = None
             planning_week = planning.with_rest(body.get('weekly_schedule'), body['now'], timezone_name=body.get('timezone', 'UTC'))
+            old_plan = body.get('previous_plan', {})
+            old_rest = old_plan.get('rest_patterns', [])
+            if old_rest:
+                for day in planning_week['days']:
+                    day[:] = [slot for slot in day if not slot.get('temporary') or slot['kind'] == 'work']
+                for pattern in old_rest:
+                    for weekday in pattern['weekdays']:
+                        planning_week['days'][weekday].append(dict(pattern, temporary=True))
+            planning_week['day_plans'] = old_plan.get('day_plans', {})
+            draft = block_plan.initial(old_plan.get('schedule'), expected, body['now'], planning_week['timezone'])
+            plan_read = False
             rest_assumption = 'Предварительные рабочие окна и отдых; постоянный календарь не изменяется.'
             rest_planned = False
             order = list(expected)
@@ -155,16 +167,42 @@ async def rank(body: dict):
                                 total=0 if set(plans) == set(expected) else len(expected))
                 progress.begin_response()
                 tools = [QUESTION_TOOL, planning.TOOL, planning.ORDER_TOOL, planning.REST_TOOL, planning.DAY_TOOL,
+                         block_plan.READ_TOOL, block_plan.EDIT_TOOL,
                          CONTEXT_TOOL, NOTE_TOOL, ISSUE_TOOL, *MEMORY_TOOLS]
                 # Шлюз зависает на tool_choice с именем функции. Единственный
                 # доступный инструмент + required даёт то же ограничение и работает.
                 required_tool = ('read_user_memory' if not memory_checked else
-                                 'plan_rest' if set(plans) == set(expected) and schedule is not None and not rest_planned else None)
+                                 'read_current_plan' if not plan_read else None)
                 if required_tool:
                     tools = [tool for tool in tools if tool['name'] == required_tool]
                 response = await stream_model_response(client, progress,
                     model=model, reasoning={'effort': 'medium' if memory_checked else 'low', 'summary': 'auto'}, max_output_tokens=8000,
                     instructions=QUESTION_INSTRUCTION + ISSUE_INSTRUCTION + MEMORY_INSTRUCTION + NOTE_INSTRUCTION + (
+                        'Работай с текущим планом итеративно. Сначала read_current_plan: он возвращает весь '
+                        'черновик блоков, постоянный календарь, недельный режим и исключения по датам. '
+                        'Сохраняй подходящие прежние блоки. После оценки всех задач через plan_tasks '
+                        'добавляй точные блоки через edit_task_blocks небольшими наборами. '
+                        'Инструмент возвращает только принятые added_blocks, removed_ids и остаток полезной '
+                        'работы по каждой задаче. Рабочие минуты блока = его длительность минус focus_minutes. '
+                        'Для переноса передай remove_ids и новые блоки одним вызовом; при ошибке весь вызов '
+                        'отклоняется и прежний черновик остаётся. Не отправляй принятые блоки повторно. '
+                        'После ошибки прочитай план при необходимости и попробуй другие часы или дни. '
+                        'Время date/start/end — местное в timezone плана. Постоянные события менять нельзя. '
+                        'Не более 90 минут нагрузки подряд, затем не менее 15 минут отдыха. '
+                        'Планируй точно только текущую неделю (7 дней от сегодня). '
+                        'Задачи, которые не помещаются на этой неделе, не размещай в таймлайн — '
+                        'они останутся в общем порядке по приоритету. '
+                        'reorder_tasks только проверяет/суммирует уже вставленные блоки и фиксирует порядок ID, '
+                        'он больше не размещает задачи автоматически. keep_previous_times оставь true; '
+                        'фактические переносы выполняй через edit_task_blocks. После изменений режима '
+                        'через plan_rest/plan_day проверь старые блоки и перенеси те, что больше не подходят. '
+                        'Не заканчивай, пока remaining_work_minutes или excess_work_minutes не равны нулю '
+                        'для всех задач, которые ты разместила на этой неделе. '
+                        'Задачи без блоков на этой неделе (unscheduled) не блокируют итог — '
+                        'они получают только порядок по приоритету. '
+                        'Не уменьшай оценки ради вида готовности. Если при реальных '
+                        'ограничениях закончить невозможно, объясни конкретную нехватку и спроси владельца '
+                        'через ask_user, какие ограничения/объём можно изменить; продолжи после ответа. '
                         'Перед любым планированием обязательно вызови read_user_memory и проверь, '
                         'нет ли важных фактов о владельце: сон, еда, время подъёма, энергия, работа, '
                         'обязательства, предпочтения и ограничения. Слова владельца важнее догадок. '
@@ -190,7 +228,8 @@ async def rank(body: dict):
                         'Именные окна task резервируют выбранные часы только этой задаче; она выполняется только '
                         'в назначенных окнах, поэтому выдели достаточно полезной работы плюс концентрацию. '
                         'Одной задаче можно выделить окна в нескольких разных днях. Свободное окно work '
-                        'используется для остальных задач по порядку. Полный план дня включает сон и еду; '
+                        'используется для остальных задач по порядку. В plan_day можно передавать только рабочие окна: '
+                        'неуказанные виды отдыха сохраняются из текущего дня. Если меняешь сон или еду, передай все интервалы этого вида за день; '
                         'ночной сон раздели на интервалы по обе стороны полуночи на соответствующих датах. '
                         'Пустой slots в plan_day отменяет только твой режим указанной даты. '
                         'plan_rest задаёт недельную основу, а plan_day — более точные исключения по датам. '
@@ -205,7 +244,7 @@ async def rank(body: dict):
                         'После изменения отдыха, дневных окон или оценок обязательно вызови reorder_tasks. '
                         'previous_plan — прошлый план этого владельца, а user_feedback — его замечания к расписанию. '
                         'Старайся максимально сохранить прежние дни, время и порядок задач, меняя только необходимое. '
-                        'В reorder_tasks используй keep_previous_times=true по умолчанию; false только при необходимости перестроения. '
+                        'Сохраняй подходящие блоки черновика; переноси выбранные блоки через edit_task_blocks. '
                         'Не переставляй подходящие блоки ради косметического улучшения. '
                         'При изменениях сохраняй остальную часть плана, если она ещё выполнима. '
                         'Истёкшие интервалы не переноси буквально; учитывай текущее время, новые сроки, '
@@ -257,11 +296,11 @@ async def rank(body: dict):
                         'Перед итогом обязательно вызови reorder_tasks с общим порядком всех ID. '
                         'Инструмент пересчитает накопленное время, нагрузку и потенциальные результаты. '
                         'Если reorder_tasks вернул timeline_error, порядок принят, но календарных рабочих окон '
-                        'недостаточно или именные окна задач слишком короткие. Это не ошибка формата. '
+                        'на текущей неделе недостаточно или именные окна задач слишком короткие. Это не ошибка формата. '
                         'Попробуй осмысленно изменить режим нужных дат через plan_day, порядок или размещение. '
                         'Не повторяй неизменившийся reorder_tasks по кругу и не уменьшай искусственно оценки. '
-                        'Если перестроение не помогает, укажи невозможность в explanation и спроси владельца '
-                        'через ask_user, если он может изменить ограничения. '
+                        'Если перестроение не помогает, оставь непоместившиеся задачи без блоков — '
+                        'они останутся в порядке по приоритету. Укажи это в explanation.'
                         'Можешь пробовать другой порядок повторными вызовами. Чтобы изменить трудоёмкость '
                         'или ожидаемый результат, уточни plan_tasks с обоснованными допущениями, затем '
                         'снова вызови reorder_tasks. Простая перестановка не уменьшает сумму часов. '
@@ -320,7 +359,7 @@ async def rank(body: dict):
                         'Пиши кратко: explanation до 400 символов; effort и impact — короткая выжимка. Не пересказывай контекст. По-русски, без Markdown.'),
                     input=messages, tools=tools,
                     tool_choice=('required' if required_tool else 'none' if repaired else
-                                 'required' if set(plans) != set(expected) or schedule is None else 'auto'),
+                                 'required' if set(plans) != set(expected) or schedule is None or not rest_planned else 'auto'),
                     parallel_tool_calls=False,
                     text={'format': {'type': 'json_schema', 'name': 'task_ranking', 'strict': True,
                                      'schema': RankingResult.model_json_schema() | {'additionalProperties': False}}},
@@ -331,6 +370,17 @@ async def rank(body: dict):
                 if response.status != 'completed':
                     raise HTTPException(502, 'Ameba не завершила планирование. Старый порядок сохранён.')
                 if not calls:
+                    remaining_items = block_plan.remaining(draft, plans, expected)
+                    # Задачи без блоков на этой неделе — нормально, они идут по приоритету.
+                    missing = [item for item in remaining_items
+                               if item.get('needs_estimate') or item.get('excess_work_minutes')
+                               or (item.get('remaining_work_minutes') and not item.get('unscheduled'))]
+                    if missing or schedule is None or not rest_planned:
+                        messages.extend(response.output)
+                        messages.append({'role': 'user', 'content': json.dumps({
+                            'error': 'Черновик не готов. Продолжи размещать/переносить блоки через edit_task_blocks, затем вызови reorder_tasks. Задачи, которые не помещаются на текущей неделе, оставь без блоков — они получат порядок по приоритету.',
+                            'remaining': missing}, ensure_ascii=False)})
+                        continue
                     try:
                         result = read_ranking(response.output_text, expected)
                         if schedule is None or result.task_ids != schedule['task_ids']:
@@ -355,7 +405,7 @@ async def rank(body: dict):
                 messages.extend(response.output)
                 for call in calls:
                     try:
-                        if call.name in ('plan_tasks', 'plan_rest', 'plan_day', 'reorder_tasks') and not memory_checked:
+                        if call.name in ('plan_tasks', 'plan_rest', 'plan_day', 'reorder_tasks', 'read_current_plan', 'edit_task_blocks') and not memory_checked:
                             raise ValueError('Сначала прочитай факты владельца через read_user_memory')
                         if call.name == 'ask_user':
                             output = await ask_user(call.arguments, progress)
@@ -381,9 +431,18 @@ async def rank(body: dict):
                             progress.add(str(arguments['reason'])[:400], current=False)
                             progress.update(stage='context', context_requests=ids)
                             return {'context_requests': ids, 'context_reason': str(arguments['reason'])[:1000]}
+                        elif call.name == 'read_current_plan':
+                            output = block_plan.read(draft, planning_week, plans, expected)
+                            plan_read = True
+                            progress.add('Читает текущий план перед размещением задач')
+                        elif call.name == 'edit_task_blocks':
+                            draft, output = block_plan.edit(call.arguments, draft, planning_week, plans, expected, tasks, datetime.now(timezone.utc).isoformat())
+                            schedule = None
+                            progress.add(f'Добавила блоков: {len(output["added_blocks"])}; убрала: {len(output["removed_ids"])}')
+                            # Предварительный план виден сразу, не только после итогового ответа.
+                            progress.update(schedule=draft | {'blocks': block_plan.calendar_blocks(draft, planning_week)})
                         elif call.name == 'plan_rest':
-                            updated_week = planning.with_rest(body.get('weekly_schedule'), body['now'], call.arguments, body.get('timezone', 'UTC'))
-                            updated_week['day_plans'] = planning_week.get('day_plans', {})
+                            updated_week = planning.with_rest(planning_week, body['now'], call.arguments, body.get('timezone', 'UTC'))
                             planning_week = updated_week
                             rest_assumption = json.loads(call.arguments)['assumption']
                             rest_planned = True
@@ -398,6 +457,9 @@ async def rank(body: dict):
                             progress.add('Рассчитывает время и нагрузку задач', description='Оценивает оставшуюся работу, чтобы сравнить выполнимость и пользу задач.')
                             calculated = planning.calculate(call.arguments, expected)
                             plans.update(calculated)
+                            for block in draft['blocks']:
+                                if block['task_id'] in calculated:
+                                    block['focus_minutes'] = calculated[block['task_id']]['focus_minutes']
                             schedule = None
                             for task_id, plan in calculated.items():
                                 title = next(task['title'] for task in tasks if task['id'] == task_id)
@@ -405,7 +467,10 @@ async def rank(body: dict):
                             output = {'plans': list(calculated.values())}
                         elif call.name == 'reorder_tasks':
                             progress.add('Переставляет задачи и пересчитывает календарный план', description='Проверяет порядок с учётом доступного времени, занятости и отдыха.')
-                            schedule = planning.reorder(call.arguments, plans, expected, planning_week, datetime.now(timezone.utc).isoformat(), body.get('previous_plan', {}).get('schedule'), tasks)
+                            block_plan.validate(draft, planning_week, plans, tasks, datetime.now(timezone.utc).isoformat())
+                            schedule = planning.reorder(call.arguments, plans, expected, planning_week, draft['start_at'], tasks=tasks,
+                                                        placed_blocks=block_plan.calendar_blocks(draft, planning_week))
+                            schedule['remaining'] = block_plan.remaining(draft, plans, expected)
                             schedule['rest_assumption'] = rest_assumption
                             order = schedule['task_ids']
                             for conflict in schedule.get('deadline_conflicts', []):
@@ -418,7 +483,7 @@ async def rank(body: dict):
                             raise ValueError('Unknown tool')
                         titles = {task['id']: task['title'] for task in tasks}
                         progress.update(stage='planning', total=len(expected), completed=len(plans),
-                                        schedule=schedule,
+                                        schedule=schedule or (draft | {'blocks': block_plan.calendar_blocks(draft, planning_week)}),
                                         timeline=[{'id': task_id, 'title': titles[task_id],
                                                    'plan': plans.get(task_id)} for task_id in order])
                     except (ValidationError, ValueError) as exc:
@@ -466,5 +531,3 @@ async def rank(body: dict):
                        'day_plans': planning_week.get('day_plans', {}),
                        'rest_patterns': [dict(slot, weekdays=[day]) for day, slots in enumerate(planning_week['days'])
                                          for slot in slots if slot['kind'] in ('sleep', 'meal', 'break') and not slot.get('id')]}
-
-

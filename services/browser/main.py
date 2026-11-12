@@ -747,6 +747,11 @@ async def delete_site(site_id: str):
 async def login(tab, site):
     await public_url(site['url'])
     await open_page(tab, site['url'])
+    # Ждём появления формы входа: open_page возвращается при commit, DOM может ещё строиться.
+    try:
+        await tab.locator('input[type="password"]:visible, input[name*="login" i]:visible, input[name*="user" i]:visible, input[autocomplete="username"]:visible').first.wait_for(timeout=8000)
+    except BrowserTimeoutError:
+        pass  # Форма не появилась — возможно, уже выполнен вход или нужен ручной режим.
     for _ in range(2):
         if origin(tab.url) != origin(site['url']):
             return {'status': 'needs_user', 'reason': 'Вход перенаправлен на другой сайт. Завершите его в браузере.'}

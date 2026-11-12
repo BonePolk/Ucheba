@@ -67,6 +67,13 @@ export default function TaskBoard({ features = {} }) {
     enabled: !archived && (features.context !== false || features.ameba !== false), refetchInterval: 1000 });
   const rank = useMutation({ mutationFn: () => agentRequest('/integrations/ameba/rank', { method: 'POST', body: JSON.stringify({ feedback: planFeedback ?? ranking.data?.feedback ?? '' }) }),
     onSuccess: async () => { setSort('ameba:asc'); await queryClient.invalidateQueries({ queryKey: ['ameba-ranking'] }); await refresh(); } });
+  const clearPlan = useMutation({
+    mutationFn: () => request('/integrations/ameba/plan', { method: 'DELETE' }),
+    onSuccess: async () => {
+      rank.reset();
+      await Promise.all([refresh(), queryClient.invalidateQueries({ queryKey: ['calendar'] })]);
+    },
+  });
   const rankingReasons = new Map((ranking.data?.reasons ?? []).map((item) => [item.task_id, item]));
   const positions = new Map((ranking.data?.task_ids ?? []).map((id, index) => [id, index + 1]));
   const save = useMutation({
@@ -101,7 +108,7 @@ export default function TaskBoard({ features = {} }) {
   });
   const remove = useMutation({ mutationFn: deleteTask, onSuccess: refresh });
   const rows = tasks.data ?? [];
-  const error = tasks.error || update.error || remove.error || ranking.error || rank.error;
+  const error = tasks.error || update.error || remove.error || ranking.error || rank.error || clearPlan.error;
   const changeFilter = (name, value) => setFilters((current) => ({ ...current, [name]: value }));
 
   return (
@@ -139,7 +146,8 @@ export default function TaskBoard({ features = {} }) {
             autosize minRows={1} maxRows={4} maxLength={4000} value={planFeedback ?? ranking.data?.feedback ?? ''}
             onChange={(event) => setPlanFeedback(event.currentTarget.value)} />
           </>}<Group>
-          <Button variant="light" loading={rank.isPending && !queue.data?.ameba_running} disabled={queue.data?.browser_busy} onClick={() => rank.mutate()}>{queue.data?.ameba_running ? 'Применить изменения' : 'Обновить расписание'}</Button>
+          <Button variant="light" loading={rank.isPending && !queue.data?.ameba_running} disabled={clearPlan.isPending || queue.data?.browser_busy} onClick={() => rank.mutate()}>{queue.data?.ameba_running ? 'Применить изменения' : 'Обновить расписание'}</Button>
+          <Button variant="subtle" color="red" loading={clearPlan.isPending} disabled={!ranking.data?.has_plan || rank.isPending || queue.data?.ameba_running} onClick={() => clearPlan.mutate()}>Удалить план</Button>
           <Text size="sm" c="dimmed">{ranking.data?.needs_refresh ? 'Порядок нужно обновить.' : `Сравнено задач: ${ranking.data?.ranked_count ?? 0}.`}{ranking.data?.pending_count > 0 && ` Ожидают контекста Monocle: ${ranking.data.pending_count}.`}{ranking.data?.uncertain_comparisons > 0 && ' При неуверенном сравнении сохранён ручной приоритет и дедлайн.'}</Text>
         </Group>{rank.data?.unchanged && <Text size="xs" c="dimmed">{rank.data.status === 'running' ? 'Ameba уже работает с этими данными.' : 'Данные не изменились — сохранённый порядок остаётся.'}</Text>}{ranking.data?.explanation && <Tooltip multiline w={320} label={ranking.data.explanation} events={{ hover: true, focus: true, touch: true }}><Text component="button" type="button" size="xs" c="dimmed" style={{ cursor: 'help', background: 'none', border: 0, padding: 0, width: 'fit-content' }}>{ranking.data.needs_refresh ? 'О последней сортировке' : 'Почему такой порядок'}</Text></Tooltip>}<div className="planner-progress"><AmebaProgress active={rank.isPending} /></div></Stack></Paper>}
         {error && <Alert color="red">{error.message}</Alert>}
