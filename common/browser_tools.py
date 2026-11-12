@@ -13,19 +13,19 @@ def visual_tool(name, description, properties):
 
 
 BROWSER_TOOLS = [
-    visual_tool('browser_wait_for_user', 'Попросить владельца пройти CAPTCHA/2FA и передать ему браузер. message — понятная просьба: что мешает, что нужно сделать в увеличенном браузере и нажать «Готово — продолжить работу агента». Просьба попадёт в журнал. Вызов ждёт владельца без таймера; после возврата перечитай страницу. Не обходи капчу сам.', {'message': {'type': 'string', 'minLength': 1, 'maxLength': 500}}),
-    visual_tool('browser_screenshot', 'Получить снимок текущего браузера. full_page=true показывает всю страницу, false — видимую область 1100×750.',
+    visual_tool('browser_wait_for_user', 'Попросить владельца пройти CAPTCHA/2FA и передать ему браузер. message — понятная просьба: что мешает, что сделать и нажать «Готово — продолжить работу агента». После возврата получишь актуальную страницу и elements. Не обходи проверку сам.', {'message': {'type': 'string', 'minLength': 1, 'maxLength': 500}}),
+    visual_tool('browser_screenshot', 'Получить снимок текущего браузера, только если текстового представления недостаточно. full_page=true показывает всю страницу, false — видимую область 1100×750.',
                 {'full_page': {'type': 'boolean'}}),
-    visual_tool('browser_click', 'Нажать элемент. Предпочитай target=element по id из последнего elements (id передай в name), либо role + точное name. text — точный текст. css — CSS-селектор HTML-элемента, например #submit, button.download или a[href$=".pdf"]. xpath — XPath, например //button[@type="submit"]. Выражение передай в selector. selector — прежний CSS/Playwright-вариант. coordinates — запасной вариант. Для неиспользуемых строк передай пустую строку, x/y=0.',
+    visual_tool('browser_click', 'Нажать элемент. Сначала используй актуальный id из elements как target=element и name=id, затем role + точное name. CSS/XPath — только если ID и роль не подходят; координаты — крайний вариант. Для неиспользуемых строк передай пустую строку, x/y=0.',
                 {'target': {'type': 'string', 'enum': ['element', 'role', 'text', 'css', 'xpath', 'selector', 'coordinates']},
                  'role': {'type': 'string', 'maxLength': 40}, 'name': {'type': 'string', 'maxLength': 500},
                  'selector': {'type': 'string', 'maxLength': 1000},
                  'x': {'type': 'integer', 'minimum': 0, 'maximum': 1099}, 'y': {'type': 'integer', 'minimum': 0, 'maximum': 749}}),
-    visual_tool('browser_type', 'Ввести обычный текст в выбранное поле, например поиск. Пароли вводит browser_login, коды 2FA — владелец.',
-                {'text': {'type': 'string', 'maxLength': 2000}}),
+    visual_tool('browser_type', 'Ввести обычный текст в поле по актуальному id из elements. element — id поля; пустая строка использует уже сфокусированное поле. Пароли вводит browser_login, коды 2FA — владелец.',
+                {'element': {'type': 'string', 'maxLength': 16}, 'text': {'type': 'string', 'maxLength': 2000}}),
     visual_tool('browser_press', 'Нажать клавишу в браузере.',
                 {'key': {'type': 'string', 'enum': ['Enter', 'Tab', 'Escape', 'Backspace', 'Control+A', 'ArrowDown', 'ArrowUp']}}),
-    visual_tool('browser_scroll', 'Прокрутить текущую страницу и получить новый снимок. Положительное delta — вниз.',
+    visual_tool('browser_scroll', 'Прокрутить страницу; если видимый текст изменится, получишь обновлённое представление. Положительное delta — вниз.',
                 {'delta': {'type': 'integer', 'minimum': -1500, 'maximum': 1500}}),
     visual_tool('browser_navigate', 'Открыть URL либо перейти назад/вперёд. Для back/forward передай пустой url.',
                 {'action': {'type': 'string', 'enum': ['open', 'back', 'forward']}, 'url': {'type': 'string', 'maxLength': 2000}}),
@@ -35,7 +35,7 @@ BROWSER_TOOLS = [
      'parameters': {'type': 'object', 'properties': {}, 'required': [], 'additionalProperties': False}, 'strict': True},
     {'type': 'function', 'name': 'browser_login', 'description': 'Войти в личный кабинет по site_id из browser_sites. Браузер сам подставляет сохранённые данные, пароли модели недоступны.',
      'parameters': {'type': 'object', 'properties': {'site_id': {'type': 'string'}}, 'required': ['site_id'], 'additionalProperties': False}, 'strict': True},
-    {'type': 'function', 'name': 'browser_read', 'description': 'Прочитать текущую страницу личного кабинета по site_id из browser_sites и список ссылок с номерами. Если требуется вход, используй browser_login.',
+    {'type': 'function', 'name': 'browser_read', 'description': 'Прочитать компактный текст, заголовки, элементы и нумерованные ссылки текущей страницы ЛК. Если требуется вход, используй browser_login.',
      'parameters': {'type': 'object', 'properties': {'site_id': {'type': 'string'}}, 'required': ['site_id'], 'additionalProperties': False}, 'strict': True},
     {'type': 'function', 'name': 'browser_follow', 'description': 'Прочитать страницу по номеру ссылки из последнего browser_read. Только чтение условий задач; не выбирай выход, удаление, отправку или изменение данных.',
      'parameters': {'type': 'object', 'properties': {'site_id': {'type': 'string'}, 'index': {'type': 'integer', 'minimum': 0, 'maximum': 99}},
@@ -51,7 +51,7 @@ BROWSER_TOOLS = [
 
 
 BROWSER_TOOLS.append(visual_tool('read_page',
-    'Прочитать URL или перейти по index предыдущего ответа. Пустые site_id/url — текущий браузер. Для action=read index=0; для follow url пустой.',
+    'Прочитать компактный текст, заголовки и элементы URL либо перейти по index предыдущего ответа. Пустые site_id/url — текущий браузер. Для action=read index=0; для follow url пустой.',
     {'site_id': {'type': 'string'}, 'action': {'type': 'string', 'enum': ['read', 'follow']},
      'url': {'type': 'string'}, 'index': {'type': 'integer', 'minimum': 0, 'maximum': 99}}))
 BROWSER_NAMES = {tool['name'] for tool in BROWSER_TOOLS}
