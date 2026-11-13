@@ -143,7 +143,7 @@ async def agent_progress(task_id: int = 0, providers: str = 'context,arrodes'):
             else:
                 service = name
                 path = '/ranking/progress' if name == 'ameba' else '/progress'
-                result = await call(service, f'{path}?task_id={task_id}', method='GET', timeout=2)
+                result = await call(service, f'{path}?task_id={task_id}' + ('&work=true' if name in ('arrodes', 'codex') and task_id == 0 else ''), method='GET', timeout=2)
                 available = True
             return {'provider': name, 'run': result, 'available': available, 'queued': queued}
         except (HTTPException, httpx.HTTPError):
@@ -174,7 +174,7 @@ async def agent_progress_stream(task_id: int = 0, providers: str = 'context,arro
         sources.append(('ameba', 'ameba', 'ranking', task_id == 0))
     for provider in ('arrodes', 'codex'):
         if provider in requested and enabled['arrodes']:
-            sources.append((provider, 'arrodes', 'agent', False))
+            sources.append((provider, 'arrodes', 'agent', task_id == 0))
 
     async def events():
         changes = asyncio.Queue(maxsize=8)

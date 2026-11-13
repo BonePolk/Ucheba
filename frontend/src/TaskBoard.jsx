@@ -8,10 +8,9 @@ import { agentRequest, deleteTask, getTasks, request, saveTask } from './api';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
 import TaskForm, { priorities, statuses } from './TaskForm';
-import AmebaProgress from './AmebaProgress';
 import AgentQueue from './AgentQueue';
 import AgentProgress from './AgentProgress';
-import RankingAssessment from './RankingAssessment';
+import RankingAssessment, { DeadlineRisk } from './RankingAssessment';
 
 dayjs.extend(utc);
 
@@ -137,7 +136,6 @@ export default function TaskBoard({ features = {} }) {
             <Select label="Сортировка" data={sorting.filter((item) => features.ameba !== false || item.value !== 'ameba:asc')} value={currentSort} allowDeselect={false} onChange={setSort} />
           </SimpleGrid>}
         </Paper>
-        {!archived && features.monocle !== false && features.ameba === false && <AgentProgress providers={['context']} active={queue.data?.active?.some((item) => item.provider === 'context')} />}
         {!archived && (features.monocle !== false || features.ameba !== false) && <AgentQueue queue={queue.data} error={queue.error} />}
         {features.ameba !== false && !archived && <Paper withBorder radius="lg" p="md" className="planner-panel"><Stack gap="sm">
           <Group justify="space-between"><Group gap="xs"><span className={`planner-dot ${queue.data?.ameba_running ? 'is-active' : ''}`} /><Text fw={600} size="sm">План дня</Text></Group><Button size="compact-sm" variant="subtle" onClick={() => setPlannerOpen(!plannerOpen)} aria-expanded={plannerOpen}>{plannerOpen ? 'Свернуть' : 'Настроить'}</Button></Group>
@@ -149,7 +147,8 @@ export default function TaskBoard({ features = {} }) {
           <Button variant="light" loading={rank.isPending && !queue.data?.ameba_running} disabled={clearPlan.isPending || queue.data?.browser_busy} onClick={() => rank.mutate()}>{queue.data?.ameba_running ? 'Применить изменения' : 'Обновить расписание'}</Button>
           <Button variant="subtle" color="red" loading={clearPlan.isPending} disabled={!ranking.data?.has_plan || rank.isPending || queue.data?.ameba_running} onClick={() => clearPlan.mutate()}>Удалить план</Button>
           <Text size="sm" c="dimmed">{ranking.data?.needs_refresh ? 'Порядок нужно обновить.' : `Сравнено задач: ${ranking.data?.ranked_count ?? 0}.`}{ranking.data?.pending_count > 0 && ` Ожидают контекста Monocle: ${ranking.data.pending_count}.`}{ranking.data?.uncertain_comparisons > 0 && ' При неуверенном сравнении сохранён ручной приоритет и дедлайн.'}</Text>
-        </Group>{rank.data?.unchanged && <Text size="xs" c="dimmed">{rank.data.status === 'running' ? 'Ameba уже работает с этими данными.' : 'Данные не изменились — сохранённый порядок остаётся.'}</Text>}{ranking.data?.explanation && <Tooltip multiline w={320} label={ranking.data.explanation} events={{ hover: true, focus: true, touch: true }}><Text component="button" type="button" size="xs" c="dimmed" style={{ cursor: 'help', background: 'none', border: 0, padding: 0, width: 'fit-content' }}>{ranking.data.needs_refresh ? 'О последней сортировке' : 'Почему такой порядок'}</Text></Tooltip>}<div className="planner-progress"><AmebaProgress active={rank.isPending} /></div></Stack></Paper>}
+        </Group>{rank.data?.unchanged && <Text size="xs" c="dimmed">{rank.data.status === 'running' ? 'Ameba уже работает с этими данными.' : 'Данные не изменились — сохранённый порядок остаётся.'}</Text>}{ranking.data?.explanation && <Tooltip multiline w={320} label={ranking.data.explanation} events={{ hover: true, focus: true, touch: true }}><Text component="button" type="button" size="xs" c="dimmed" style={{ cursor: 'help', background: 'none', border: 0, padding: 0, width: 'fit-content' }}>{ranking.data.needs_refresh ? 'О последней сортировке' : 'Почему такой порядок'}</Text></Tooltip>}</Stack></Paper>}
+        {!archived && <AgentProgress providers={['monocle', 'straus', 'arrodes', 'ameba'].filter((name) => features[name] !== false)} active={rank.isPending} />}
         {error && <Alert color="red">{error.message}</Alert>}
         {tasks.isPending ? <div className="page-loading"><Loader aria-label="Загрузка задач" /></div> : (
           compact ? <div className="task-card-grid">{rows.map((task) => <TaskCard key={task.id} task={task} archived={archived}
@@ -175,6 +174,7 @@ export default function TaskBoard({ features = {} }) {
                       </Table.Td>
                       <Table.Td miw={180} maw={320}>
                         <Text component="a" href={`/?task=${task.id}`} fw={500} c="inherit" td={task.status === 'done' || completing === task.id ? 'line-through' : undefined} style={{ overflowWrap: 'anywhere' }}>{task.title}</Text>
+                        {!archived && task.status !== 'done' && features.ameba !== false && <DeadlineRisk reason={rankingReasons.get(task.id)?.deadline_risk} />}
                         {task.source_url && <Text component="a" href={task.source_url} target="_blank" rel="noreferrer" size="xs" c="purple">Источник Telegram</Text>}
                         {task.description && <Text size="sm" c="dimmed" lineClamp={2} style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{task.description}</Text>}
                       </Table.Td>

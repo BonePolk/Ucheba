@@ -1,33 +1,13 @@
-"""Черновик точных блоков задач. Каждый вызов меняет только указанные блоки."""
+"""Чтение, проверка и отображение блоков, рассчитанных Python."""
 from datetime import datetime, timedelta, timezone, time
-from uuid import uuid4
 from zoneinfo import ZoneInfo
-
-from pydantic import BaseModel, Field
 
 import planning
 
 
-class TaskBlock(BaseModel):
-    model_config = {'extra': 'forbid'}
-    task_id: int
-    date: str = Field(pattern=r'^\d{4}-\d{2}-\d{2}$')
-    start: str = Field(pattern=r'^(?:[01]\d|2[0-3]):[0-5]\d$')
-    end: str = Field(pattern=r'^(?:(?:[01]\d|2[0-3]):[0-5]\d|24:00)$')
-
-
-class Edit(BaseModel):
-    model_config = {'extra': 'forbid'}
-    remove_ids: list[str] = Field(description='ID временных блоков задач для удаления/переноса. Постоянные события удалить нельзя.')
-    add: list[TaskBlock] = Field(description='Новые блоки с точными датами и часами. Для переноса удали прежний ID и добавь новый блок одним вызовом.')
-
-
 READ_TOOL = {'type': 'function', 'name': 'read_current_plan', 'strict': True,
-    'description': 'Прочитать весь текущий черновик: все блоки задач, недельный режим, постоянный календарь, исключения по датам и остаток работы. Используй перед вставкой новых блоков.',
+    'description': 'Прочитать весь текущий черновик: все блоки задач, недельный режим, постоянный календарь, исключения по датам и остаток работы. Размещение выполняет reorder_tasks.',
     'parameters': {'type': 'object', 'properties': {}, 'required': [], 'additionalProperties': False}}
-EDIT_TOOL = {'type': 'function', 'name': 'edit_task_blocks', 'strict': True,
-    'description': 'Вставить блоки задач в текущий план или перенести выбранные блоки. Остальной план сохраняется. Время блока включает концентрацию. Проверяет рабочие окна, отдых, пересечения, объём работы и жёсткие сроки. При ошибке ничего не меняет. Возвращает только добавленные/удалённые блоки и остаток работы. Используй рассчитанные free_windows; частичное размещение допустимо.',
-    'parameters': Edit.model_json_schema()}
 
 
 def initial(previous, expected, now, timezone_name):
@@ -79,6 +59,9 @@ def validate(draft, week, plans, tasks, now):
         left = origin + timedelta(minutes=block['start'])
         right = left + timedelta(minutes=block['minutes'])
         label = f'Блок {block["id"]}, задача {task_id}'
+        opening = planning.available_from(plan, week['timezone'])
+        if opening is not None and left < opening:
+            raise ValueError(label + ': выполнение ещё недоступно; блок начинается до открытия задания')
         if left < datetime.fromisoformat(now):
             raise ValueError(label + ': начало уже в прошлом; перенеси блок')
         if previous_end is not None and left < previous_end:
@@ -99,49 +82,17 @@ def validate(draft, week, plans, tasks, now):
                 break
         if not fits:
             raise ValueError(label + ': не помещается в свободное рабочее окно; прочитай план или измени режим даты через plan_day')
-        raw = tasks_by_id[task_id].get('deadline')
+        raw = tasks_by_id.get(task_id, {}).get('deadline')
         if raw and plan.get('deadline_policy', 'soft') != 'soft':
             deadline = datetime.fromisoformat(raw.replace('Z', '+00:00')) if isinstance(raw, str) else raw
             if deadline.tzinfo is None:
                 deadline = deadline.replace(tzinfo=timezone.utc)
             if right > deadline:
                 raise ValueError(label + ': заканчивается после жёсткого дедлайна')
+    planning.validate_load(draft['blocks'], week, draft['start_at'])
     for item in remaining(draft, plans, list(plans)):
         if item.get('excess_work_minutes'):
             raise ValueError(f'Задача {item["task_id"]}: запланировано лишних {item["excess_work_minutes"]} минут; удали/сократи блоки или обоснованно уточни оценку')
-
-
-def edit(arguments, draft, week, plans, expected, tasks, now):
-    body = Edit.model_validate_json(arguments)
-    if set(plans) != set(expected):
-        raise ValueError('Сначала оцени все задачи через plan_tasks')
-    known = {block['id'] for block in draft['blocks']}
-    if len(set(body.remove_ids)) != len(body.remove_ids) or set(body.remove_ids) - known:
-        raise ValueError('remove_ids: нужны уникальные ID существующих временных блоков задач')
-    candidate = dict(draft, blocks=[block for block in draft['blocks'] if block['id'] not in body.remove_ids])
-    origin = datetime.fromisoformat(draft['start_at'])
-    zone = ZoneInfo(week['timezone'])
-    added = []
-    for item in body.add:
-        if item.task_id not in expected or item.end <= item.start:
-            raise ValueError('add: неизвестный task_id или end <= start; блок через полночь раздели')
-        midnight = datetime.combine(datetime.fromisoformat(item.date).date(), time(), zone)
-        if not 0 <= (midnight.date() - origin.astimezone(zone).date()).days <= 6:
-            raise ValueError('add.date: выбери дату от начала текущего плана до конца текущей недели (7 дней). Задачи на более поздний срок не размещай в таймлайн.')
-        sh, sm = map(int, item.start.split(':'))
-        eh, em = map(int, item.end.split(':'))
-        left = (midnight + timedelta(hours=sh, minutes=sm)).astimezone(timezone.utc)
-        right = (midnight + timedelta(hours=eh, minutes=em)).astimezone(timezone.utc)
-        block = {'id': uuid4().hex, 'kind': 'task', 'task_id': item.task_id, 'permanent': False,
-                 'start': int((left - origin).total_seconds() / 60), 'minutes': int((right - left).total_seconds() / 60),
-                 'focus_minutes': plans[item.task_id]['focus_minutes'], 'title': ''}
-        candidate['blocks'].append(block)
-        added.append(block)
-    candidate['blocks'].sort(key=lambda value: value['start'])
-    validate(candidate, week, plans, tasks, now)
-    return candidate, {'added_blocks': added, 'removed_ids': body.remove_ids,
-                       'remaining': remaining(candidate, plans, expected),
-                       'free_windows': planning.free_windows(week, draft['start_at'], candidate['blocks'])}
 
 
 def calendar_blocks(draft, week):

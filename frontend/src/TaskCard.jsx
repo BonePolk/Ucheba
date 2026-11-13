@@ -1,7 +1,7 @@
 import { Badge, Button, Checkbox, Group, Menu, Paper, Select, Stack, Text } from '@mantine/core';
 import dayjs from 'dayjs';
 import { priorities, statuses } from './TaskForm';
-import RankingAssessment from './RankingAssessment';
+import RankingAssessment, { DeadlineRisk } from './RankingAssessment';
 
 export default function TaskCard({ task, archived, completing, busy, removing, position, assessment, onUpdate, onEdit, onRemove, overdue, agents }) {
   let context = {};
@@ -26,7 +26,7 @@ export default function TaskCard({ task, archived, completing, busy, removing, p
     <Group gap="sm" wrap="nowrap" align="start" mt="xs">
       <Checkbox mt={4} aria-label={`Выполнено: ${task.title}`} checked={done} disabled={busy || archived} onChange={(event) => onUpdate({ status: event.currentTarget.checked ? 'done' : 'todo' })} />
       <Stack gap={5} style={{ minWidth: 0, flex: 1 }}>
-        <Text component="a" href={`/?task=${task.id}`} fw={600} c="inherit" className="task-card-title" td={done ? 'line-through' : undefined}>{task.title}</Text>
+        <div><Text component="a" href={`/?task=${task.id}`} fw={600} c="inherit" className="task-card-title" td={done ? 'line-through' : undefined}>{task.title}</Text>{!done && !archived && <DeadlineRisk reason={assessment?.deadline_risk} />}</div>
         {task.description && <Text size="sm" c="dimmed" lineClamp={2}>{task.description}</Text>}
       </Stack>
     </Group>

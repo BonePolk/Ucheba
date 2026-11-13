@@ -61,6 +61,8 @@ BROWSER_NAMES = {tool['name'] for tool in BROWSER_TOOLS}
 
 
 async def run_browser_tool(name, args, request, progress, known_elements):
+    if name != 'browser_sites':
+        progress.update(browser_used=True)
     if name == 'browser_wait_for_user':
         import json
         message = args.get('message')

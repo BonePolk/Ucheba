@@ -18,6 +18,7 @@ class Step(BaseModel):
 class Plan(BaseModel):
     model_config = {'extra': 'forbid'}
     task_id: int
+    available_from: datetime | None = Field(description='Самое раннее начало выполнения из контекста: дата/время открытия контрольной, выдачи задания или доступа. ISO 8601 с часовым поясом; если известна только дата — местная полночь этой даты. null только при отсутствии ограничения. Открытие не является дедлайном; не планируй выполнение до него.')
     deadline_policy: Literal['soft', 'finish_before', 'expires'] = Field(description='soft: после срока можно; finish_before: необходимо завершить до срока; expires: после срока выполнение или сдача недопустимы. Выбирай по фактам из контекста.')
     focus_minutes: int = Field(ge=10, le=30, description='Время на концентрацию при начале/возобновлении задачи. Этапы steps не включают это время.')
     steps: list[Step] = Field(min_length=1)
@@ -48,42 +49,9 @@ class Order(BaseModel):
 
 ORDER_TOOL = {
     'type': 'function', 'name': 'reorder_tasks', 'strict': True,
-    'description': 'Зафиксировать общий порядок задач и проверить текущие точные блоки, размещённые через edit_task_blocks. Пересчитать время, нагрузку и результаты. Сам не добавляет и не перемещает блоки.',
+    'description': 'Задать смысловой порядок всех задач. Python сам разместит работу с учётом жёстких сроков, нагрузки, режима и подходящих прошлых блоков. Возвращает проверенный план, остаток и конфликты. После изменений оценок/режима вызови снова.',
     'parameters': Order.model_json_schema(),
 }
-
-
-def rest_timeline(order, plans):
-    blocks = []
-    elapsed = daily = 0
-
-    def add(key, kind, minutes, task_id=None):
-        nonlocal elapsed
-        blocks.append({'id': key, 'kind': kind, 'task_id': task_id,
-                       'start': elapsed, 'minutes': minutes})
-        elapsed += minutes
-
-    for task_id in order:
-        remaining = plans[task_id]['max_minutes']
-        part = 0
-        while remaining > 0:
-            # Условный день: 6 часов работы, еда, перерывы, личное время и сон.
-            if daily == 360:
-                day = elapsed // 1440
-                add(f'meal-end-{day}', 'meal', 60)
-                add(f'personal-{day}', 'personal', 450)
-                add(f'sleep-{day}', 'sleep', 480)
-                daily = 0
-            elif daily and daily % 90 == 0:
-                day = elapsed // 1440
-                kind = 'meal' if daily == 180 else 'break'
-                add(f'{kind}-{day}-{daily}', kind, 60 if kind == 'meal' else 15)
-            minutes = min(remaining, 90 - daily % 90)
-            add(f'task-{task_id}-{part}', 'task', minutes, task_id)
-            remaining -= minutes
-            daily += minutes
-            part += 1
-    return blocks
 
 
 def hard_deadlines(plans, tasks):
@@ -96,98 +64,166 @@ def hard_deadlines(plans, tasks):
     return result
 
 
-def weekly_timeline(order, plans, week, now, previous=None, tasks=()):
+def available_from(plan, timezone_name):
+    raw = plan.get('available_from')
+    if raw is None:
+        return None
+    value = datetime.fromisoformat(raw.replace('Z', '+00:00')) if isinstance(raw, str) else raw
+    return value.replace(tzinfo=ZoneInfo(timezone_name)) if value.tzinfo is None else value
+
+
+class LoadLimits(BaseModel):
+    model_config = {'extra': 'forbid'}
+    max_session_minutes: int = Field(ge=1)
+    break_minutes: int = Field(ge=1)
+    max_daily_minutes: int = Field(ge=1)
+
+
+def load_limits(week):
+    return {'max_session_minutes': 90, 'break_minutes': 15, 'max_daily_minutes': 360} | (week.get('load_limits') or {})
+
+
+def validate_load(blocks, week, now):
+    limits = load_limits(week)
+    origin = datetime.fromisoformat(now)
     zone = ZoneInfo(week['timezone'])
-    start = datetime.fromisoformat(now).astimezone(timezone.utc)
-    day = start.astimezone(zone).date()
-    remaining = {task_id: plans[task_id].get('work_max_minutes', plans[task_id]['max_minutes']) for task_id in order}
-    todo = [task_id for task_id in order if remaining[task_id] > 0]
-    if not todo:
-        return []
-    blocks = []
-    cursor = start
-    preferred = {}
-    if previous and previous.get('start_at'):
-        origin = datetime.fromisoformat(previous['start_at']).astimezone(timezone.utc)
-        for block in previous.get('blocks', []):
-            if block['kind'] == 'task' and not block.get('permanent'):
-                target = origin + timedelta(minutes=block['start'])
-                if target >= start:
-                    preferred.setdefault(block['task_id'], target)
+    daily = {}
+    streak = 0
+    previous_end = None
+    for block in sorted(blocks, key=lambda item: item['start']):
+        if block['kind'] != 'task' or block.get('permanent'):
+            continue
+        day = (origin + timedelta(minutes=block['start'])).astimezone(zone).date()
+        daily[day] = daily.get(day, 0) + block['minutes']
+        if previous_end is None or block['start'] - previous_end >= limits['break_minutes']:
+            streak = 0
+        streak += block['minutes']
+        if streak > limits['max_session_minutes'] or daily[day] > limits['max_daily_minutes']:
+            raise ValueError(f'{day}: превышена согласованная нагрузка с учётом концентрации и перерывов')
+        previous_end = block['start'] + block['minutes']
+
+
+def capacity_before(windows, deadline, daily_limit, not_before=None):
+    daily = {}
+    for window in windows:
+        start = datetime.fromisoformat(window['start_at'])
+        if not_before is not None:
+            start = max(start, not_before)
+        minutes = max(0, int((min(deadline, datetime.fromisoformat(window['end_at'])) - start).total_seconds() / 60))
+        daily[window['date']] = min(daily_limit, daily.get(window['date'], 0) + minutes)
+    return sum(daily.values())
+
+
+def allocate(order, plans, week, now, kept, deadlines, tasks):
+    """Жёсткие сроки — раньше; остальная работа — сессиями по кругу и по нагрузке дней."""
+    from uuid import uuid4
+    origin = datetime.fromisoformat(now)
+    zone = ZoneInfo(week['timezone'])
+    limits = load_limits(week)
+    blocks = list(kept)
+    openings = {task_id: available_from(plans[task_id], week['timezone']) for task_id in order}
+    remaining = {task_id: plans[task_id]['work_max_minutes'] - sum(
+        block['minutes'] - block['focus_minutes'] for block in blocks if block['task_id'] == task_id) for task_id in order}
+    windows = free_windows(week, now)
     reserved = {slot['task_id'] for slots in week.get('day_plans', {}).values() for slot in slots if slot.get('task_id') is not None}
+    capacities = {}
+    for window in windows:
+        capacities[window['date']] = min(limits['max_daily_minutes'], capacities.get(window['date'], 0) + window['minutes'])
+
+    def add_session(task_id, urgent):
+        if remaining[task_id] <= 0:
+            return False
+        daily = {}
+        for block in blocks:
+            day = (origin + timedelta(minutes=block['start'])).astimezone(zone).date().isoformat()
+            daily[day] = daily.get(day, 0) + block['minutes']
+        focus = plans[task_id]['focus_minutes']
+        raw_deadline = next((task.get('deadline') for task in tasks if task['id'] == task_id), None)
+        soft_deadline = datetime.fromisoformat(raw_deadline.replace('Z', '+00:00')) if isinstance(raw_deadline, str) else raw_deadline
+        if soft_deadline is not None and soft_deadline.tzinfo is None:
+            soft_deadline = soft_deadline.replace(tzinfo=timezone.utc)
+        candidates = []
+        for window in free_windows(week, now, blocks, gap=limits['break_minutes']):
+            if window['task_id'] not in (None, task_id) or task_id in reserved and window['task_id'] != task_id:
+                continue
+            left, right = datetime.fromisoformat(window['start_at']), datetime.fromisoformat(window['end_at'])
+            if openings[task_id] is not None:
+                left = max(left, openings[task_id])
+            right = min(right, deadlines.get(task_id, right))
+            budget = min(int((right - left).total_seconds() / 60), limits['max_session_minutes'],
+                         limits['max_daily_minutes'] - daily.get(window['date'], 0))
+            useful = min(remaining[task_id], budget - focus)
+            if useful < min(30, remaining[task_id], limits['max_session_minutes'] - focus, limits['max_daily_minutes'] - focus) or useful <= 0:
+                continue
+            immediate = urgent and deadlines[task_id].astimezone(zone).date() == origin.astimezone(zone).date()
+            # Небольшую работу можно закончить сегодня; длинную распределяем порциями нагрузки по дням.
+            score = (left,) if immediate else (
+                bool(soft_deadline and left + timedelta(minutes=focus + useful) > soft_deadline),
+                int(daily.get(window['date'], 0) / max(1, min(capacities[window['date']], 2 * limits['max_session_minutes']))), left)
+            candidates.append((score, left, useful))
+        if not candidates:
+            return False
+        _, left, useful = min(candidates)
+        blocks.append({'id': uuid4().hex, 'kind': 'task', 'task_id': task_id, 'title': '', 'permanent': False,
+                       'start': int((left - origin).total_seconds() / 60), 'minutes': focus + useful, 'focus_minutes': focus})
+        remaining[task_id] -= useful
+        return True
+
+    # Не отдаём всю неделю заведомо невыполнимой задаче в ущерб достижимым срокам.
+    impossible = {task_id for task_id, deadline in deadlines.items() if remaining[task_id] + plans[task_id]['focus_minutes'] > capacity_before(
+        [window for window in windows if window['task_id'] in (None, task_id)], deadline, limits['max_daily_minutes'], openings[task_id])}
+    horizon = datetime.combine(origin.astimezone(zone).date() + timedelta(days=7), time(), zone)
+    urgent = sorted((task_id for task_id in deadlines if deadlines[task_id] <= horizon and task_id not in impossible), key=lambda value: (deadlines[value], order.index(value)))
+    for task_id in urgent:
+        while add_session(task_id, True):
+            pass
+    flexible = [task_id for task_id in order if task_id not in urgent]
+    while True:
+        changed = False
+        for task_id in flexible:
+            changed = add_session(task_id, task_id in deadlines) or changed
+        if not changed:
+            break
+    return sorted(blocks, key=lambda item: item['start'])
+
+
+def weekly_timeline(order, plans, week, now, previous=None, tasks=()):
+    import blocks as block_plan
+    draft = block_plan.initial(previous, order, now, week['timezone'])
+    kept = []
+    for old in draft['blocks']:
+        task_id = old['task_id']
+        focus = plans[task_id]['focus_minutes']
+        left = plans[task_id]['work_max_minutes'] - sum(b['minutes'] - b['focus_minutes'] for b in kept if b['task_id'] == task_id)
+        block = old | {'focus_minutes': focus, 'minutes': min(old['minutes'], focus + left)}
+        try:
+            block_plan.validate(draft | {'blocks': kept + [block]}, week, plans, tasks, now)
+        except ValueError:
+            continue  # Изменённый календарь/объём/нагрузка может сделать прежний блок непригодным.
+        kept.append(block)
     deadlines = hard_deadlines(plans, tasks)
-    parts = {}
+    placed = allocate(order, plans, week, draft['start_at'], kept, deadlines, tasks)
 
-    def add(kind, end, task_id=None, title='', permanent=False, focus_minutes=0):
-        nonlocal cursor
-        length = int((end - cursor).total_seconds() / 60)
-        if length <= 0:
-            return
-        key = f'task-{task_id}' if task_id is not None else kind
-        part = parts.get(key, 0)
-        parts[key] = part + 1
-        blocks.append({'id': f'{key}-{part}', 'kind': kind, 'task_id': task_id,
-                       'title': title, 'permanent': permanent, 'focus_minutes': focus_minutes, 'start': int((cursor - start).total_seconds() / 60), 'minutes': length})
-        cursor = end
+    horizon = datetime.combine(datetime.fromisoformat(now).astimezone(ZoneInfo(week['timezone'])).date() + timedelta(days=7), time(), ZoneInfo(week['timezone']))
 
-    for offset in range(7):
-        date = day + timedelta(days=offset)
-        midnight = datetime.combine(date, time(), zone)
-        slots = day_slots(week, date)
-        slots = slots + [{'start': '24:00', 'end': '24:00', 'kind': 'personal', 'title': ''}]
-        for slot in slots:
-            def at(value):
-                hour, minute = map(int, value.split(':'))
-                return (midnight + timedelta(hours=hour, minutes=minute)).astimezone(timezone.utc)
-            left, right = at(slot['start']), at(slot['end'])
-            if right <= cursor:
-                continue
-            if left > cursor:
-                cursor = left  # Свободное время не обязано становиться событием.
-            if slot['kind'] != 'work':
-                add(slot['kind'], right, slot.get('task_id'), title=slot.get('title', ''), permanent=bool(slot.get('id')))
-                continue
-            while cursor < right and todo:
-                available = int((right - cursor).total_seconds() / 60)
-                if available <= 0:
-                    cursor = right
-                    break
-                task_id = slot.get('task_id')
-                if task_id is None:
-                    task_id = next((value for value in todo if value not in reserved), None)
-                if task_id not in todo:
-                    break  # Именное окно не заполняем другой задачей.
-                target = preferred.pop(task_id, None) if slot.get('task_id') is None else None
-                if target and target > cursor:
-                    cursor = min(target, right)
-                    if cursor == right:
-                        preferred[task_id] = target
-                        break
-                    available = int((right - cursor).total_seconds() / 60)
-                task_right = min(right, deadlines.get(task_id, right))
-                available = int((task_right - cursor).total_seconds() / 60)
-                if available <= 0:
-                    todo.remove(task_id)
-                    continue
-                focus = plans[task_id].get('focus_minutes', 20)
-                minimum_work = min(30, remaining[task_id])
-                if available < focus + minimum_work:
-                    if task_right < right:
-                        todo.remove(task_id)
-                        continue
-                    cursor = right  # Не начинаем большую задачу ради десяти минут работы.
-                    break
-                capacity = available - focus
-                amount = min(capacity, remaining[task_id])
-                if remaining[task_id] > capacity and remaining[task_id] - capacity < 30:
-                    amount = min(capacity, (remaining[task_id] + 1) // 2)
-                add('task', cursor + timedelta(minutes=focus + amount), task_id, focus_minutes=focus)
-                remaining[task_id] -= amount
-                if remaining[task_id] == 0:
-                    todo.remove(task_id)
-        if not todo:
-            return blocks
-    return blocks
+    def missed_hard(blocks):
+        missing = [item['remaining_work_minutes'] for item in block_plan.remaining(draft | {'blocks': blocks}, plans, order)
+                   if item['task_id'] in deadlines and deadlines[item['task_id']] <= horizon]
+        return sum(value > 0 for value in missing), sum(missing)
+
+    # Старые часы — предпочтение. Освобождаем их только ради улучшения жёстких сроков.
+    if kept and missed_hard(placed)[0]:
+        missing = [deadlines[item['task_id']] for item in block_plan.remaining(draft | {'blocks': placed}, plans, order)
+                   if item['remaining_work_minutes'] and item['task_id'] in deadlines and deadlines[item['task_id']] <= horizon]
+        zone = ZoneInfo(week['timezone'])
+        release_before = datetime.combine(max(missing).astimezone(zone).date() + timedelta(days=1), time(), zone)
+        origin = datetime.fromisoformat(draft['start_at'])
+        unaffected = [block for block in kept if origin + timedelta(minutes=block['start']) >= release_before
+                      or block['task_id'] in deadlines and deadlines[block['task_id']] < min(missing)]
+        released = allocate(order, plans, week, draft['start_at'], unaffected, deadlines, tasks)
+        if missed_hard(released) < missed_hard(placed):
+            placed = released
+    return placed
 
 
 def validate_blocks(blocks, week=None, now=None):
@@ -220,7 +256,7 @@ def validate_blocks(blocks, week=None, now=None):
             day += timedelta(days=1)
 
 
-def free_windows(week, now, blocks=()):
+def free_windows(week, now, blocks=(), gap=0):
     origin = datetime.fromisoformat(now)
     zone = ZoneInfo(week['timezone'])
     first = origin.astimezone(zone).date()
@@ -238,8 +274,8 @@ def free_windows(week, now, blocks=()):
             for block in blocks:
                 if block['kind'] != 'task' or block.get('permanent'):
                     continue
-                left = origin + timedelta(minutes=block['start'])
-                right = left + timedelta(minutes=block['minutes'])
+                left = origin + timedelta(minutes=block['start'] - gap)
+                right = origin + timedelta(minutes=block['start'] + block['minutes'] + gap)
                 pieces = [(a, b) for start, end in pieces for a, b in
                           ((start, min(end, left)), (max(start, right), end)) if b > a]
             for left, right in pieces:
@@ -251,7 +287,7 @@ def free_windows(week, now, blocks=()):
     return result
 
 
-def reorder(arguments, plans, expected, week=None, now=None, previous=None, tasks=(), placed_blocks=None):
+def reorder(arguments, plans, expected, week, now, previous=None, tasks=()):
     if now:
         clock = datetime.fromisoformat(now).astimezone(timezone.utc)
         minute = clock.replace(second=0, microsecond=0)
@@ -280,22 +316,18 @@ def reorder(arguments, plans, expected, week=None, now=None, previous=None, task
         timeline.append({'task_id': task_id, 'start_active_minutes': start,
                          'end_active_minutes': high,
                          'expected_result': plan['expected_result']})
-    timeline_error = None
+    import blocks as block_plan
+    validate_rest(week, now)
     deadline_conflicts = []
-    scheduled_order = list(order)
     tasks_by_id = {task['id']: task for task in tasks}
-    preserved = previous if request.keep_previous_times else None
-    try:
-        if placed_blocks is not None:
-            blocks = list(placed_blocks)
-        elif week and now:
-            blocks = weekly_timeline(scheduled_order, plans, week, now, preserved, tasks)
-        else:
-            blocks = rest_timeline(scheduled_order, plans)
-        validate_blocks(blocks, week, now)
-    except ValueError as exc:
-        blocks = []
-        timeline_error = str(exc)
+    limits = load_limits(week)
+    if any(plan['work_max_minutes'] > 0 and plan['focus_minutes'] >= min(limits['max_session_minutes'], limits['max_daily_minutes']) for plan in plans.values()):
+        raise ValueError('Лимиты сессии и дня должны вмещать концентрацию и полезную работу. Уточни реальные ограничения.')
+    placed = weekly_timeline(order, plans, week, now, previous if request.keep_previous_times else None, tasks)
+    draft = {'start_at': now, 'timezone': week['timezone'], 'blocks': placed}
+    block_plan.validate(draft, week, plans, tasks, now)
+    blocks = block_plan.calendar_blocks(draft, week)
+    validate_blocks(blocks, week, now)
     if now:
         origin = datetime.fromisoformat(now).astimezone(timezone.utc)
         horizon = datetime.combine(origin.astimezone(ZoneInfo(week['timezone'])).date() + timedelta(days=7), time(), ZoneInfo(week['timezone'])) if week else origin
@@ -314,12 +346,11 @@ def reorder(arguments, plans, expected, week=None, now=None, previous=None, task
             required = plans[task_id]['work_max_minutes']
             incomplete = assigned < required and deadline <= horizon
             if required > 0 and (deadline < origin or finish is not None and finish > deadline or incomplete):
-                capacity = sum(max(0, int((min(deadline, datetime.fromisoformat(window['end_at'])) - datetime.fromisoformat(window['start_at'])).total_seconds() / 60))
-                               for window in windows if window['task_id'] in (None, task_id))
+                capacity = capacity_before([window for window in windows if window['task_id'] in (None, task_id)], deadline, limits['max_daily_minutes'], available_from(plans[task_id], week['timezone']))
                 due = [plans[other_id]['work_max_minutes'] + plans[other_id]['focus_minutes']
                        for other_id, due_at in deadlines.items()
                        if due_at <= deadline and plans[other_id]['work_max_minutes'] > 0]
-                pooled_capacity = sum(max(0, int((min(deadline, datetime.fromisoformat(window['end_at'])) - datetime.fromisoformat(window['start_at'])).total_seconds() / 60)) for window in windows)
+                pooled_capacity = capacity_before(windows, deadline, limits['max_daily_minutes'])
                 impossible = bool(week and deadline <= horizon and (capacity < required + plans[task_id]['focus_minutes'] or sum(due) > pooled_capacity))
                 reason = (f"{task['title']}: свободного времени до жёсткого срока недостаточно для обязательного объёма."
                           if impossible else f"{task['title']}: полное завершение к жёсткому сроку в этом плане не обеспечено.")
@@ -358,10 +389,11 @@ def reorder(arguments, plans, expected, week=None, now=None, previous=None, task
     return {'focus_minutes': focus_total, 'task_ids': order, 'min_minutes': low, 'max_minutes': high,
             'wait_minutes': wait, 'effort_minutes': effort, 'potential_rewards': rewards,
             'timeline': timeline,
-            'blocks': blocks, 'remaining': remaining, 'timeline_error': timeline_error, 'deadline_conflicts': deadline_conflicts,
+            'blocks': blocks, 'remaining': remaining, 'timeline_error': None, 'deadline_conflicts': deadline_conflicts,
             'start_at': now if week else None,
             'timezone': week['timezone'] if week else None,
-            'rest_assumption': 'Личное расписание и временный режим Ameba.' if week else 'Условные дни: 6 ч работы, еда и сон. Это не личное расписание.',
+            'rest_assumption': week.get('load_assumption', 'Допущение: сессия до 90 мин, перерыв от 15 мин, нагрузка до 360 мин в день, включая концентрацию.'),
+            'load_limits': load_limits(week),
             'note': 'Активное время без сна и еды. Результаты приблизительны; баллы не гарантированы. '
                     'Смена порядка сама по себе не уменьшает объём работы; для этого нужно уточнить планы.'}
 
@@ -385,7 +417,7 @@ def calculate(arguments, expected, completed=None):
         low = work_low + (plan.focus_minutes if work_high else 0)
         high = work_high + (plan.focus_minutes if work_high else 0)
         wait = sum(step.wait_minutes for step in plan.steps)
-        result[plan.task_id] = plan.model_dump() | {
+        result[plan.task_id] = plan.model_dump(mode='json') | {
             'work_min_minutes': work_low, 'work_max_minutes': work_high,
             'total_work_min_minutes': total_low, 'total_work_max_minutes': total_high, 'completed_work_minutes': confirmed,
             'min_minutes': low, 'max_minutes': high, 'wait_minutes': wait,
@@ -407,6 +439,7 @@ class RestPlan(BaseModel):
     model_config = {'extra': 'forbid'}
     patterns: list[RestPattern] = Field(max_length=100)
     assumption: str = Field(min_length=1, max_length=500)
+    load_limits: LoadLimits | None = Field(description='Числовые ограничения из настроек/памяти владельца. null — явно обозначенные допущения: сессия 90, перерыв 15, день 360 минут с концентрацией.')
 
 
 REST_TOOL = {'type': 'function', 'name': 'plan_rest', 'strict': True,
@@ -423,6 +456,7 @@ def with_rest(week, now, arguments=None, timezone_name='UTC'):
         for slots in configured['days']:
             for slot in slots:
                 slot['temporary'] = True
+    configured['work_restricted'] = any(slot['kind'] == 'work' and not slot.get('temporary') for day in configured['days'] for slot in day) or any(event['kind'] == 'work' for event in configured.get('calendar_events', []))
     # Если владелец задал только занятия/занятость, рабочие окна — допущение плана.
     has_work = any(slot['kind'] == 'work' for day in configured['days'] for slot in day)
     has_work = has_work or any(event['kind'] == 'work' for event in configured.get('calendar_events', []))
@@ -433,6 +467,11 @@ def with_rest(week, now, arguments=None, timezone_name='UTC'):
     if arguments is None:
         return configured
     body = RestPlan.model_validate_json(arguments)
+    if body.load_limits is not None:
+        configured['load_limits'] = body.load_limits.model_dump()
+        configured['load_assumption'] = body.assumption
+    elif not configured.get('load_limits'):
+        configured['load_assumption'] = body.assumption + ' Допущение нагрузки: сессия до 90 мин, перерыв от 15 мин, день до 360 мин с концентрацией.'
     configured['days'] = [[slot for slot in day if not slot.get('temporary') or slot['kind'] == 'work']
                           for day in configured['days']]
     for index, pattern in enumerate(body.patterns):
@@ -475,6 +514,10 @@ def restore_week(week, previous, now, timezone_name):
             for weekday in pattern['weekdays']:
                 configured['days'][weekday].append(dict(pattern, temporary=True))
     configured['day_plans'] = previous.get('day_plans', {})
+    configured['approved_work_windows'] = previous.get('approved_work_windows', {})
+    configured['load_limits'] = previous.get('load_limits', {})
+    if previous.get('load_limits') and previous.get('schedule', {}).get('rest_assumption'):
+        configured['load_assumption'] = previous['schedule']['rest_assumption']
     return configured
 
 
@@ -495,8 +538,23 @@ class DayPlan(BaseModel):
 
 
 DAY_TOOL = {'type': 'function', 'name': 'plan_day', 'strict': True,
-    'description': 'Настроить или пересобрать одну конкретную дату. Передай рабочие окна и при необходимости новый отдых. Неуказанные виды отдыха сохраняются из текущего плана дня. Можно расширить рабочие окна перед дедлайном и выделить разным задачам разные часы. task — именное рабочее окно с учётом концентрации; одна задача может иметь окна в разные дни. Постоянные события не меняются. После изменений вызови reorder_tasks.',
+    'description': 'Настроить или пересобрать одну конкретную дату. Передай рабочие окна и при необходимости новый отдых. Неуказанные виды отдыха сохраняются из текущего плана дня. Выход за рабочие границы владельца потребует его подтверждения через приложение. Можно ограничить окна предпочтениями и выделить разным задачам разные часы. task — именное рабочее окно с учётом концентрации; одна задача может иметь окна в разные дни. Постоянные события не меняются. После изменений вызови reorder_tasks.',
     'parameters': DayPlan.model_json_schema()}
+
+
+def work_bounds(week, day):
+    working = dict(week, days=[[slot for slot in slots if slot['kind'] == 'work'] for slots in week['days']],
+                   events=[slot for slot in week.get('events', []) if slot['kind'] == 'work'],
+                   calendar_events=[slot for slot in week.get('calendar_events', []) if slot['kind'] == 'work'])
+    intervals = [(slot['start'], slot['end']) for slot in slots_for_date(working, day)]
+    intervals += [(slot['start'], slot['end']) for slot in week.get('approved_work_windows', {}).get(day.isoformat(), [])]
+    merged = []
+    for start, end in sorted(intervals):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+        else:
+            merged.append((start, end))
+    return merged
 
 
 def day_slots(week, day):
@@ -508,10 +566,17 @@ def day_slots(week, day):
                  calendar_events=[event for event in week.get('calendar_events', []) if event['kind'] != 'work'])
     daily['days'][day.weekday()] = [slot for slot in week['days'][day.weekday()]
                                   if not slot.get('temporary') and slot['kind'] != 'work'] + override
-    return slots_for_date(daily, day)
+    effective = slots_for_date(daily, day)
+    if week.get('work_restricted'):
+        bounds = work_bounds(week, day)
+        effective = [slot for slot in effective if slot['kind'] != 'work'] + [
+            slot | {'start': max(slot['start'], start), 'end': min(slot['end'], end)}
+            for slot in effective if slot['kind'] == 'work' for start, end in bounds
+            if slot['start'] < end and slot['end'] > start]
+    return sorted(effective, key=lambda item: item['start'])
 
 
-def plan_day(arguments, week, expected, now):
+def plan_day(arguments, week, expected, now, confirmed=False):
     from copy import deepcopy
     body = DayPlan.model_validate_json(arguments)
     day = calendar_date.fromisoformat(body.date)
@@ -522,6 +587,7 @@ def plan_day(arguments, week, expected, now):
     overrides = configured.setdefault('day_plans', {})
     if not body.slots:
         overrides.pop(body.date, None)
+        configured.setdefault('approved_work_windows', {}).pop(body.date, None)
         return configured, {'date': body.date, 'status': 'reset'}
     slots = []
     # При изменении рабочих часов не заставляем модель заново описывать сон и еду.
@@ -539,6 +605,12 @@ def plan_day(arguments, week, expected, now):
                and ((item.kind in ('work', 'task')) == (slot['kind'] == 'work')) for slot in slots):
             raise ValueError('Интервалы временного дня не должны пересекаться')
         slots.append(item.model_dump() | {'kind': 'work' if item.kind == 'task' else item.kind, 'temporary': True})
+    work = [slot for slot in slots if slot['kind'] == 'work']
+    if week.get('work_restricted') and any(not any(start <= slot['start'] and end >= slot['end']
+            for start, end in work_bounds(week, day)) for slot in work):
+        if not confirmed:
+            return week, {'status': 'needs_confirmation', 'date': body.date, 'work_windows': work}
+        configured.setdefault('approved_work_windows', {})[body.date] = work
     overrides[body.date] = slots
     effective = day_slots(configured, day)
     occupied = [slot for slot in effective if slot['kind'] != 'work']

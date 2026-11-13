@@ -1,5 +1,13 @@
 import { Badge, Group, Stack, Text, Tooltip } from '@mantine/core';
 
+export function DeadlineRisk({ reason }) {
+  return reason ? <Tooltip multiline w={260} label={`Большой риск не успеть: ${reason}`} events={{ hover: true, focus: true, touch: true }}>
+    <Text component="span" tabIndex={0} c="orange" ml={6} style={{ display: 'inline-flex', verticalAlign: 'middle', cursor: 'help' }} aria-label={`Большой риск не успеть: ${reason}`}>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M10.3 3.9 2 18.2A2 2 0 0 0 3.7 21h16.6a2 2 0 0 0 1.7-2.8L13.7 3.9a2 2 0 0 0-3.4 0Z" /><path d="M12 9v4m0 4h.01" /></svg>
+    </Text>
+  </Tooltip> : null;
+}
+
 export default function RankingAssessment({ assessment, compact = false }) {
   if (!assessment) return null;
   const plan = assessment.plan;

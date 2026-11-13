@@ -32,8 +32,7 @@ export default function MonocleBrowser({ active = false }) {
   useEffect(() => { if (active) setOpened(true); }, [active]);
   const { frame, error } = useBrowserScreen(opened || expanded);
   const image = frame ? `data:${frame.mime};base64,${frame.image}` : null;
-  if (!image) return null;
-  return <Paper withBorder p="xs" radius="md" maw={280} className="agent-browser"><Stack gap={6}>
+  return <Paper withBorder p="xs" radius="md" className="agent-browser"><Stack gap={6}>
     <Group gap="xs" justify="space-between"><Button variant="subtle" size="compact-xs" onClick={() => setOpened(!opened)}>{opened ? 'Скрыть браузер' : 'Браузер агента'}</Button><Button variant="subtle" size="compact-xs" onClick={() => setExpanded(true)}>{paused ? 'Пройти капчу / продолжить' : 'Увеличить ↗'}</Button></Group>
     <Collapse in={opened}>
       <div style={{ aspectRatio: `${frame?.width ?? 1100} / ${frame?.height ?? 750}` }}>{image ? <button type="button" onClick={() => setExpanded(true)} style={{ display: 'block', width: '100%', border: 0, padding: 0, background: 'none', cursor: 'zoom-in' }}><img width={frame?.width ?? 1100} height={frame?.height ?? 750} src={image} alt="Увеличить экран браузера агента" style={{ display: 'block', width: '100%', height: 'auto', borderRadius: 0 }} /></button> : <Text size="xs" c="dimmed">Браузер ещё не открыт.</Text>}</div>

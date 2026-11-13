@@ -9,8 +9,9 @@ function duration(minutes) {
 
 const rest = { break: 'Перерыв', meal: 'Еда', personal: 'Личное время', sleep: 'Сон' };
 
-export default function AgentTimeline({ tasks = [], finished = false, schedule, calendarOnly = false }) {
-  const compact = useMediaQuery('(max-width: 767px)', window.innerWidth < 768);
+export default function AgentTimeline({ tasks = [], finished = false, schedule, calendarOnly = false, compact: compactView }) {
+  const smallScreen = useMediaQuery('(max-width: 767px)', window.innerWidth < 768);
+  const compact = compactView ?? smallScreen;
   const [expanded, setExpanded] = useState(false);
   const chart = useRef(null);
   const seen = useRef(new Set());
@@ -70,14 +71,12 @@ export default function AgentTimeline({ tasks = [], finished = false, schedule, 
   }
   const agenda = [...blocks].filter((block) => block.kind !== 'work').sort((a, b) => a.start - b.start);
   return <Paper withBorder radius="md" p="sm"><Stack gap={8}>
-    {(schedule?.deadline_conflicts ?? []).map((item) => <Text key={item.task_id} size="xs" c="orange">{item.reason} Полное завершение к сроку не обеспечено.</Text>)}
     {agenda.some((block) => block.kind === 'task' && !block.permanent && origin && origin.getTime() + (block.start + block.minutes) * 60000 < Date.now()) && <Text size="xs" c="dimmed">Есть прошедшие блоки. Подтвердите выполненные минуты в задаче; без подтверждения работа остаётся незавершённой.</Text>}
-    {(schedule?.remaining ?? []).filter((item) => item.remaining_work_minutes > 0).map((item) => <Text key={item.task_id} size="xs" c="dimmed">{byId.get(item.task_id)?.title ?? `Задача ${item.task_id}`}: вне плана {duration(item.remaining_work_minutes)}</Text>)}
     <Group justify="space-between">
       <Tooltip multiline w={300} label={`${schedule?.rest_assumption ?? 'Время оценивается приблизительно'}${schedule?.start_at ? ` Начало: ${new Date(schedule.start_at).toLocaleString(undefined, { timeZone: schedule.timezone })}` : ''}`}><Text size="xs" c="dimmed">{calendarOnly ? 'Постоянное расписание' : finished ? 'Итоговый план' : 'План работы'}</Text></Tooltip>
       <Group gap={6}>{!finished && !calendarOnly && <Badge size="xs" variant="light" color="gray">Черновик</Badge>}<Text size="xs" fw={600}>{calendarOnly ? 'Учитывается до начала расчёта' : planned.length || schedule?.max_minutes != null ? `${duration(schedule?.max_minutes ?? planned.reduce((sum, task) => sum + task.plan.max_minutes, 0))} работы` : 'Оценивает время'}</Text></Group>
     </Group>
-    {schedule?.timeline_error ? <Text size="xs" c="yellow">Шкала не построена: {schedule.timeline_error}. Порядок задач сохранён.</Text> : compact ? <div className="plan-agenda">{(expanded ? agenda : agenda.slice(0, 6)).map((block) => {
+    {schedule?.timeline_error ? <Text size="xs" c="yellow">Шкала не построена: {schedule.timeline_error}. Порядок задач сохранён.</Text> : compact ? <div className={`plan-agenda${expanded ? ' is-expanded' : ''}`}>{(expanded ? agenda : agenda.slice(0, 6)).map((block) => {
       const task = byId.get(block.task_id);
       const start = schedule?.start_at ? new Date(new Date(schedule.start_at).getTime() + block.start * 60000) : null;
       const label = block.title || task?.title || rest[block.kind] || 'Занято';

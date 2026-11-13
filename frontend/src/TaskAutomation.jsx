@@ -68,7 +68,6 @@ function ContextForm({ taskId, context }) {
       <ContextFiles taskId={taskId} disabled={analyze.isPending || save.isPending} />
       <ContextBrowser taskId={taskId} disabled={analyze.isPending || save.isPending} />
     </Stack></details>
-    <AgentProgress taskId={taskId} providers={['monocle']} active={analyze.isPending || save.isPending} />
     {analyze.isSuccess && <Text size="sm">{analyze.data.status === 'ready' ? 'Контекста достаточно для оценки Ameba.' : 'Monocle запросил уточнения — ответь на вопросы ниже.'}</Text>}
     {context.data?.usage && <Text size="xs" c="dimmed">Последняя проверка: вход {context.data.usage.input_tokens ?? 'нет данных'}, выход {context.data.usage.output_tokens ?? 'нет данных'} токенов</Text>}
     {context.data?.questions?.length > 0 && <Alert color="yellow"><Stack gap="xs">{context.data.questions.map((question, i) => <Text key={i} size="sm">{question}</Text>)}</Stack></Alert>}
@@ -126,14 +125,12 @@ export default function TaskAutomation({ task, features = {} }) {
         <Button size="xs" loading={action.isPending && action.variables === 'arrodes'} disabled={action.isPending || arrodesRunning} onClick={() => action.mutate('arrodes')}>{resumeRunId ? 'Продолжить' : 'Выполнить'}</Button>
         {arrodesRunning && <Button variant="subtle" color="red" size="xs" loading={stop.isPending} onClick={() => stop.mutate()}>Остановить</Button>}
       </Group>
-      {(runs.data?.length > 0 || (action.isPending && action.variables === 'arrodes')) && (
-        <AgentProgress taskId={task.id} providers={['arrodes']} active={(action.isPending && action.variables === 'arrodes') || arrodesRunning} />
-      )}
       {stop.error && <Text c="red" size="sm">{stop.error.message}</Text>}
       {results[0] && <RunResult run={results[0]} disabled={arrodesRunning || action.isPending} onContinue={continueRun} />}
       {results.length > 1 && <details><summary style={{ cursor: 'pointer', fontSize: 13 }}>Предыдущие запуски · {results.length - 1}</summary><Stack gap="md" mt="sm">{results.slice(1).map((run) => <details key={run.id}><summary style={{ cursor: 'pointer', fontSize: 13 }}>{new Date(run.created_at).toLocaleString()} · {runStatus[run.status] ?? run.status}</summary><Stack mt="xs"><RunResult run={run} disabled={arrodesRunning || action.isPending} onContinue={continueRun} /></Stack></details>)}</Stack></details>}
     </Stack></Paper>}
     {features.ameba !== false && <Group><Button size="xs" variant="subtle" disabled={(action.isPending && !queue.data?.ameba_running) || queue.data?.browser_busy} onClick={() => action.mutate('ameba')}>{queue.data?.ameba_running ? 'Обновить при изменениях' : 'Обновить порядок Ameba'}</Button></Group>}
+    <AgentProgress taskId={task.id} providers={['monocle', 'arrodes', 'ameba'].filter((name) => features[name] !== false)} active={action.isPending || arrodesRunning} />
     {features.monocle !== false && <ContextForm key={task.id} taskId={task.id} context={context} />}
     {notice && <Alert color="purple">{notice}</Alert>}
     {(action.error || runs.error) && <Alert color="red">{(action.error || runs.error).message}</Alert>}

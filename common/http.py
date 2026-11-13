@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from common.rpc import require_service
 from common.identity import current_user_id
-from common.progress import get_progress, stream_progress
+from common.progress import get_progress, get_work_progress, stream_progress
 from common.agent_questions import Answer, answer_question
 
 
@@ -69,7 +69,7 @@ def private_app(name, lifespan=None):
                                  headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
     @app.get('/progress')
-    async def progress(task_id: int = 0):
-        return get_progress(task_id)
+    async def progress(task_id: int = 0, work: bool = False):
+        return get_work_progress() if work else get_progress(task_id)
 
     return app
