@@ -426,6 +426,7 @@ class PlanAdjustmentInput(BaseModel):
     task_pin: TaskPinInput | None = None
     estimate_override: EstimateOverrideInput | None = None
     reset: bool = False
+    clear_feedback: bool = False
 
 
 @router.post('/ameba/feedback')
@@ -442,6 +443,7 @@ async def ameba_adjust_plan(body: PlanAdjustmentInput):
         task_pin=body.task_pin.model_dump() if body.task_pin else None,
         estimate_override=body.estimate_override.model_dump() if body.estimate_override else None,
         reset=body.reset,
+        clear_feedback=body.clear_feedback,
     )
 
 
@@ -629,8 +631,18 @@ async def answer_context(task_id: int, body: ContextAnswer, background: bool = F
 
 
 class ContextFile(BaseModel):
-    name: str = Field(min_length=1, max_length=200)
-    content: str = Field(max_length=14 * 1024 * 1024)
+    name: str = Field(min_length=1, max_length=255)
+    content: str = Field(max_length=36 * 1024 * 1024)
+
+
+def _trim_filename(name: str, limit: int = 200) -> str:
+    clean = name.replace('\\', '/').split('/')[-1].strip() or 'file'
+    if len(clean) <= limit:
+        return clean
+    suffix = Path(clean).suffix
+    if 0 < len(suffix) < limit:
+        return clean[:limit - len(suffix)] + suffix
+    return clean[:limit]
 
 
 class WorkspaceFile(BaseModel):
@@ -653,7 +665,8 @@ async def workspace_tree():
 
 class WorkspaceUpload(BaseModel):
     path: str = Field(min_length=1, max_length=500)
-    content: str = Field(max_length=14 * 1024 * 1024)
+    content: str = Field(max_length=36 * 1024 * 1024)
+    overwrite: bool = False
 
 
 class WorkspaceArchive(BaseModel):
@@ -740,17 +753,22 @@ async def context_files(task_id: int):
 
 @router.post('/tasks/{task_id}/monocle/files')
 async def attach_context_file(task_id: int, body: ContextFile):
-    check_feature('monocle')
+    enabled = features()
+    if not (enabled['monocle'] or enabled['arrodes']):
+        check_feature('monocle')
     context.get_context(task_id)
     try:
         content = base64.b64decode(body.content, validate=True)
     except (ValueError, binascii.Error):
         raise HTTPException(422, 'Не удалось прочитать загруженный файл') from None
-    if not content or len(content) > 10 * 1024 * 1024:
-        raise HTTPException(413, 'Максимальный размер файла — 10 МБ')
+    if not content:
+        raise HTTPException(422, 'Файл пустой (0 байт)')
+    if len(content) > 25 * 1024 * 1024:
+        raise HTTPException(413, 'Максимальный размер файла — 25 МБ')
+    safe_name = _trim_filename(body.name)
     try:
-        async with httpx.AsyncClient(timeout=90) as client:
-            result = await client.post(f'http://monocle:8000/tasks/{task_id}/files', params={'name': body.name},
+        async with httpx.AsyncClient(timeout=120) as client:
+            result = await client.post(f'http://monocle:8000/tasks/{task_id}/files', params={'name': safe_name},
                 headers={'X-Service-Token': internal_token('monocle'), 'X-User-ID': str(user_id())}, content=content)
     except httpx.HTTPError:
         raise HTTPException(503, 'Хранилище файлов недоступно') from None

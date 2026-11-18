@@ -37,7 +37,7 @@ import { Input, Textarea } from '@/components/ui/input';
 import { SelectField } from '@/components/ui/select';
 import { Badge, Notice, SectionHeader } from '@/components/ui/surface';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { CollapseSection, ExpandableText, TabTransition } from '@/lib/motion';
+import { CollapseSection, ExpandableText, LiveHorizon, TabTransition } from '@/lib/motion';
 
 dayjs.extend(utc);
 
@@ -550,7 +550,8 @@ export default function TaskAutomation({ task, features = {} }) {
         {/* Right Column: Single Tabbed Agent Panel + Unified Progress */}
         <aside className="flex flex-col gap-3 min-w-0">
           {(arrodesEnabled || monocleEnabled) && (
-            <div className="border border-[#303030] bg-[#111111] p-3">
+            <div className="relative overflow-hidden border border-[#303030] bg-[#111111] p-3">
+              <LiveHorizon active={Boolean(queue.data?.busy)} />
               {arrodesEnabled && monocleEnabled ? (
                 <Tabs value={agentTab} onValueChange={setUserAgentTab}>
                   <TabsList className="mb-3">

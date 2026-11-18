@@ -1,7 +1,7 @@
 import { forwardRef } from 'react';
 import { AlertCircle, CheckCircle2, Info, Loader2, TriangleAlert, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { FAST_TRANSITION, motion } from '@/lib/motion';
+import { FAST_TRANSITION, motion, useReducedMotion } from '@/lib/motion';
 
 const badgeVariants = {
   default: 'bg-[#191919] border-[#303030] text-[#B8B8B8]',
@@ -65,12 +65,13 @@ const noticeStyles = {
 export function Notice({ tone = 'info', title, onClose, action, className, children }) {
   const style = noticeStyles[tone] ?? noticeStyles.info;
   const IconComp = style.icon;
+  const reduced = useReducedMotion();
   return (
     <motion.div
       role={tone === 'error' ? 'alert' : 'status'}
-      initial={{ opacity: 0, y: -3 }}
+      initial={reduced ? false : { opacity: 0, y: -3 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={FAST_TRANSITION}
+      transition={reduced ? { duration: 0.01 } : FAST_TRANSITION}
       className={cn(
         'flex items-start gap-2.5 border border-l-2 px-3 py-2 text-[12px] text-[#EAEAEA] rounded-none',
         style.border,

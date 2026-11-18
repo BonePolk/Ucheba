@@ -533,7 +533,104 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
   [data-radix-popper-content-wrapper] > [data-state="open"] {
     animation: none;
   }
+
+  .u-horizon[data-active="true"]::after {
+    animation: none;
+    opacity: 0;
+  }
+
+  .u-check-in {
+    animation: none;
+  }
+}
+
+.u-fade-collapse {
+  mask-image: linear-gradient(to bottom, #000 68%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 68%, transparent 100%);
+}
+
+.u-horizon {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  overflow: hidden;
+  pointer-events: none;
+  opacity: 0;
+  background: linear-gradient(90deg, rgba(127, 73, 180, 0.22), rgba(207, 169, 245, 0.45), rgba(127, 73, 180, 0.22));
+  transition: opacity 150ms cubic-bezier(0.22, 1, 0.36, 1);
+  z-index: 2;
+}
+
+.u-horizon[data-active="true"] {
+  opacity: 1;
+}
+
+.u-horizon[data-tone="warning"] {
+  background: linear-gradient(90deg, rgba(212, 162, 76, 0.22), rgba(212, 162, 76, 0.5), rgba(212, 162, 76, 0.22));
+}
+
+.u-horizon[data-tone="danger"] {
+  background: linear-gradient(90deg, rgba(212, 106, 106, 0.24), rgba(212, 106, 106, 0.52), rgba(212, 106, 106, 0.24));
+}
+
+.u-horizon::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 -42%;
+  width: 42%;
+  opacity: 0;
+  background: linear-gradient(90deg, transparent 0%, #CFA9F5 50%, transparent 100%);
+  transform: translateX(0);
+  pointer-events: none;
+}
+
+.u-horizon[data-tone="warning"]::after {
+  background: linear-gradient(90deg, transparent 0%, #D4A24C 50%, transparent 100%);
+}
+
+.u-horizon[data-tone="danger"]::after {
+  background: linear-gradient(90deg, transparent 0%, #D46A6A 50%, transparent 100%);
+}
+
+.u-horizon[data-active="true"]::after {
+  opacity: 1;
+  animation: ucheba-horizon-sweep 1.85s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+@keyframes ucheba-horizon-sweep {
+  0% {
+    transform: translateX(0%);
+  }
+  100% {
+    transform: translateX(340%);
+  }
+}
+
+@keyframes ucheba-check-in {
+  from {
+    opacity: 0;
+    transform: scale(0.75);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.u-check-in {
+  animation: ucheba-check-in 110ms cubic-bezier(0.22, 1, 0.36, 1);
 }

@@ -2,15 +2,16 @@ import { useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Download, FolderOpen, Paperclip, Trash2 } from 'lucide-react';
 import { request } from './api';
-import { fileContent } from './fileUpload';
+import { fileContent, MAX_FILE_SIZE, safeFileName } from './fileUpload';
 import { Button, IconButton } from '@/components/ui/button';
 import { FileTrigger } from '@/components/ui/controls';
 import { Combobox } from '@/components/ui/select';
 import { Notice } from '@/components/ui/surface';
-import { AnimatePresence, CollapseSection, FAST_TRANSITION, motion } from '@/lib/motion';
+import { AnimatePresence, CollapseSection, FAST_TRANSITION, motion, useReducedMotion } from '@/lib/motion';
 
 export default function ContextFiles({ taskId, disabled }) {
   const client = useQueryClient();
+  const reduced = useReducedMotion();
   const reset = useRef(null);
   const [saved, setSaved] = useState(null);
   const [libraryOpen, setLibraryOpen] = useState(false);
@@ -27,8 +28,9 @@ export default function ContextFiles({ taskId, disabled }) {
 
   const upload = useMutation({
     mutationFn: async (file) => {
-      if (file.size > 10 * 1024 * 1024) throw new Error('Максимальный размер файла — 10 МБ');
-      return request(path, { method: 'POST', body: JSON.stringify({ name: file.name, content: await fileContent(file) }) });
+      if (file.size === 0) throw new Error('Файл пустой (0 байт)');
+      if (file.size > MAX_FILE_SIZE) throw new Error('Максимальный размер файла — 25 МБ');
+      return request(path, { method: 'POST', body: JSON.stringify({ name: safeFileName(file.name), content: await fileContent(file) }) });
     },
     onSuccess: refresh,
     onSettled: () => reset.current?.(),
@@ -64,7 +66,7 @@ export default function ContextFiles({ taskId, disabled }) {
     <div className="flex flex-col gap-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="text-[11px] text-[#929292] tabular-nums">
-          {files.data?.length ?? 0}/5 · макс. 10 МБ
+          {files.data?.length ?? 0}/5 · макс. 25 МБ
         </span>
         <div className="flex items-center gap-1.5">
           {libraryOptions.length > 0 && (
@@ -82,7 +84,6 @@ export default function ContextFiles({ taskId, disabled }) {
           <FileTrigger
             resetRef={reset}
             onChange={(file) => { if (file) upload.mutate(file); }}
-            accept=".pdf,.docx,.xlsx,.ods,.pptx,.txt,.md,.csv,.json,.py,.js,.c,.cpp,.h,.java,.sql,.png,.jpg,.jpeg,.webp"
           >
             {(props) => (
               <Button
@@ -133,11 +134,11 @@ export default function ContextFiles({ taskId, disabled }) {
             {files.data.map((file) => (
               <motion.div
                 key={file.id}
-                layout="position"
-                initial={{ opacity: 0, y: 3 }}
+                layout={reduced ? false : 'position'}
+                initial={reduced ? false : { opacity: 0, y: 3 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0 }}
-                transition={FAST_TRANSITION}
+                transition={reduced ? { duration: 0.01 } : FAST_TRANSITION}
                 className="flex items-center justify-between gap-2 px-2.5 py-1.5 text-[12px]"
               >
                 <a

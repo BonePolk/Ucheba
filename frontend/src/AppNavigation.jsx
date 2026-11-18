@@ -17,7 +17,7 @@ import {
   User,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { LAYOUT_TRANSITION, motion, PANEL_TRANSITION } from '@/lib/motion';
+import { motion, PANEL_TRANSITION, SPRING_SNAPPY, useReducedMotion } from '@/lib/motion';
 import { IconButton } from '@/components/ui/button';
 import { Drawer } from '@/components/ui/dialog';
 import {
@@ -41,6 +41,8 @@ export default function AppNavigation({
   inboxCount = 0,
 }) {
   const [mobileOpen, setMobileOpen] = useState(false);
+  const reduced = useReducedMotion();
+  const indicatorTransition = reduced ? { duration: 0.01 } : SPRING_SNAPPY;
   const features = user?.features ?? {};
   const filesEnabled = features.monocle !== false || features.arrodes !== false || features.straus !== false;
   const inboxEnabled = features.telegram !== false || features.collector !== false || inboxCount > 0;
@@ -78,7 +80,7 @@ export default function AppNavigation({
           {!inDrawer && link.active && (
             <motion.span
               layoutId="ucheba-sidebar-active"
-              transition={LAYOUT_TRANSITION}
+              transition={indicatorTransition}
               className={cn(
                 'absolute inset-0 bg-[#7F49B4]/16 pointer-events-none',
                 !collapsed && 'border-l-2 border-l-[#7F49B4]',
@@ -114,7 +116,7 @@ export default function AppNavigation({
       <motion.aside
         initial={false}
         animate={{ width: collapsed ? 52 : 180 }}
-        transition={PANEL_TRANSITION}
+        transition={reduced ? { duration: 0.01 } : PANEL_TRANSITION}
         className="hidden lg:flex flex-col sticky top-0 h-dvh bg-[#0C0C0C] border-r border-[#242424] select-none shrink-0 z-30 overflow-hidden"
       >
         <div className={cn('flex items-center h-11 border-b border-[#222222] shrink-0', collapsed ? 'justify-center px-1' : 'justify-between px-2.5')}>
@@ -244,7 +246,7 @@ export default function AppNavigation({
               {link.active && (
                 <motion.span
                   layoutId="ucheba-bottom-active"
-                  transition={LAYOUT_TRANSITION}
+                  transition={indicatorTransition}
                   className="absolute inset-x-0 top-0 h-[2px] bg-[#7F49B4] pointer-events-none"
                 />
               )}

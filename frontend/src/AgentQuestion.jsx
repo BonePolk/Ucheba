@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Field, Textarea } from '@/components/ui/input';
 import { Notice } from '@/components/ui/surface';
 import { cn } from '@/lib/utils';
-import { FAST_TRANSITION, motion } from '@/lib/motion';
+import { FAST_TRANSITION, motion, useReducedMotion } from '@/lib/motion';
 
 const services = {
   '\u0410\u0440\u0440\u043e\u0434\u0435\u0441': 'arrodes',
@@ -19,6 +19,7 @@ const services = {
 };
 
 export default function AgentQuestion({ question, agent }) {
+  const reduced = useReducedMotion();
   const [text, setText] = useState('');
   const answer = useMutation({
     mutationFn: () => request(`/integrations/agents/${services[agent]}/questions/${question.id}/answer`, {
@@ -31,9 +32,9 @@ export default function AgentQuestion({ question, agent }) {
     <motion.div
       role="region"
       aria-label="Вопрос агента"
-      initial={{ opacity: 0, y: 5 }}
+      initial={reduced ? false : { opacity: 0, y: 5 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={FAST_TRANSITION}
+      transition={reduced ? { duration: 0.01 } : FAST_TRANSITION}
       className="border border-[#4A391D] border-l-2 border-l-[#D4A24C] bg-[#18130B] p-3 mt-2"
     >
       <form

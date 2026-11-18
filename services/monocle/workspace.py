@@ -144,24 +144,29 @@ def read_binary(memory, path):
     content = optional_read(memory, 'files/' + path)
     if content is None:
         raise HTTPException(404, 'Файл в Silo не найден')
-    if len(content) > 10 * 1024 * 1024:
-        raise HTTPException(413, 'Файл больше 10 МБ')
+    if len(content) > 25 * 1024 * 1024:
+        raise HTTPException(413, 'Файл больше 25 МБ')
     return content, hashlib.sha256(content).hexdigest()
 
 
-def save_binary(memory, path, content, version=None):
+def save_binary(memory, path, content, version=None, overwrite=False):
     path = personal_path(path)
-    if not content or len(content) > 10 * 1024 * 1024:
-        raise HTTPException(413, 'Размер файла должен быть от 1 байта до 10 МБ')
+    if not content:
+        raise HTTPException(422, 'Файл пустой (0 байт)')
+    if len(content) > 25 * 1024 * 1024:
+        raise HTTPException(413, 'Максимальный размер файла — 25 МБ')
     with write_lock:
         check_parents(memory, path)
         key = 'files/' + path
         if next(memory.client.list_objects(memory.bucket, prefix=memory.prefix + key + '/', recursive=True), None):
             raise HTTPException(409, 'Папка с таким именем уже существует')
         previous = optional_read(memory, key)
-        current = hashlib.sha256(previous).hexdigest() if previous is not None else None
-        if current != (version or None):
-            raise HTTPException(409, 'Файл уже существует или изменился. Прочитайте его версию перед заменой')
+        if not overwrite:
+            current = hashlib.sha256(previous).hexdigest() if previous is not None else None
+            if current != (version or None):
+                if previous is not None and version is None:
+                    raise HTTPException(409, 'Файл с таким именем уже существует')
+                raise HTTPException(409, 'Файл уже существует или изменился. Прочитайте его версию перед заменой')
         memory.put_bytes(key, content, 'application/octet-stream')
     return {'path': path, 'size': len(content), 'version': hashlib.sha256(content).hexdigest(), 'status': 'saved'}
 
@@ -209,8 +214,10 @@ def save_browser_download(memory, info, content):
         previous = optional_read(memory, 'downloads/' + file_id + '.json')
         if previous is not None:
             return json.loads(previous)
-        if not content or len(content) > 10 * 1024 * 1024:
-            raise HTTPException(413, 'Размер загрузки должен быть от 1 байта до 10 МБ')
+        if not content:
+            raise HTTPException(422, 'Файл загрузки пустой (0 байт)')
+        if len(content) > 25 * 1024 * 1024:
+            raise HTTPException(413, 'Размер загрузки больше 25 МБ')
         if optional_read(memory, 'files/Загрузки/') is None:
             memory.put_bytes('files/Загрузки/', b'', 'application/x-directory')
         saved = {'file_id': file_id, 'name': name, 'size': len(content), 'path': path,

@@ -5,7 +5,7 @@ import { Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 export const buttonVariants = cva(
-  'inline-flex items-center justify-center whitespace-nowrap rounded-none border font-medium transition-colors duration-100 select-none cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed max-w-full shrink-0 focus-visible:outline-1 focus-visible:outline-[#9E6FD0] focus-visible:outline-offset-1',
+  'inline-flex items-center justify-center whitespace-nowrap rounded-none border font-medium transition-[color,background-color,border-color,transform] duration-100 active:enabled:scale-[0.98] select-none cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed max-w-full shrink-0 focus-visible:outline-1 focus-visible:outline-[#9E6FD0] focus-visible:outline-offset-1',
   {
     variants: {
       variant: {

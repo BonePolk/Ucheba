@@ -276,11 +276,11 @@ def capture_downloads(context):
         try:
             path = await download.path()
             if path is None:
-                record.update(status='failed', error='Файл пустой или больше 10 МБ')
+                record.update(status='failed', error='Файл пустой или больше 25 МБ')
                 return
             content = await asyncio.to_thread(Path(path).read_bytes)
             if not 0 < len(content) <= files.LIMIT:
-                record.update(status='failed', error='Файл пустой или больше 10 МБ')
+                record.update(status='failed', error='Файл пустой или больше 25 МБ')
                 return
             info = await asyncio.to_thread(files.save, download.suggested_filename, content)
             record.update(info, status='saved')
@@ -288,8 +288,14 @@ def capture_downloads(context):
             record.update(status='cancelled')
             await download.cancel()
             raise
+        except HTTPException as exc:
+            record.update(status='failed', error=str(exc.detail)[:500])
+            logging.getLogger('uvicorn.error').warning('browser download: HTTP %s (%s)', exc.status_code, type(exc).__name__)
+        except ValueError as exc:
+            record.update(status='failed', error=str(exc)[:500] or 'Некорректный файл загрузки')
+            logging.getLogger('uvicorn.error').warning('browser download: %s', type(exc).__name__)
         except Exception as exc:
-            record.update(status='failed', error='Не удалось сохранить загрузку браузера')
+            record.update(status='failed', error=f'Не удалось сохранить загрузку браузера ({type(exc).__name__})')
             logging.getLogger('uvicorn.error').warning('browser download: %s', type(exc).__name__)
         finally:
             record.pop('task', None)
@@ -1022,7 +1028,7 @@ class Action(BaseModel):
 
 
 async def download_link(tab, site, url, image_mode=False):
-    max_size = 10 * 1024 * 1024
+    max_size = 25 * 1024 * 1024
     try:
         async with httpx.AsyncClient(timeout=30, follow_redirects=False, transport=httpx.AsyncHTTPTransport(retries=1)) as client:
             for _ in range(6):
@@ -1048,7 +1054,7 @@ async def download_link(tab, site, url, image_mode=False):
                     async for chunk in response.aiter_bytes():
                         content.extend(chunk)
                         if len(content) > max_size:
-                            raise HTTPException(413, 'Файл из ЛК больше 10 МБ')
+                            raise HTTPException(413, 'Файл из ЛК больше 25 МБ')
                     header = Message()
                     header['Content-Disposition'] = response.headers.get('content-disposition', '')
                     name = header.get_filename() or unquote(urlsplit(url).path.rsplit('/', 1)[-1]) or 'document'

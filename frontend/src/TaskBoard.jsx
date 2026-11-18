@@ -24,7 +24,7 @@ import AgentProgress from './AgentProgress';
 import { AmebaSummaryBar } from './AmebaWorkspace';
 import { DeadlineRisk } from './RankingAssessment';
 import { cn, useMediaQuery } from '@/lib/utils';
-import { AnimatePresence, CollapseSection, LAYOUT_TRANSITION, motion } from '@/lib/motion';
+import { AnimatePresence, CollapseSection, LAYOUT_TRANSITION, motion, useReducedMotion } from '@/lib/motion';
 import { Button, IconButton } from '@/components/ui/button';
 import { Checkbox, Progress } from '@/components/ui/controls';
 import {
@@ -71,6 +71,7 @@ function formatCompactDeadline(iso) {
 
 export default function TaskBoard({ features = {} }) {
   const queryClient = useQueryClient();
+  const reduced = useReducedMotion();
   const compact = useMediaQuery('(max-width: 767px)', typeof window !== 'undefined' ? window.innerWidth < 768 : false);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [now, setNow] = useState(Date.now());
@@ -103,6 +104,8 @@ export default function TaskBoard({ features = {} }) {
   const refresh = () => Promise.all([
     queryClient.invalidateQueries({ queryKey: ['tasks'] }),
     queryClient.invalidateQueries({ queryKey: ['ameba-ranking'] }),
+    queryClient.invalidateQueries({ queryKey: ['agent-memory'] }),
+    queryClient.invalidateQueries({ queryKey: ['calendar'] }),
   ]);
 
   const ranking = useQuery({
@@ -127,7 +130,7 @@ export default function TaskBoard({ features = {} }) {
   const rank = useMutation({
     mutationFn: () => agentRequest('/integrations/ameba/rank', {
       method: 'POST',
-      body: JSON.stringify({ feedback: ranking.data?.feedback ?? '' }),
+      body: JSON.stringify({}),
     }),
     onSuccess: async () => {
       setSort('ameba:asc');
@@ -459,11 +462,11 @@ export default function TaskBoard({ features = {} }) {
                   return (
                     <motion.tr
                       key={task.id}
-                      layout="position"
-                      initial={{ opacity: 0, y: 4 }}
+                      layout={reduced ? false : 'position'}
+                      initial={reduced ? false : { opacity: 0, y: 4 }}
                       animate={{ opacity: 1, y: 0 }}
                       exit={{ opacity: 0 }}
-                      transition={LAYOUT_TRANSITION}
+                      transition={reduced ? { duration: 0.01 } : LAYOUT_TRANSITION}
                       className={cn(tableRowClass, completing === task.id && 'task-completing')}
                     >
                     <TableCell>

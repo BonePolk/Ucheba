@@ -1,6 +1,7 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 import json
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
@@ -179,7 +180,7 @@ def record_task_completion(session: Session, task: Task) -> None:
     record_observation(session, task, 'done', actual_minutes=task.completed_work_minutes)
 
 
-def task_state(session):
+def _collect_task_state(session):
     tasks = session.exec(select(Task).where(Task.archived == False, Task.status != 'done').order_by(Task.id)).all()
     ready, waiting, state = [], [], []
     for task in tasks:
@@ -213,21 +214,35 @@ def task_state(session):
             waiting.append(task.id)
     ready.sort(key=lambda task: ({'high': 0, 'medium': 1, 'low': 2}.get(task['priority'], 1),
                                  task['deadline'].isoformat() if task['deadline'] else '9999', task['id']))
+    return state, ready, waiting
+
+
+def _build_signature(session, state, include_ameba_facts: bool = True) -> str:
     from agent_memory import read as read_facts
     calendar = read_calendar()
     adjustments = read_adjustments(session)
     profile = read_profile(session)
     ameba_cfg = read_config('ameba')
-    signature = json.dumps({
-        'version': 40,
+    allowed_agents = ('Владелец', 'user', 'Ameba') if include_ameba_facts else ('Владелец', 'user')
+    return json.dumps({
+        'version': 41,
         'tasks': state,
         'calendar': {'events': sorted(calendar['events'], key=lambda event: event['id']), 'timezone': calendar['timezone']},
-        'facts': sorted(({'key': fact['key'], 'text': fact['text']} for fact in read_facts() if fact['agent'] in ('Владелец', 'user')), key=lambda fact: fact['key']),
+        'facts': sorted(({'key': fact['key'], 'text': fact['text']} for fact in read_facts() if fact['agent'] in allowed_agents), key=lambda fact: fact['key']),
         'feedback': adjustments,
         'preferences': profile.get('preferences', {}),
         'provider': {key: ameba_cfg.get(key) for key in ('model', 'base_url')},
     }, sort_keys=True)
-    return signature, ready, waiting
+
+
+def task_state(session):
+    state, ready, waiting = _collect_task_state(session)
+    return _build_signature(session, state, include_ameba_facts=True), ready, waiting
+
+
+def _external_signature(session) -> str:
+    state, _, _ = _collect_task_state(session)
+    return _build_signature(session, state, include_ameba_facts=False)
 
 
 def automatic_inputs():
@@ -311,6 +326,7 @@ def ranking_status():
         adjustments = read_adjustments(session)
         profile = read_profile(session)
         return result | {
+            'enabled': bool(read_config('ameba').get('enabled')),
             'plan_reset': plan_reset,
             'has_plan': bool(result.get('schedule') and result['schedule'].get('version') == 2),
             'task_ids': ids,
@@ -341,6 +357,7 @@ async def clear_plan():
             temporary.config = '{}'
             session.add(temporary)
             adj = read_adjustments(session)
+            adj['text'] = ''
             adj['day_overrides'] = {}
             adj['task_pins'] = {}
             adj['estimate_overrides'] = {}
@@ -423,7 +440,8 @@ async def refresh_saved_plan():
         )
         with Session(get_engine()) as session:
             saved = session.get(TaskRanking, 1) or TaskRanking()
-            saved.snapshot = task_state(session)[0]
+            if not read_adjustments(session)['text']:
+                saved.snapshot = task_state(session)[0]
             saved.result = json.dumps(result, ensure_ascii=False)
             session.add(saved)
             if result.get('plan_run_id'):
@@ -467,14 +485,18 @@ async def adjust_plan(
     task_pin: dict | None = None,
     estimate_override: dict | None = None,
     reset: bool = False,
+    clear_feedback: bool = False,
 ):
     check_feature('ameba')
+    has_schedule_changes = bool(day_overrides or task_pin or estimate_override or reset)
     with Session(get_engine()) as session:
         adj = read_adjustments(session)
         if reset:
             adj['day_overrides'] = {}
             adj['task_pins'] = {}
             adj['estimate_overrides'] = {}
+        if clear_feedback:
+            adj['text'] = ''
         if day_overrides:
             for date_iso, mode in day_overrides.items():
                 if mode is None or mode == 'auto':
@@ -504,7 +526,8 @@ async def adjust_plan(
                 adj['estimate_overrides'][tid] = max(0, int(mins))
         save_adjustments(adj, session=session)
         session.commit()
-    await refresh_saved_plan()
+    if has_schedule_changes:
+        await refresh_saved_plan()
     return ranking_status()
 
 
@@ -531,6 +554,7 @@ async def rank_all(force=False, task_id=0):
                     raise
         with Session(get_engine()) as session:
             signature, ready, waiting = task_state(session)
+            pre_external = _external_signature(session)
             saved = session.get(TaskRanking, 1)
             if not force and saved and saved.snapshot == signature and not plan_expired(json.loads(saved.result)):
                 return json.loads(saved.result)
@@ -539,6 +563,7 @@ async def rank_all(force=False, task_id=0):
             async with scheduler.slot('ameba', task_id):
                 with Session(get_engine()) as session:
                     signature, ready, waiting = task_state(session)
+                    pre_external = _external_signature(session)
                     saved = session.get(TaskRanking, 1)
                     refresh = not force and bool(saved and saved.snapshot == signature and _can_refresh_only(saved, {t['id'] for t in ready}))
                 result = await request_ranking(ready, task_id, checked_contexts, refresh=refresh)
@@ -554,7 +579,13 @@ async def rank_all(force=False, task_id=0):
                     checked_contexts.add(context_id)
             with Session(get_engine()) as session:
                 signature, ready, waiting = task_state(session)
+                pre_external = _external_signature(session)
         else:
+            with Session(get_engine()) as session:
+                wish_text = read_adjustments(session)['text'].strip()
+            if wish_text:
+                from agent_memory import save as save_fact
+                save_fact({'key': 'ameba.wish_' + uuid4().hex[:8], 'text': wish_text}, 'Ameba')
             result = {
                 'task_ids': [], 'comparisons': 0, 'uncertain_comparisons': 0,
                 'explanation': 'Нет задач с готовым контекстом.', 'reasons': [],
@@ -571,16 +602,24 @@ async def rank_all(force=False, task_id=0):
             raise HTTPException(502, 'Ameba не построила корректный план периодов. Предыдущий результат сохранён.')
         result['task_ids'] = ids
         result.update(generated_at=datetime.now(timezone.utc).isoformat(), ranked_count=len(ids), pending_count=len(waiting), total_count=len(ready) + len(waiting))
+        consumed_feedback = False
         with Session(get_engine()) as session:
-            if task_state(session)[0] != signature:
+            if task_state(session)[0] != signature and _external_signature(session) != pre_external:
                 raise HTTPException(409, 'Задачи или контекст изменились. Повторите планирование')
+            adj = read_adjustments(session)
+            if adj['text']:
+                consumed_feedback = True
+                adj['text'] = ''
+                save_adjustments(adj, session=session)
+                session.flush()
             saved = session.get(TaskRanking, 1) or TaskRanking()
-            saved.snapshot = signature
+            final_signature = task_state(session)[0] if (consumed_feedback or task_state(session)[0] != signature) else signature
+            saved.snapshot = final_signature
             saved.result = json.dumps(result, ensure_ascii=False)
             session.add(saved)
             for tid in ids:
                 task = session.get(Task, tid)
-                task.ai_details = json.dumps({'version': 40, 'status': 'ranked'})
+                task.ai_details = json.dumps({'version': 41, 'status': 'ranked'})
                 task.ai_scored_at = datetime.now(timezone.utc)
                 session.add(task)
             if result.get('plan_run_id'):
@@ -592,7 +631,7 @@ async def rank_all(force=False, task_id=0):
                     session.add(temporary)
             session.commit()
         report('ameba', success=True)
-        return result
+        return result | ({'consumed_feedback': True} if consumed_feedback else {})
 
 
 async def evaluate(task_id=None):
@@ -618,7 +657,7 @@ async def evaluate_task(task_id):
     context = await prepare(task_id)
     original = context['task_snapshot']
     if context['status'] != 'ready':
-        metrics = {'version': 40, 'status': 'needs_context', 'reason': ' '.join(context['questions'])}
+        metrics = {'version': 41, 'status': 'needs_context', 'reason': ' '.join(context['questions'])}
         with Session(get_engine()) as session:
             task = session.get(Task, task_id)
             if not task:
@@ -633,4 +672,4 @@ async def evaluate_task(task_id):
     result = await rank_all(task_id=task_id)
     ids = result['task_ids']
     return result | {'rank': ids.index(task_id) + 1 if task_id in ids else None,
-                     'metrics': {'status': 'ranked', 'version': 40}}
+                     'metrics': {'status': 'ranked', 'version': 41}}

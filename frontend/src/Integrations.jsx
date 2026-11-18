@@ -11,7 +11,7 @@ import { Field, PasswordField } from '@/components/ui/input';
 import { MultiCombobox } from '@/components/ui/select';
 import { Badge, Notice, PageLoader, SectionHeader, StatusIndicator } from '@/components/ui/surface';
 import { cn } from '@/lib/utils';
-import { LAYOUT_TRANSITION, motion, StageSwap } from '@/lib/motion';
+import { motion, SPRING_SNAPPY, StageSwap, useReducedMotion } from '@/lib/motion';
 
 function ConnectionInfo({ value }) {
   if (!value.last_error && !value.last_success) return null;
@@ -46,6 +46,7 @@ export default function Integrations({ features = {} }) {
 
 function IntegrationForms({ data, features }) {
   const client = useQueryClient();
+  const reduced = useReducedMotion();
   const [telegram, setTelegram] = useState({ enabled: data.telegram.enabled, api_id: '', api_hash: '', phone: '' });
   const [arrodes, setArrodes] = useState({ enabled: data.arrodes.enabled, auto_prepare: data.arrodes.auto_prepare, model: data.arrodes.model ?? '' });
   const [code, setCode] = useState('');
@@ -153,7 +154,7 @@ function IntegrationForms({ data, features }) {
                 {active && (
                   <motion.span
                     layoutId="integrations-active"
-                    transition={LAYOUT_TRANSITION}
+                    transition={reduced ? { duration: 0.01 } : SPRING_SNAPPY}
                     className="absolute inset-0 bg-[#7F49B4]/16 border-l-2 border-l-[#7F49B4] pointer-events-none"
                   />
                 )}

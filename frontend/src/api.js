@@ -1,11 +1,33 @@
 export async function request(path, options = {}) {
-  const response = await fetch(`/api${path}`, {
-    ...options,
-    headers: { 'Content-Type': 'application/json' },
-  });
+  let response;
+  try {
+    response = await fetch(`/api${path}`, {
+      ...options,
+      headers: { 'Content-Type': 'application/json', ...options.headers },
+    });
+  } catch {
+    throw new Error('Не удалось отправить запрос: соединение с сервером прервалось');
+  }
   if (!response.ok) {
-    const error = await response.json();
-    const failure = new Error(typeof error.detail === 'string' ? error.detail : 'Проверьте введённые данные');
+    const text = await response.text();
+    let error = null;
+    if (text) {
+      try {
+        error = JSON.parse(text);
+      } catch {
+        error = null;
+      }
+    }
+    const fallbackByStatus = {
+      413: 'Файл слишком большой (макс. 25 МБ)',
+      502: 'Сервис временно недоступен',
+      503: 'Сервис временно недоступен',
+      504: 'Превышено время ожидания сервера',
+    };
+    const message = typeof error?.detail === 'string' && error.detail
+      ? error.detail
+      : fallbackByStatus[response.status] ?? `Ошибка запроса (HTTP ${response.status})`;
+    const failure = new Error(message);
     failure.status = response.status;
     throw failure;
   }

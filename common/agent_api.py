@@ -16,7 +16,17 @@ def agent_routes(app, label):
     async def api_error(request, exc):
         code = getattr(exc, 'status_code', None)
         logging.getLogger('uvicorn.error').error('%s: %s (API %s)', label, type(exc).__name__, code or 'unknown')
-        detail = f'{label}: не удалось подключиться к шлюзу' if code is None else f'{label}: шлюз отклонил запрос (HTTP {code})'
+        if code is None:
+            detail = f'{label}: не удалось подключиться к шлюзу'
+        else:
+            reason = {
+                401: 'шлюз отклонил API-ключ (HTTP 401)',
+                402: 'недостаточно средств или исчерпан баланс ключа на шлюзе (HTTP 402)',
+                403: 'шлюз запретил доступ к модели (HTTP 403)',
+                404: 'шлюз не нашёл модель или Responses API (HTTP 404)',
+                429: 'превышен лимит запросов или квота шлюза (HTTP 429)',
+            }.get(code, f'шлюз отклонил запрос (HTTP {code})')
+            detail = f'{label}: {reason}'
         return JSONResponse(status_code=502, content={'detail': detail})
 
     async def stream_error(request, exc):

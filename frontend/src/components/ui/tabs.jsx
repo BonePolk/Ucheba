@@ -1,7 +1,7 @@
 import { createContext, forwardRef, useContext, useId, useState } from 'react';
 import * as TabsPrimitive from '@radix-ui/react-tabs';
 import { cn } from '@/lib/utils';
-import { LAYOUT_TRANSITION, motion } from '@/lib/motion';
+import { motion, SPRING_SNAPPY, useReducedMotion } from '@/lib/motion';
 
 const TabsContext = createContext({ groupId: 'tabs', value: undefined });
 
@@ -43,6 +43,7 @@ export const TabsList = forwardRef(function TabsList({ className, ...props }, re
 export const TabsTrigger = forwardRef(function TabsTrigger({ className, value, children, ...props }, ref) {
   const ctx = useContext(TabsContext);
   const active = ctx.value !== undefined && ctx.value === value;
+  const reduced = useReducedMotion();
   return (
     <TabsPrimitive.Trigger
       ref={ref}
@@ -58,7 +59,7 @@ export const TabsTrigger = forwardRef(function TabsTrigger({ className, value, c
       {active && (
         <motion.span
           layoutId={`tab-ind-${ctx.groupId}`}
-          transition={LAYOUT_TRANSITION}
+          transition={reduced ? { duration: 0.01 } : SPRING_SNAPPY}
           className="absolute left-0 right-0 bottom-0 h-[2px] bg-[#7F49B4] pointer-events-none"
         />
       )}
@@ -78,6 +79,7 @@ export const TabsContent = forwardRef(function TabsContent({ className, ...props
 
 export function SegmentedControl({ value, onChange, options = [], ariaLabel, size = 'default', className }) {
   const groupId = useId();
+  const reduced = useReducedMotion();
   return (
     <div
       role="tablist"
@@ -106,7 +108,7 @@ export function SegmentedControl({ value, onChange, options = [], ariaLabel, siz
             {active && (
               <motion.span
                 layoutId={`seg-${groupId}`}
-                transition={LAYOUT_TRANSITION}
+                transition={reduced ? { duration: 0.01 } : SPRING_SNAPPY}
                 className="absolute inset-0 bg-[#252525] border border-[#3A3A3A] pointer-events-none"
               />
             )}

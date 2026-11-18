@@ -13,7 +13,6 @@ from common.agent_api import agent_routes, response_text, stream_model_response
 from common.agent_history import with_history
 from common.agent_issues import ISSUE_INSTRUCTION, ISSUE_TOOL, report_problem
 from common.agent_memory import MEMORY_INSTRUCTION, MEMORY_NAMES, MEMORY_TOOLS, memory_tool
-from common.agent_questions import QUESTION_INSTRUCTION, QUESTION_TOOL, ask_user
 from common.dates import deadline_facts
 from common.http import private_app
 from common.identity import user_id
@@ -232,8 +231,11 @@ CONTEXT_TOOL = {
 }
 
 AMEBA_INSTRUCTIONS = (
-    'Ты Ameba — адаптивный персональный менеджер нагрузки, приоритетов и восстановления (говори о себе в женском роде; '
+    'Ты Ameba — адаптивный персональный менеджер нагрузки, приоритетов и восстановления '
+    '(всегда говори о себе в женском роде: «я прочитала», «получила», «оценила», «запланировала», без мужского рода; '
     'Monocle и Straus — мужской род). '
+    'Вызов планирования всегда является прямым поручением владельца немедленно построить план по переданному списку tasks, '
+    'без ожидания дополнительных подтверждений; при нехватке бытовых деталей принимай разумные консервативные допущения в assumptions и plan_rest.assumption. '
     'Твоя главная задача — не назначать конкретные часы начала и окончания задач, а понять смысл, сложность, объём, зависимости и сроки, '
     'настроить параметры нагрузки и восстановления через plan_rest и запустить детерминированный расчёт гибких периодов через reorder_tasks.\n'
     'Правила работы:\n'
@@ -251,6 +253,8 @@ AMEBA_INSTRUCTIONS = (
     '6. Вызови plan_rest, чтобы перевести факты памяти, пожелания user_feedback и наблюдения адаптации в конкретные границы:\n'
     '   - sleep_hours, preferred_daily_minutes, prefer_free_evenings, max_heavy_days_in_row, preferred_weekdays, light_weekdays и точечные day_overrides.\n'
     '   - Не придумывай почасовые слоты задач! Конкретные часы пользователь выбирает сам внутри периода.\n'
+    '   - Поле user_feedback — одноразовое пожелание владельца к этому расчёту: после успешного построения плана оно автоматически очищается и в следующих запусках будет пустым.\n'
+    '   - Если user_feedback не пустой, обязательно: (а) примени его прямо сейчас в текущем плане (через оценки plan_tasks, настройки отдыха/дней plan_rest и/или порядок reorder_tasks) и (б) сохрани само правило, предпочтение или корректировку в общую память через remember_user_fact (обнови существующий подходящий ключ без дублей либо создай ключ ameba.<тема>), чтобы Ameba помнила это пожелание в будущих расчётах. Если старый ключ был создан владельцем напрямую и защищён от перезаписи (422) — сохрани актуальное уточнение под новым ключом ameba.<тема>.\n'
     '7. Вызови reorder_tasks с приоритетным порядком всех ID задач.\n'
     '   - Python сам посчитает реалистичную ёмкость каждого дня (отличая физически свободные часы от продуктивной ёмкости после плотных пар/работы), '
     'учтёт резерв неопределённости, защитит сон и восстановление и соберёт гибкие периоды (periods).\n'
@@ -296,23 +300,58 @@ async def rank(body: dict):
         ) as client:
             memory_checked = False
             context_sent = False
+            has_feedback = bool((body.get('user_feedback') or '').strip())
+            feedback_saved = not has_feedback
             plans = {}
             schedule = None
             rest_planned = False
             order = list(expected)
             repaired = False
             failed_actions = {}
-            messages = [{'role': 'user', 'content': 'Перед планированием прочитай общую память владельца.'}]
+            messages = [{
+                'role': 'user',
+                'content': (
+                    f'Запущено построение плана Ameba для {len(expected)} активных задач (ID: {expected}). '
+                    'Сначала вызови read_user_memory; сразу после чтения памяти тебе будут переданы '
+                    'полные данные задач и календаря для расчёта.'
+                ),
+            }]
 
             while True:
                 if memory_checked and not context_sent:
-                    messages.append({'role': 'user', 'content': json.dumps(body, ensure_ascii=False, default=str)})
+                    now = datetime.now(timezone.utc)
+                    payload = {key: value for key, value in body.items() if key not in ('agent_history', 'history_notice')}
+                    if body.get('agent_history') or body.get('history_notice'):
+                        payload['reference_history'] = {
+                            'notice': body.get('history_notice', ''),
+                            'items': body.get('agent_history', []),
+                        }
+                    payload['current_clock'] = {
+                        'notice': 'Актуальная дата сервера; старые даты проверки в контексте не являются сегодняшней датой.',
+                        'now': now.isoformat(),
+                        'deadlines': [{'task_id': task['id'], **deadline_facts(task.get('deadline'), now)} for task in tasks],
+                    }
+                    payload['instruction'] = (
+                        f'Немедленно построй план для всех {len(expected)} актуальных задач из поля tasks (ID: {expected}): '
+                        'оцени каждую через plan_tasks, настрой нагрузку/отдых через plan_rest, '
+                        'рассчитай периоды через reorder_tasks'
+                        + (', обязательно примени и сохрани разовое пожелание user_feedback в память через remember_user_fact' if has_feedback else '')
+                        + ' и верни итоговый JSON RankingResult.'
+                    )
+                    if has_feedback:
+                        payload['feedback_notice'] = (
+                            'Поле user_feedback — разовое пожелание владельца и очистится после этого запуска. '
+                            'Учти его прямо сейчас в плане и обязательно сохрани правило/предпочтение в память через remember_user_fact.'
+                        )
+                    messages.append({
+                        'role': 'user',
+                        'content': (
+                            'Ниже переданы актуальные задачи (поле tasks) и календарь владельца. '
+                            'Немедленно выполни полный расчёт плана для всех задач из tasks.\n'
+                            + json.dumps(payload, ensure_ascii=False, default=str)
+                        ),
+                    })
                     context_sent = True
-                now = datetime.now(timezone.utc)
-                messages.append({'role': 'user', 'content': json.dumps({
-                    'current_clock': 'Актуальная дата сервера; старые даты проверки в контексте не являются сегодняшней датой.',
-                    'deadlines': [{'task_id': task['id'], **deadline_facts(task.get('deadline'), now)} for task in tasks] if memory_checked else [],
-                }, ensure_ascii=False)})
 
                 progress.update(
                     stage='sorting' if set(plans) == set(expected) else 'planning',
@@ -320,7 +359,7 @@ async def rank(body: dict):
                 )
                 progress.begin_response()
                 tools = [
-                    QUESTION_TOOL, planning.TOOL, planning.ORDER_TOOL, planning.REST_TOOL,
+                    planning.TOOL, planning.ORDER_TOOL, planning.REST_TOOL,
                     planning.READ_TOOL, CONTEXT_TOOL, NOTE_TOOL, ISSUE_TOOL, *MEMORY_TOOLS,
                 ]
                 required_tool = 'read_user_memory' if not memory_checked else None
@@ -332,12 +371,12 @@ async def rank(body: dict):
                     model=model,
                     reasoning={'effort': 'medium' if memory_checked else 'low', 'summary': 'auto'},
                     max_output_tokens=8000,
-                    instructions=QUESTION_INSTRUCTION + ISSUE_INSTRUCTION + MEMORY_INSTRUCTION + NOTE_INSTRUCTION + AMEBA_INSTRUCTIONS,
+                    instructions=ISSUE_INSTRUCTION + MEMORY_INSTRUCTION + NOTE_INSTRUCTION + AMEBA_INSTRUCTIONS,
                     input=messages,
                     tools=tools,
                     tool_choice=(
                         'required' if required_tool else 'none' if repaired else
-                        'required' if set(plans) != set(expected) or schedule is None or not rest_planned else 'auto'
+                        'required' if set(plans) != set(expected) or schedule is None or not rest_planned or not feedback_saved else 'auto'
                     ),
                     parallel_tool_calls=False,
                     text={'format': {
@@ -356,11 +395,19 @@ async def rank(body: dict):
 
                 if not calls:
                     missing = [task_id for task_id in expected if task_id not in plans]
-                    if missing or schedule is None or not rest_planned:
+                    if missing or schedule is None or not rest_planned or not feedback_saved:
                         messages.extend(response.output)
+                        error_msg = (
+                            'Сначала оцени все задачи через plan_tasks, настрой нагрузку/отдых через plan_rest и вызови reorder_tasks.'
+                            if (missing or schedule is None or not rest_planned)
+                            else 'Перед итоговым ответом сохрани разовое пожелание user_feedback в общую память через remember_user_fact (ключ вида ameba.<тема>).'
+                        )
+                        if (missing or schedule is None or not rest_planned) and not feedback_saved:
+                            error_msg += ' Также обязательно сохрани user_feedback в общую память через remember_user_fact.'
                         messages.append({'role': 'user', 'content': json.dumps({
-                            'error': 'Сначала оцени все задачи через plan_tasks, настрой нагрузку/отдых через plan_rest и вызови reorder_tasks.',
+                            'error': error_msg,
                             'remaining': missing,
+                            'feedback_saved': feedback_saved,
                         }, ensure_ascii=False)})
                         continue
                     try:
@@ -389,9 +436,7 @@ async def rank(body: dict):
                     try:
                         if call.name in ('plan_tasks', 'plan_rest', 'reorder_tasks', 'read_current_plan') and not memory_checked:
                             raise ValueError('Сначала прочитай факты владельца через read_user_memory')
-                        if call.name == 'ask_user':
-                            output = await ask_user(call.arguments, progress)
-                        elif call.name == 'agent_note':
+                        if call.name == 'agent_note':
                             output = progress.note(call.arguments)
                         elif call.name == 'report_tool_problem':
                             progress.add('Сообщает администратору о технической проблеме')
@@ -402,6 +447,8 @@ async def rank(body: dict):
                             if call.name == 'read_user_memory':
                                 body['user_memory'] = output
                                 memory_checked = True
+                            elif call.name == 'remember_user_fact':
+                                feedback_saved = True
                         elif call.name == 'request_context_check':
                             arguments = json.loads(call.arguments)
                             ids = arguments['task_ids']
@@ -486,7 +533,7 @@ async def rank(body: dict):
                         else:
                             raise ValueError('Unknown tool')
 
-                        if call.name in ('plan_tasks', 'plan_rest', 'reorder_tasks'):
+                        if call.name in ('plan_tasks', 'plan_rest', 'reorder_tasks', 'remember_user_fact'):
                             failed_actions.clear()
                         titles = {task['id']: task['title'] for task in tasks}
                         progress.update(
@@ -524,13 +571,25 @@ async def rank(body: dict):
                             raise
                         status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
                         progress.add('Не удалось прочитать память' if call.name == 'read_user_memory' else 'Не удалось сохранить факт')
-                        output = {
-                            'error': (
-                                'Память отклонила запись. Проверь формат.'
-                                if status == 422 else 'Память временно недоступна. Повтори обращение.'
-                            ),
-                            'status': status,
-                        }
+                        if call.name == 'remember_user_fact' and status == 422:
+                            failed_key = (call.name, call.arguments, '422')
+                            failed_actions[failed_key] = failed_actions.get(failed_key, 0) + 1
+                            if failed_actions[failed_key] >= 3:
+                                raise HTTPException(502, 'Ameba трижды повторила одинаковое неудачное действие. Предыдущий план сохранён.')
+                            output = {
+                                'error': 'Ключ задан владельцем или неверен формат. Используй новый ключ латиницей вида ameba.<тема> и повтори remember_user_fact.',
+                                'status': status,
+                            }
+                        else:
+                            if call.name == 'remember_user_fact':
+                                feedback_saved = True
+                            output = {
+                                'error': (
+                                    'Память отклонила запись. Проверь формат.'
+                                    if status == 422 else 'Память временно недоступна. Повтори обращение.'
+                                ),
+                                'status': status,
+                            }
 
                     messages.append({
                         'type': 'function_call_output',

@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button';
 import { Field } from '@/components/ui/input';
 import { Combobox } from '@/components/ui/select';
 import { Badge, EmptyState, Notice, PageHeader, PageLoader } from '@/components/ui/surface';
-import { AnimatePresence, ExpandableText, LAYOUT_TRANSITION, motion } from '@/lib/motion';
+import { AnimatePresence, ExpandableText, LAYOUT_TRANSITION, motion, useReducedMotion } from '@/lib/motion';
 
 dayjs.extend(utc);
 
@@ -21,6 +21,7 @@ const actionMeta = {
 
 export default function Inbox() {
   const client = useQueryClient();
+  const reduced = useReducedMotion();
   const [editing, setEditing] = useState(null);
   const [targets, setTargets] = useState({});
   const query = useQuery({
@@ -70,11 +71,11 @@ export default function Inbox() {
               return (
                 <motion.div
                   key={item.id}
-                  layout="position"
-                  initial={{ opacity: 0, y: 4 }}
+                  layout={reduced ? false : 'position'}
+                  initial={reduced ? false : { opacity: 0, y: 4 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0 }}
-                  transition={LAYOUT_TRANSITION}
+                  transition={reduced ? { duration: 0.01 } : LAYOUT_TRANSITION}
                   className="p-3 flex flex-col gap-2"
                 >
                   <div className="flex flex-wrap items-start justify-between gap-2">

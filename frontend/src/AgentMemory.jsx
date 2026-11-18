@@ -5,10 +5,11 @@ import { request, agentName } from './api';
 import { Button, IconButton } from '@/components/ui/button';
 import { Field, Input, Textarea } from '@/components/ui/input';
 import { Badge, EmptyState, Notice, PageLoader, SectionHeader } from '@/components/ui/surface';
-import { AnimatePresence, CollapseSection, LAYOUT_TRANSITION, motion } from '@/lib/motion';
+import { AnimatePresence, CollapseSection, LAYOUT_TRANSITION, motion, useReducedMotion } from '@/lib/motion';
 
 export default function AgentMemory() {
   const client = useQueryClient();
+  const reduced = useReducedMotion();
   const [editing, setEditing] = useState(null);
   const [adding, setAdding] = useState(false);
   const [newFact, setNewFact] = useState('');
@@ -121,11 +122,11 @@ export default function AgentMemory() {
               return (
                 <motion.div
                   key={fact.key}
-                  layout="position"
-                  initial={{ opacity: 0, y: 3 }}
+                  layout={reduced ? false : 'position'}
+                  initial={reduced ? false : { opacity: 0, y: 3 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0 }}
-                  transition={LAYOUT_TRANSITION}
+                  transition={reduced ? { duration: 0.01 } : LAYOUT_TRANSITION}
                   className="px-3 py-2"
                 >
                   {isEditing ? (

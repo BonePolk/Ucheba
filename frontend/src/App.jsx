@@ -5,7 +5,7 @@ import AppNavigation from './AppNavigation';
 import { Button } from '@/components/ui/button';
 import { Field, Input, PasswordField } from '@/components/ui/input';
 import { EmptyState, Notice, PageLoader } from '@/components/ui/surface';
-import { FAST_TRANSITION, motion, PageTransition } from '@/lib/motion';
+import { FAST_TRANSITION, LiveHorizon, motion, PageTransition, useReducedMotion } from '@/lib/motion';
 
 const TaskBoard = lazy(() => import('./TaskBoard'));
 const AmebaWorkspace = lazy(() => import('./AmebaWorkspace'));
@@ -42,6 +42,7 @@ class PageError extends Component {
 }
 
 function Login() {
+  const reduced = useReducedMotion();
   const [register, setRegister] = useState(false);
   const registration = useQuery({
     queryKey: ['registration'],
@@ -61,11 +62,12 @@ function Login() {
   return (
     <div className="min-h-dvh flex items-center justify-center p-4 bg-[#090909]">
       <motion.div
-        initial={{ opacity: 0, y: 8 }}
+        initial={reduced ? false : { opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={FAST_TRANSITION}
-        className="w-full max-w-[360px] bg-[#111111] border border-[#303030] p-5"
+        transition={reduced ? { duration: 0.01 } : FAST_TRANSITION}
+        className="relative overflow-hidden w-full max-w-[360px] bg-[#111111] border border-[#303030] p-5"
       >
+        <LiveHorizon active={login.isPending} />
         <div className="flex items-center gap-2.5 pb-4 mb-4 border-b border-[#222222]">
           <img src="/icon.png" width="24" height="24" alt="" />
           <h1 className="text-[16px] font-semibold text-[#EAEAEA] m-0">

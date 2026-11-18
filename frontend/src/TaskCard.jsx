@@ -14,7 +14,7 @@ import {
 import { SelectField } from '@/components/ui/select';
 import { Badge } from '@/components/ui/surface';
 import { HintTooltip } from '@/components/ui/tooltip';
-import { LAYOUT_TRANSITION, motion } from '@/lib/motion';
+import { LAYOUT_TRANSITION, motion, useReducedMotion } from '@/lib/motion';
 
 const priorityVariant = { high: 'danger', medium: 'warning', low: 'default' };
 
@@ -31,6 +31,7 @@ export default function TaskCard({
   onRemove,
   overdue,
 }) {
+  const reduced = useReducedMotion();
   let context = {};
   try {
     context = JSON.parse(task.ai_details || '{}');
@@ -44,11 +45,11 @@ export default function TaskCard({
 
   return (
     <motion.article
-      layout="position"
-      initial={{ opacity: 0, y: 6 }}
+      layout={reduced ? false : 'position'}
+      initial={reduced ? false : { opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -4 }}
-      transition={LAYOUT_TRANSITION}
+      exit={reduced ? { opacity: 0 } : { opacity: 0, y: -4 }}
+      transition={reduced ? { duration: 0.01 } : LAYOUT_TRANSITION}
       className={`border border-[#303030] bg-[#111111] p-3 flex flex-col gap-2 transition-colors ${completing ? 'task-completing' : 'hover:border-[#454545]'}`}
     >
       <div className="flex items-start justify-between gap-2">

@@ -3,10 +3,10 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   AlertTriangle,
   ArrowRight,
+  Brain,
   ChevronDown,
-  ChevronLeft,
   ChevronRight,
-  ChevronUp,
+  ExternalLink,
   MoreHorizontal,
   RefreshCw,
   RotateCcw,
@@ -15,10 +15,11 @@ import {
   X,
 } from 'lucide-react';
 import { agentRequest, request } from './api';
-import AgentTimeline, { addIsoDays, durationLabel, formatShortDate, parseIsoDate } from './AgentTimeline';
+import AgentMemory from './AgentMemory';
+import AgentTimeline, { durationLabel, formatShortDate, parseIsoDate } from './AgentTimeline';
 import AgentProgress from './AgentProgress';
 import { DeadlineRisk } from './RankingAssessment';
-import { calendarBlockColor, calendarColors } from './calendarColors';
+import { calendarColors } from './calendarColors';
 import { Button, IconButton } from '@/components/ui/button';
 import {
   DropdownMenu,
@@ -29,11 +30,10 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Input, Textarea } from '@/components/ui/input';
 import { SelectField } from '@/components/ui/select';
-import { Badge, EmptyState, Notice, PageHeader, PageLoader, SectionHeader, StatusIndicator } from '@/components/ui/surface';
-import { Table, TableBody, TableCell, TableContainer, TableHead, TableHeader, TableRow, tableRowClass } from '@/components/ui/table';
+import { Badge, EmptyState, Notice, PageHeader, SectionHeader, StatusIndicator } from '@/components/ui/surface';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { HintTooltip } from '@/components/ui/tooltip';
-import { CollapseSection, LAYOUT_TRANSITION, motion, TabTransition } from '@/lib/motion';
+import { CollapseSection, LAYOUT_TRANSITION, LiveHorizon, motion, TabTransition, useReducedMotion } from '@/lib/motion';
 
 const WEEKDAYS_RU = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
 const DAY_MODES = [
@@ -50,34 +50,6 @@ const LOAD_LABELS = {
   high: { label: 'Высокая', variant: 'warning' },
   overload: { label: 'Перегрузка', variant: 'danger' },
 };
-
-function mondayIso(iso) {
-  const dt = parseIsoDate(iso);
-  const diff = (dt.getUTCDay() + 6) % 7;
-  return addIsoDays(iso, -diff);
-}
-
-function toMin(hhmm) {
-  const [h, m] = String(hhmm || '00:00').split(':').map(Number);
-  return (h || 0) * 60 + (m || 0);
-}
-
-function layoutOverlaps(events) {
-  const groups = [];
-  for (const event of [...events].sort((a, b) => a.start.localeCompare(b.start))) {
-    let group = groups.at(-1);
-    if (!group || event.start >= group.end) {
-      group = { end: event.end, events: [], lanes: [] };
-      groups.push(group);
-    }
-    let lane = group.lanes.findIndex((end) => end <= event.start);
-    if (lane < 0) lane = group.lanes.length;
-    group.lanes[lane] = event.end;
-    group.end = group.end > event.end ? group.end : event.end;
-    group.events.push({ ...event, lane });
-  }
-  return groups.flatMap((group) => group.events.map((event) => ({ ...event, columns: group.lanes.length })));
-}
 
 function resolvePlanStatus({ rankingData, liveActive, isRunning, rankError, failedRun }) {
   if (isRunning || liveActive) return { tone: 'active', pulse: true, badge: 'accent', label: 'Расчёт' };
@@ -110,9 +82,13 @@ export function AmebaSummaryBar({ ranking, queue, rank, livePlan, onRefresh }) {
   const focusPeriod = periods.find((p) => p.kind === 'work') ?? periods[0];
   const topTaskId = data?.task_ids?.[0];
   const topTaskReason = data?.reasons?.find((r) => r.task_id === topTaskId);
+  const horizonTone = status.badge === 'warning' ? 'warning' : status.badge === 'danger' ? 'danger' : 'accent';
+  const actionLabel = isRunning ? 'Считает…' : !data?.has_plan ? 'Построить план' : 'Пересчитать';
+  const actionVariant = !data?.has_plan || data?.needs_refresh ? 'primary' : 'default';
 
   return (
-    <div className="border border-[#303030] bg-[#111111] px-3 py-2 flex flex-wrap items-center justify-between gap-2">
+    <div className="relative overflow-hidden border border-[#303030] bg-[#111111] px-3 py-2 flex flex-wrap items-center justify-between gap-2">
+      <LiveHorizon active={isRunning || liveActive} tone={horizonTone} />
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 min-w-0 text-[12px]">
         <div className="flex items-center gap-2 shrink-0">
           <StatusIndicator tone={status.tone} pulse={status.pulse} />
@@ -129,7 +105,9 @@ export function AmebaSummaryBar({ ranking, queue, rank, livePlan, onRefresh }) {
         )}
 
         {data?.pending_count > 0 && (
-          <span className="text-[#D4A24C] tabular-nums">Monocle: {data.pending_count}</span>
+          <HintTooltip label="Задачи, для которых Monocle ещё собирает или уточняет контекст">
+            <span className="text-[#D4A24C] tabular-nums cursor-help">Ждут Monocle: {data.pending_count}</span>
+          </HintTooltip>
         )}
 
         {conflicts.length > 0 && (
@@ -142,7 +120,9 @@ export function AmebaSummaryBar({ ranking, queue, rank, livePlan, onRefresh }) {
         )}
 
         {focusPeriod ? (
-          <span className="text-[#B8B8B8] truncate max-w-[240px]">{focusPeriod.title}</span>
+          <span className="text-[#B8B8B8] truncate max-w-[260px]">{focusPeriod.title}</span>
+        ) : data?.explanation ? (
+          <span className="text-[#929292] truncate max-w-[260px]">{data.explanation}</span>
         ) : topTaskReason ? (
           <span className="text-[#929292] truncate max-w-[200px]">{topTaskReason.time_estimate}</span>
         ) : null}
@@ -150,17 +130,17 @@ export function AmebaSummaryBar({ ranking, queue, rank, livePlan, onRefresh }) {
 
       <div className="flex items-center gap-1.5 shrink-0">
         {rank?.data?.unchanged && (
-          <span className="text-[11px] text-[#929292] hidden xl:inline">Без изменений</span>
+          <span className="text-[11px] text-[#929292] hidden xl:inline">План актуален</span>
         )}
         <Button
           size="sm"
-          variant="default"
+          variant={actionVariant}
           leftIcon={<RefreshCw className={`h-3 w-3 ${isRunning ? 'animate-spin' : ''}`} />}
           loading={rank?.isPending && !queue?.data?.ameba_running}
-          disabled={queue?.data?.browser_busy}
+          disabled={isRunning || queue?.data?.browser_busy}
           onClick={onRefresh}
         >
-          {queue?.data?.ameba_running ? 'Применить' : 'Обновить'}
+          {actionLabel}
         </Button>
         <Button size="sm" variant="accent-subtle" asChild>
           <a href="/ameba">
@@ -174,6 +154,8 @@ export function AmebaSummaryBar({ ranking, queue, rank, livePlan, onRefresh }) {
 }
 
 function LoadAnalysisTab({ daily = [], previewDays = [], onAdjust, busy }) {
+  const reduced = useReducedMotion();
+  const barTransition = reduced ? { duration: 0.01 } : LAYOUT_TRANSITION;
   const [windowRange, setWindowRange] = useState('week1');
   const [selectedDate, setSelectedDate] = useState(null);
   const sourceDays = daily.length
@@ -194,7 +176,17 @@ function LoadAnalysisTab({ daily = [], previewDays = [], onAdjust, busy }) {
     }));
 
   if (!sourceDays.length) {
-    return <EmptyState title="Нет данных о нагрузке" />;
+    return (
+      <EmptyState
+        title="Нет данных о нагрузке"
+        description="Постройте план или добавьте события в постоянный календарь, чтобы увидеть доступную ёмкость по дням."
+        action={(
+          <Button size="sm" variant="outline" asChild>
+            <a href="/calendar">Открыть календарь</a>
+          </Button>
+        )}
+      />
+    );
   }
 
   const visibleDays = windowRange === 'week1'
@@ -214,23 +206,37 @@ function LoadAnalysisTab({ daily = [], previewDays = [], onAdjust, busy }) {
   return (
     <div className="flex flex-col gap-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex flex-wrap items-center gap-3 text-[12px]">
-          <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 inline-block" style={{ background: calendarColors.busy }} /> Дела: <strong className="tabular-nums">{durationLabel(totalBusy)}</strong></span>
-          <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 inline-block" style={{ background: calendarColors.task }} /> Учёба: <strong className="tabular-nums">{durationLabel(totalStudy)}</strong></span>
-          <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 inline-block" style={{ background: calendarColors.break }} /> Запас: <strong className="tabular-nums">{durationLabel(totalFreeSlack)}</strong></span>
-          <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 inline-block bg-[#454545]" /> Резерв: <strong className="tabular-nums">{durationLabel(totalReserve)}</strong></span>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px]">
+          <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 inline-block" style={{ background: calendarColors.busy }} /> Занято в календаре: <strong className="tabular-nums">{durationLabel(totalBusy)}</strong></span>
+          <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 inline-block" style={{ background: calendarColors.task }} /> Учёба по плану: <strong className="tabular-nums">{durationLabel(totalStudy)}</strong></span>
+          <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 inline-block" style={{ background: calendarColors.break }} /> Свободный запас: <strong className="tabular-nums">{durationLabel(totalFreeSlack)}</strong></span>
+          <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 inline-block bg-[#454545]" /> Защищённый резерв: <strong className="tabular-nums">{durationLabel(totalReserve)}</strong></span>
         </div>
-        {sourceDays.length > 7 && (
-          <div className="flex items-center gap-1">
-            <Button size="xs" variant={windowRange === 'week1' ? 'primary' : 'default'} onClick={() => setWindowRange('week1')}>Дни 1–7</Button>
-            <Button size="xs" variant={windowRange === 'week2' ? 'primary' : 'default'} onClick={() => setWindowRange('week2')}>Дни 8–14</Button>
-            <Button size="xs" variant={windowRange === 'all' ? 'primary' : 'default'} onClick={() => setWindowRange('all')}>Все ({sourceDays.length})</Button>
-          </div>
-        )}
+
+        <div className="flex flex-wrap items-center gap-2">
+          {sourceDays.length > 7 && (
+            <div className="flex items-center gap-1">
+              <Button size="xs" variant={windowRange === 'week1' ? 'primary' : 'default'} onClick={() => setWindowRange('week1')}>Дни 1–7</Button>
+              <Button size="xs" variant={windowRange === 'week2' ? 'primary' : 'default'} onClick={() => setWindowRange('week2')}>Дни 8–14</Button>
+              <Button size="xs" variant={windowRange === 'all' ? 'primary' : 'default'} onClick={() => setWindowRange('all')}>Все ({sourceDays.length})</Button>
+            </div>
+          )}
+          <a href="/calendar" className="inline-flex items-center gap-1 text-[12px] text-[#CFA9F5] hover:underline">
+            Открыть календарь
+            <ExternalLink className="h-3 w-3" />
+          </a>
+        </div>
       </div>
 
       {/* Stacked load breakdown per day */}
       <div className="border border-[#303030] bg-[#111111] divide-y divide-[#1E1E1E]">
+        <div className="hidden lg:grid lg:grid-cols-[155px_minmax(0,1fr)_120px_170px_135px] gap-2.5 px-3 py-1.5 bg-[#0D0D0D] text-[11px] font-medium text-[#7D7D7D]">
+          <span>День</span>
+          <span>Распределение суток</span>
+          <span>План / доступно</span>
+          <span>Задачи</span>
+          <span>Режим дня</span>
+        </div>
         {visibleDays.map((day) => {
           const wd = WEEKDAYS_RU[parseIsoDate(day.date).getUTCDay()];
           const busyM = day.busy_minutes || 0;
@@ -246,7 +252,7 @@ function LoadAnalysisTab({ daily = [], previewDays = [], onAdjust, busy }) {
           return (
             <div
               key={day.date}
-              className={`grid grid-cols-1 lg:grid-cols-[150px_minmax(0,1fr)_96px_170px_130px] items-center gap-2.5 px-3 py-2 cursor-pointer transition-colors ${selected ? 'bg-[#17141D]' : 'hover:bg-[#151515]'}`}
+              className={`grid grid-cols-1 lg:grid-cols-[155px_minmax(0,1fr)_120px_170px_135px] items-center gap-2.5 px-3 py-2 cursor-pointer transition-colors ${selected ? 'bg-[#17141D]' : 'hover:bg-[#151515]'}`}
               onClick={() => setSelectedDate((prev) => (prev === day.date ? null : day.date))}
             >
               <div className="flex items-center justify-between lg:justify-start gap-2">
@@ -262,7 +268,7 @@ function LoadAnalysisTab({ daily = [], previewDays = [], onAdjust, busy }) {
                     <motion.div
                       initial={false}
                       animate={{ width: `${(busyM / 1440) * 100}%` }}
-                      transition={LAYOUT_TRANSITION}
+                      transition={barTransition}
                       style={{ background: calendarColors.busy }}
                     />
                   </HintTooltip>
@@ -272,17 +278,17 @@ function LoadAnalysisTab({ daily = [], previewDays = [], onAdjust, busy }) {
                     <motion.div
                       initial={false}
                       animate={{ width: `${(studyM / 1440) * 100}%` }}
-                      transition={LAYOUT_TRANSITION}
+                      transition={barTransition}
                       style={{ background: day.load_level === 'overload' ? '#c93b3b' : calendarColors.task }}
                     />
                   </HintTooltip>
                 )}
                 {freeStudyM > 0 && (
-                  <HintTooltip label={`Запас ёмкости: ${durationLabel(freeStudyM)}`}>
+                  <HintTooltip label={`Свободный запас: ${durationLabel(freeStudyM)}`}>
                     <motion.div
                       initial={false}
                       animate={{ width: `${(freeStudyM / 1440) * 100}%` }}
-                      transition={LAYOUT_TRANSITION}
+                      transition={barTransition}
                       style={{ background: calendarColors.break }}
                     />
                   </HintTooltip>
@@ -292,7 +298,7 @@ function LoadAnalysisTab({ daily = [], previewDays = [], onAdjust, busy }) {
                     <motion.div
                       initial={false}
                       animate={{ width: `${(reserveM / 1440) * 100}%` }}
-                      transition={LAYOUT_TRANSITION}
+                      transition={barTransition}
                       style={{ background: '#454545' }}
                     />
                   </HintTooltip>
@@ -302,7 +308,7 @@ function LoadAnalysisTab({ daily = [], previewDays = [], onAdjust, busy }) {
                     <motion.div
                       initial={false}
                       animate={{ width: `${(restM / 1440) * 100}%` }}
-                      transition={LAYOUT_TRANSITION}
+                      transition={barTransition}
                       style={{ background: '#181818' }}
                     />
                   </HintTooltip>
@@ -310,6 +316,7 @@ function LoadAnalysisTab({ daily = [], previewDays = [], onAdjust, busy }) {
               </div>
 
               <div className="text-[11px] text-[#B8B8B8] tabular-nums whitespace-nowrap">
+                <span className="lg:hidden text-[#7D7D7D]">План / доступно: </span>
                 {durationLabel(studyM)} / {durationLabel(plannableM)}
               </div>
 
@@ -377,286 +384,152 @@ function LoadAnalysisTab({ daily = [], previewDays = [], onAdjust, busy }) {
   );
 }
 
-const TIMELINE_START_MIN = 6 * 60;
-const TIMELINE_END_MIN = 24 * 60;
-const TIMELINE_SPAN = TIMELINE_END_MIN - TIMELINE_START_MIN;
-const TIMELINE_PX_PER_MIN = 0.45;
-const TIMELINE_HEIGHT = Math.round(TIMELINE_SPAN * TIMELINE_PX_PER_MIN);
-
-function ExactTimelineTab({ baseDate, reasons = [], timeline = [], taskIds = [], manualOverrides = {}, onAdjust, busy }) {
-  const defaultWeekStart = mondayIso(baseDate || new Date().toISOString().slice(0, 10));
-  const [weekStart, setWeekStart] = useState(defaultWeekStart);
-  const [estimatesOpen, setEstimatesOpen] = useState(false);
+function PriorityTasksTab({ reasons = [], timeline = [], taskIds = [], manualOverrides = {}, onAdjust, busy }) {
   const [editingEstimate, setEditingEstimate] = useState(null);
   const [estimateMinutes, setEstimateMinutes] = useState('');
+  const [openSteps, setOpenSteps] = useState({});
 
-  const weekEnd = addIsoDays(weekStart, 6);
-  const calendar = useQuery({
-    queryKey: ['calendar', weekStart, weekEnd],
-    queryFn: () => request(`/calendar?start=${weekStart}&end=${weekEnd}`),
-    refetchInterval: 10000,
-  });
-
-  const days = Array.from({ length: 7 }, (_, i) => addIsoDays(weekStart, i));
-  const events = calendar.data?.events ?? [];
-  const today = calendar.data?.today;
+  if (!taskIds.length) {
+    return (
+      <EmptyState
+        title="Нет оценённых задач"
+        description="Когда Ameba построит план, здесь появится приоритетный порядок задач, оценка времени и обоснование."
+      />
+    );
+  }
 
   const reasonsMap = new Map(reasons.map((r) => [r.task_id, r]));
   const timelineMap = new Map(timeline.map((t) => [t.id ?? t.task_id, t]));
 
   return (
-    <div className="flex flex-col gap-3">
-      {/* Compact Week Toolbar */}
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="inline-flex items-center border border-[#303030] bg-[#111111]">
-          <IconButton size="icon-sm" variant="ghost" aria-label="Предыдущая неделя" onClick={() => setWeekStart(addIsoDays(weekStart, -7))}>
-            <ChevronLeft className="h-3.5 w-3.5" />
-          </IconButton>
-          <Button size="sm" variant="ghost" className="border-x border-[#262626]" onClick={() => setWeekStart(defaultWeekStart)}>
-            {formatShortDate(weekStart)} – {formatShortDate(weekEnd)}
-          </Button>
-          <IconButton size="icon-sm" variant="ghost" aria-label="Следующая неделя" onClick={() => setWeekStart(addIsoDays(weekStart, 7))}>
-            <ChevronRight className="h-3.5 w-3.5" />
-          </IconButton>
-        </div>
+    <div className="border border-[#303030] bg-[#111111] divide-y divide-[#222222]">
+      {taskIds.map((tid, idx) => {
+        const reason = reasonsMap.get(tid);
+        const tItem = timelineMap.get(tid);
+        const title = tItem?.title ?? `Задача #${tid}`;
+        const plan = reason?.plan ?? tItem?.plan;
+        const manualVal = manualOverrides[String(tid)];
+        const editingThis = editingEstimate === tid;
+        const stepsOpen = Boolean(openSteps[tid]);
+        const steps = plan?.steps ?? [];
+        const assumptions = plan?.assumptions ?? [];
 
-        <div className="flex items-center gap-3 text-[11px] text-[#929292]">
-          <span className="inline-flex items-center gap-1.5"><span className="h-2 w-2 inline-block" style={{ background: calendarColors.busy }} /> Календарь</span>
-          <span className="inline-flex items-center gap-1.5"><span className="h-2 w-2 inline-block border border-dashed border-[#B98CE8]" style={{ background: calendarBlockColor('task', true) }} /> Блок Ameba</span>
-        </div>
-      </div>
-
-      {calendar.isPending ? (
-        <PageLoader label="Загрузка шкалы…" />
-      ) : calendar.error ? (
-        <Notice tone="error">{calendar.error.message}</Notice>
-      ) : (
-        <div className="border border-[#303030] bg-[#0D0D0D] overflow-x-auto">
-          <div className="min-w-[780px]">
-            {/* Day headers */}
-            <div className="grid grid-cols-[44px_repeat(7,1fr)] bg-[#111111] border-b border-[#303030]">
-              <div />
-              {days.map((day) => {
-                const wd = WEEKDAYS_RU[parseIsoDate(day).getUTCDay()];
-                const isToday = day === today;
-                return (
-                  <div
-                    key={day}
-                    className={`py-1.5 px-1 text-center text-[11px] border-l border-[#242424] tabular-nums ${isToday ? 'bg-[#7F49B4]/16 text-[#DFC4F8] font-semibold' : 'text-[#EAEAEA]'}`}
-                  >
-                    {formatShortDate(day)} · {wd}
-                  </div>
-                );
-              })}
-            </div>
-
-            {/* Hourly grid (06:00–24:00) */}
-            <div className="grid grid-cols-[44px_repeat(7,1fr)]">
-              <div className="relative bg-[#0D0D0D] text-[10px] text-[#7D7D7D] tabular-nums" style={{ height: TIMELINE_HEIGHT }}>
-                {[6, 8, 10, 12, 14, 16, 18, 20, 22].map((hour) => (
-                  <span
-                    key={hour}
-                    className="absolute right-1.5 -translate-y-1.5"
-                    style={{ top: (hour * 60 - TIMELINE_START_MIN) * TIMELINE_PX_PER_MIN }}
-                  >
-                    {String(hour).padStart(2, '0')}
-                  </span>
-                ))}
+        return (
+          <div key={tid} className="px-3.5 py-3 flex flex-col gap-2">
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-2 min-w-0">
+                <span className="text-[13px] font-semibold text-[#B98CE8] tabular-nums">#{idx + 1}</span>
+                <a href={`/?task=${tid}`} className="text-[14px] font-medium text-[#EAEAEA] hover:text-[#CFA9F5] hover:underline break-words">
+                  {title}
+                </a>
+                <DeadlineRisk reason={reason?.deadline_risk} />
+                {(plan?.hours_label || reason?.time_estimate) && (
+                  <Badge variant="accent" className="tabular-nums">{plan?.hours_label ?? reason?.time_estimate}</Badge>
+                )}
+                {plan?.completed_work_minutes > 0 && (
+                  <Badge variant="outline" className="tabular-nums">Сделано {plan.completed_work_minutes} мин</Badge>
+                )}
+                {manualVal !== undefined && (
+                  <Badge variant="info" className="tabular-nums">Ручной остаток {manualVal} мин</Badge>
+                )}
               </div>
 
-              {days.map((day) => {
-                const dayEvents = events.filter((ev) => ev.date === day);
-                const workWindows = dayEvents.filter((ev) => ev.kind === 'work');
-                const blocks = layoutOverlaps(dayEvents.filter((ev) => ev.kind !== 'work'));
-
-                return (
-                  <div
-                    key={day}
-                    className="relative border-l border-[#222222]"
-                    style={{ height: TIMELINE_HEIGHT }}
-                  >
-                    {[8, 10, 12, 14, 16, 18, 20, 22].map((hour) => (
-                      <div
-                        key={hour}
-                        className="absolute left-0 right-0 h-px bg-[#181818]"
-                        style={{ top: (hour * 60 - TIMELINE_START_MIN) * TIMELINE_PX_PER_MIN }}
-                      />
-                    ))}
-
-                    {workWindows.map((ev, idx) => {
-                      const s = Math.max(TIMELINE_START_MIN, toMin(ev.start));
-                      const e = Math.min(TIMELINE_END_MIN, toMin(ev.end));
-                      if (e <= s) return null;
-                      return (
-                        <div
-                          key={`w-${ev.id}-${idx}`}
-                          className="absolute left-0 right-0 border-l-2 border-[#527C42] bg-[#527C42]/12 pointer-events-none"
-                          style={{
-                            top: (s - TIMELINE_START_MIN) * TIMELINE_PX_PER_MIN,
-                            height: (e - s) * TIMELINE_PX_PER_MIN,
-                          }}
-                        />
-                      );
-                    })}
-
-                    {blocks.map((ev, idx) => {
-                      const s = Math.max(TIMELINE_START_MIN, toMin(ev.start));
-                      const e = Math.min(TIMELINE_END_MIN, toMin(ev.end));
-                      if (e <= s) return null;
-                      const isTemp = ev.source === 'ameba';
-                      const top = (s - TIMELINE_START_MIN) * TIMELINE_PX_PER_MIN;
-                      const height = Math.max(12, (e - s) * TIMELINE_PX_PER_MIN);
-                      const style = {
-                        top,
-                        height,
-                        left: `calc(${(ev.lane / ev.columns) * 100}% + 1px)`,
-                        width: `calc(${100 / ev.columns}% - 2px)`,
-                        background: calendarBlockColor(ev.kind, isTemp),
-                        borderColor: isTemp ? '#B98CE8' : calendarColors[ev.kind],
-                      };
-
-                      const inner = (
-                        <div
-                          className={`absolute px-1 text-[10px] leading-tight overflow-hidden text-[#EAEAEA] ${isTemp ? 'border border-dashed' : ''}`}
-                          style={style}
-                        >
-                          <div className="truncate font-medium">{ev.start} {ev.title}</div>
-                        </div>
-                      );
-
-                      return (
-                        <HintTooltip key={`${ev.id}-${idx}`} label={`${ev.start}–${ev.end} · ${ev.title}${isTemp ? ' (Ameba)' : ''}`}>
-                          {ev.task_id ? (
-                            <a href={`/?task=${ev.task_id}`} className="block">{inner}</a>
-                          ) : inner}
-                        </HintTooltip>
-                      );
-                    })}
+              <div className="shrink-0">
+                {editingThis ? (
+                  <div className="inline-flex items-center gap-1">
+                    <Input
+                      type="number"
+                      min={0}
+                      max={10000}
+                      placeholder="Минуты"
+                      value={estimateMinutes}
+                      onChange={(event) => setEstimateMinutes(event.currentTarget.value)}
+                      className="w-[82px] h-[26px] text-[12px]"
+                    />
+                    <Button
+                      size="xs"
+                      variant="primary"
+                      disabled={busy}
+                      onClick={() => {
+                        const val = estimateMinutes.trim() === '' ? null : Math.max(0, Number(estimateMinutes));
+                        onAdjust?.({ estimate_override: { task_id: tid, remaining_minutes: val } });
+                        setEditingEstimate(null);
+                      }}
+                    >
+                      Сохранить
+                    </Button>
+                    <Button size="xs" variant="ghost" onClick={() => setEditingEstimate(null)}>✕</Button>
                   </div>
-                );
-              })}
+                ) : (
+                  <div className="inline-flex items-center gap-1">
+                    <Button
+                      size="xs"
+                      variant="subtle"
+                      disabled={busy}
+                      onClick={() => {
+                        setEditingEstimate(tid);
+                        setEstimateMinutes(manualVal !== undefined ? String(manualVal) : String(plan?.work_max_minutes ?? ''));
+                      }}
+                    >
+                      Изменить остаток
+                    </Button>
+                    {manualVal !== undefined && (
+                      <Button
+                        size="xs"
+                        variant="ghost"
+                        disabled={busy}
+                        onClick={() => onAdjust?.({ estimate_override: { task_id: tid, remaining_minutes: null } })}
+                      >
+                        Сбросить
+                      </Button>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
+
+            {reason?.reason && (
+              <p className="text-[12px] text-[#DCDCDC] leading-snug m-0 break-words">{reason.reason}</p>
+            )}
+
+            {(reason?.effort || reason?.impact) && (
+              <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-[12px] text-[#929292]">
+                {reason.effort && <span>Сложность: <span className="text-[#B8B8B8]">{reason.effort}</span></span>}
+                {reason.impact && <span>Эффект: <span className="text-[#B8B8B8]">{reason.impact}</span></span>}
+              </div>
+            )}
+
+            {(steps.length > 0 || assumptions.length > 0) && (
+              <div className="flex flex-col gap-1">
+                <button
+                  type="button"
+                  onClick={() => setOpenSteps((prev) => ({ ...prev, [tid]: !prev[tid] }))}
+                  aria-expanded={stepsOpen}
+                  className="inline-flex items-center gap-1 text-[12px] text-[#929292] hover:text-[#EAEAEA] w-fit cursor-pointer"
+                >
+                  {stepsOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                  <span>Этапы ({steps.length})</span>
+                </button>
+                <CollapseSection open={stepsOpen}>
+                  <div className="border-l border-[#303030] pl-2.5 flex flex-col gap-1 text-[12px] pt-0.5">
+                    {steps.map((step, stepIdx) => (
+                      <div key={stepIdx} className="text-[#DCDCDC]">
+                        {stepIdx + 1}. {step.title} ·{' '}
+                        <span className="text-[#929292] tabular-nums">
+                          {step.min_minutes}–{step.max_minutes} мин{step.wait_minutes > 0 ? ` (+${step.wait_minutes} мин ожидания)` : ''}
+                        </span>
+                      </div>
+                    ))}
+                    {assumptions.map((text, aIdx) => (
+                      <div key={aIdx} className="text-[11px] text-[#929292]">• {text}</div>
+                    ))}
+                  </div>
+                </CollapseSection>
+              </div>
+            )}
           </div>
-        </div>
-      )}
-
-      {/* Optional compact estimates table behind toggle */}
-      {taskIds.length > 0 && (
-        <div className="flex flex-col gap-2">
-          <button
-            type="button"
-            onClick={() => setEstimatesOpen(!estimatesOpen)}
-            aria-expanded={estimatesOpen}
-            className="inline-flex items-center gap-1.5 text-[12px] text-[#929292] hover:text-[#EAEAEA] w-fit cursor-pointer"
-          >
-            {estimatesOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-            <span>Оценки задач ({taskIds.length})</span>
-          </button>
-
-          <CollapseSection open={estimatesOpen}>
-            <TableContainer>
-              <Table className="min-w-[680px]">
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="w-10">#</TableHead>
-                    <TableHead>Задача</TableHead>
-                    <TableHead className="w-24">Оценка</TableHead>
-                    <TableHead>Причина</TableHead>
-                    <TableHead className="w-36 text-right" />
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {taskIds.map((tid, idx) => {
-                    const reason = reasonsMap.get(tid);
-                    const tItem = timelineMap.get(tid);
-                    const title = tItem?.title ?? `Задача #${tid}`;
-                    const plan = reason?.plan ?? tItem?.plan;
-                    const manualVal = manualOverrides[String(tid)];
-                    const editingThis = editingEstimate === tid;
-
-                    return (
-                      <tr key={tid} className={tableRowClass}>
-                        <TableCell className="tabular-nums font-semibold text-[#B98CE8]">{idx + 1}</TableCell>
-                        <TableCell>
-                          <div className="flex items-center gap-1.5 min-w-0">
-                            <a href={`/?task=${tid}`} className="font-medium text-[#EAEAEA] hover:text-[#CFA9F5] hover:underline truncate">
-                              {title}
-                            </a>
-                            <DeadlineRisk reason={reason?.deadline_risk} />
-                            {manualVal !== undefined && <Badge variant="info">Ручн. {manualVal}м</Badge>}
-                          </div>
-                        </TableCell>
-                        <TableCell className="tabular-nums text-[12px]">
-                          {plan?.hours_label ?? reason?.time_estimate ?? '—'}
-                        </TableCell>
-                        <TableCell className="text-[12px] text-[#929292] max-w-[300px]">
-                          {reason?.reason ? (
-                            <HintTooltip label={reason.reason}>
-                              <span className="line-clamp-1 cursor-help">{reason.reason}</span>
-                            </HintTooltip>
-                          ) : '—'}
-                        </TableCell>
-                        <TableCell className="text-right">
-                          {editingThis ? (
-                            <div className="inline-flex items-center gap-1 justify-end">
-                              <Input
-                                type="number"
-                                min={0}
-                                max={10000}
-                                placeholder="Мин"
-                                value={estimateMinutes}
-                                onChange={(event) => setEstimateMinutes(event.currentTarget.value)}
-                                className="w-[70px] h-[24px] text-[12px]"
-                              />
-                              <Button
-                                size="xs"
-                                variant="primary"
-                                disabled={busy}
-                                onClick={() => {
-                                  const val = estimateMinutes.trim() === '' ? null : Math.max(0, Number(estimateMinutes));
-                                  onAdjust?.({ estimate_override: { task_id: tid, remaining_minutes: val } });
-                                  setEditingEstimate(null);
-                                }}
-                              >
-                                OK
-                              </Button>
-                              <Button size="xs" variant="ghost" onClick={() => setEditingEstimate(null)}>✕</Button>
-                            </div>
-                          ) : (
-                            <div className="inline-flex items-center gap-1 justify-end">
-                              <Button
-                                size="xs"
-                                variant="subtle"
-                                disabled={busy}
-                                onClick={() => {
-                                  setEditingEstimate(tid);
-                                  setEstimateMinutes(manualVal !== undefined ? String(manualVal) : String(plan?.work_max_minutes ?? ''));
-                                }}
-                              >
-                                Остаток
-                              </Button>
-                              {manualVal !== undefined && (
-                                <Button
-                                  size="xs"
-                                  variant="ghost"
-                                  disabled={busy}
-                                  onClick={() => onAdjust?.({ estimate_override: { task_id: tid, remaining_minutes: null } })}
-                                >
-                                  Сброс
-                                </Button>
-                              )}
-                            </div>
-                          )}
-                        </TableCell>
-                      </tr>
-                    );
-                  })}
-                </TableBody>
-              </Table>
-            </TableContainer>
-          </CollapseSection>
-        </div>
-      )}
+        );
+      })}
     </div>
   );
 }
@@ -664,11 +537,10 @@ function ExactTimelineTab({ baseDate, reasons = [], timeline = [], taskIds = [],
 export default function AmebaWorkspace({ features = {}, embedded = false }) {
   const queryClient = useQueryClient();
   const [tab, setTab] = useState('periods');
-  const [feedbackOpen, setFeedbackOpen] = useState(false);
-  const [summaryOpen, setSummaryOpen] = useState(false);
-  const [assumptionsOpen, setAssumptionsOpen] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
-  const [planFeedback, setPlanFeedback] = useState(null);
+  const [wishText, setWishText] = useState('');
+  const [submittedWish, setSubmittedWish] = useState('');
+  const [wishSuccess, setWishSuccess] = useState(false);
 
   const ranking = useQuery({
     queryKey: ['ameba-ranking'],
@@ -688,19 +560,54 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
     enabled: false,
     initialData: null,
   });
+  const memory = useQuery({
+    queryKey: ['agent-memory'],
+    queryFn: () => request('/auth/agent-memory'),
+    enabled: features.ameba !== false,
+  });
 
   const refresh = () => Promise.all([
     queryClient.invalidateQueries({ queryKey: ['tasks'] }),
     queryClient.invalidateQueries({ queryKey: ['ameba-ranking'] }),
+    queryClient.invalidateQueries({ queryKey: ['agent-memory'] }),
+    queryClient.invalidateQueries({ queryKey: ['calendar'] }),
   ]);
 
   const rank = useMutation({
-    mutationFn: () => agentRequest('/integrations/ameba/rank', {
-      method: 'POST',
-      body: JSON.stringify({ feedback: planFeedback ?? ranking.data?.feedback ?? '' }),
-    }),
-    onSuccess: async () => {
+    mutationFn: (feedbackText) => {
+      const hasText = typeof feedbackText === 'string' && feedbackText.trim().length > 0;
+      return agentRequest('/integrations/ameba/rank', {
+        method: 'POST',
+        body: JSON.stringify(hasText ? { feedback: feedbackText.trim() } : {}),
+      });
+    },
+    onMutate: (feedbackText) => {
+      if (typeof feedbackText === 'string' && feedbackText.trim()) {
+        setSubmittedWish(feedbackText.trim());
+        setWishText('');
+        setWishSuccess(false);
+      }
+    },
+    onSuccess: async (res) => {
+      setSubmittedWish('');
+      if (res?.consumed_feedback) setWishSuccess(true);
       await refresh();
+    },
+    onError: async (_err, feedbackText) => {
+      setSubmittedWish('');
+      if (typeof feedbackText === 'string' && feedbackText.trim()) {
+        try {
+          const latest = await queryClient.fetchQuery({
+            queryKey: ['ameba-ranking'],
+            queryFn: () => request('/integrations/ameba/ranking'),
+          });
+          if (!latest?.feedback) {
+            setWishText((prev) => prev || feedbackText.trim());
+          }
+        } catch {
+          setWishText((prev) => prev || feedbackText.trim());
+        }
+      }
     },
   });
 
@@ -708,8 +615,10 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
     mutationFn: () => request('/integrations/ameba/plan', { method: 'DELETE' }),
     onSuccess: async () => {
       rank.reset();
+      setSubmittedWish('');
+      setWishSuccess(false);
       queryClient.setQueryData(['ameba-live-plan'], null);
-      await Promise.all([refresh(), queryClient.invalidateQueries({ queryKey: ['calendar'] })]);
+      await refresh();
     },
   });
 
@@ -755,26 +664,38 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
   const error = ranking.error || rank.error || clearPlan.error || feedback.error || adjustPlan.error;
   const reservePct = activeSchedule?.reserve_ratio != null ? Math.round(activeSchedule.reserve_ratio * 100) : 22;
   const actionSize = embedded ? 'sm' : 'default';
+  const memoryCount = memory.data?.length ?? 0;
+
+  const mainButtonLabel = isRunning
+    ? 'Расчёт плана…'
+    : !data?.has_plan
+      ? 'Построить план'
+      : data?.needs_refresh
+        ? 'Пересчитать план'
+        : 'Пересчитать';
+  const mainButtonVariant = !data?.has_plan || data?.needs_refresh ? 'primary' : 'default';
+
+  const activeWishNotice = isRunning ? (submittedWish || data?.feedback || '') : '';
+  const pendingWish = !isRunning ? (data?.feedback || '') : '';
+  const restAssumption = activeSchedule?.rest_assumption || data?.calendar_schedule?.rest_assumption;
+
+  function submitWish() {
+    const trimmed = wishText.trim();
+    if (!trimmed || clearPlan.isPending || queue.data?.browser_busy) return;
+    rank.mutate(trimmed);
+  }
 
   const actionsBar = (
     <>
       <Button
         size={actionSize}
-        variant={feedbackOpen ? 'accent-subtle' : 'outline'}
-        onClick={() => setFeedbackOpen(!feedbackOpen)}
-        rightIcon={feedbackOpen ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
-      >
-        Пожелания
-      </Button>
-      <Button
-        size={actionSize}
-        variant="primary"
+        variant={mainButtonVariant}
         leftIcon={<RefreshCw className={`h-3.5 w-3.5 ${isRunning ? 'animate-spin' : ''}`} />}
         loading={rank.isPending && !queue.data?.ameba_running}
-        disabled={clearPlan.isPending || queue.data?.browser_busy}
+        disabled={isRunning || clearPlan.isPending || queue.data?.browser_busy}
         onClick={() => rank.mutate()}
       >
-        {queue.data?.ameba_running ? 'Применить' : 'Обновить план'}
+        {mainButtonLabel}
       </Button>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
@@ -783,14 +704,6 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
           </IconButton>
         </DropdownMenuTrigger>
         <DropdownMenuContent>
-          {data?.explanation && (
-            <DropdownMenuItem onClick={() => setSummaryOpen(!summaryOpen)}>
-              {summaryOpen ? 'Скрыть сводку плана' : 'Сводка плана'}
-            </DropdownMenuItem>
-          )}
-          <DropdownMenuItem onClick={() => setAssumptionsOpen(!assumptionsOpen)}>
-            {assumptionsOpen ? 'Скрыть допущения' : 'Допущения планировщика'}
-          </DropdownMenuItem>
           <DropdownMenuItem onClick={() => setLogOpen(!logOpen)}>
             <Terminal className="h-3.5 w-3.5" />
             {logOpen ? 'Скрыть журнал Ameba' : 'Журнал Ameba'}
@@ -798,7 +711,7 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
           {hasManualAdjustments && (
             <DropdownMenuItem disabled={isRunning} onClick={() => adjustPlan.mutate({ reset: true })}>
               <RotateCcw className="h-3.5 w-3.5" />
-              Сбросить правки
+              Сбросить ручные правки
             </DropdownMenuItem>
           )}
           <DropdownMenuSeparator />
@@ -826,7 +739,8 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
           actions={actionsBar}
         />
       ) : (
-        <div className="flex flex-wrap items-center justify-between gap-2 border border-[#303030] bg-[#111111] px-3 py-2">
+        <div className="relative overflow-hidden flex flex-wrap items-center justify-between gap-2 border border-[#303030] bg-[#111111] px-3 py-2">
+          <LiveHorizon active={isRunning || liveActive} tone={status.badge === 'warning' ? 'warning' : status.badge === 'danger' ? 'danger' : 'accent'} />
           <div className="flex items-center gap-2">
             <StatusIndicator tone={status.tone} pulse={status.pulse} />
             <span className="text-[13px] font-semibold text-[#EAEAEA]">Ameba</span>
@@ -836,91 +750,187 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
         </div>
       )}
 
-      {data?.explanation && (
-        <CollapseSection open={summaryOpen}>
-          <div className="border border-[#303030] bg-[#111111] px-3 py-2 text-[12px] text-[#D0D0D0] whitespace-pre-wrap break-words flex items-start justify-between gap-2">
-            <span>{data.explanation}</span>
-            <IconButton size="icon-sm" variant="ghost" aria-label="Закрыть сводку" onClick={() => setSummaryOpen(false)}>
-              <X className="h-3.5 w-3.5" />
-            </IconButton>
-          </div>
-        </CollapseSection>
+      {data && data.enabled === false && (
+        <Notice
+          tone="warning"
+          action={(
+            <Button size="xs" variant="outline" asChild>
+              <a href="/profile?tab=agents">Открыть настройки агентов →</a>
+            </Button>
+          )}
+        >
+          Ameba отключена в личных настройках. Включите её, чтобы строить и обновлять план.
+        </Notice>
       )}
 
-      <CollapseSection open={assumptionsOpen}>
-        <div className="border border-[#303030] bg-[#111111] px-3 py-2 flex flex-col gap-1 text-[12px]">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-[#EAEAEA]">
-              {activeSchedule?.rest_assumption || data?.calendar_schedule?.rest_assumption || 'Сон ~8 ч, базовый быт и перерывы защищены.'}
-            </span>
-            <IconButton size="icon-sm" variant="ghost" aria-label="Закрыть допущения" onClick={() => setAssumptionsOpen(false)}>
-              <X className="h-3.5 w-3.5" />
-            </IconButton>
+      {/* One-time wish box */}
+      <section className="border border-[#303030] bg-[#111111] p-3 flex flex-col gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="min-w-0">
+            <div className="text-[13px] font-semibold text-[#EAEAEA]">Разовое пожелание к плану</div>
+            <div className="text-[11px] text-[#929292]">
+              Один раз скорректирует текущий план, а важные предпочтения Ameba сохранит в память.
+            </div>
           </div>
-          {activeSchedule?.adaptation_summary && (
-            <div className="text-[#929292]">{activeSchedule.adaptation_summary}</div>
-          )}
-          {data?.observations_count > 0 && (
-            <div className="text-[11px] text-[#7D7D7D] tabular-nums">Откликов: {data.observations_count}</div>
-          )}
+          <Button
+            size="xs"
+            variant={tab === 'memory' ? 'accent-subtle' : 'outline'}
+            leftIcon={<Brain className="h-3 w-3" />}
+            onClick={() => setTab('memory')}
+          >
+            Память ({memoryCount})
+          </Button>
         </div>
-      </CollapseSection>
 
-      <CollapseSection open={feedbackOpen}>
-        <div className="border border-[#303030] bg-[#111111] p-3 flex flex-col gap-2">
-          <div className="text-[12px] font-medium text-[#EAEAEA]">Пожелания к нагрузке и отдыху</div>
+        <div className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-end">
           <Textarea
             rows={2}
             maxLength={4000}
+            aria-label="Разовое пожелание к плану"
             placeholder="Например: пятницу сделай облегчённой, сложные задачи ставь до 18:00"
-            value={planFeedback ?? data?.feedback ?? ''}
-            onChange={(event) => setPlanFeedback(event.currentTarget.value)}
+            value={wishText}
+            onChange={(event) => setWishText(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+                event.preventDefault();
+                submitWish();
+              }
+            }}
+            className="flex-1"
           />
-          <div className="flex justify-end">
-            <Button
-              size="sm"
-              variant="primary"
-              disabled={clearPlan.isPending || queue.data?.browser_busy}
-              onClick={() => rank.mutate()}
-            >
-              Применить и пересчитать
-            </Button>
-          </div>
+          <Button
+            size="default"
+            variant="primary"
+            disabled={!wishText.trim() || clearPlan.isPending || queue.data?.browser_busy}
+            onClick={submitWish}
+            className="shrink-0"
+          >
+            Учесть в плане
+          </Button>
         </div>
-      </CollapseSection>
+
+        {activeWishNotice && (
+          <div className="flex items-center gap-2 border-t border-[#222222] pt-2 text-[12px] text-[#DFC4F8]">
+            <StatusIndicator tone="active" pulse />
+            <span className="break-words">Ameba учитывает пожелание и сохраняет правила в память: «{activeWishNotice}»</span>
+          </div>
+        )}
+
+        {pendingWish && (
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[#222222] pt-2 text-[12px]">
+            <span className="text-[#D4A24C] break-words">Ожидает применения: «{pendingWish}»</span>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <Button
+                size="xs"
+                variant="primary"
+                disabled={clearPlan.isPending || queue.data?.browser_busy}
+                onClick={() => rank.mutate()}
+              >
+                Запустить расчёт
+              </Button>
+              <Button
+                size="xs"
+                variant="ghost"
+                disabled={adjustPlan.isPending}
+                onClick={() => adjustPlan.mutate({ clear_feedback: true })}
+              >
+                Отменить
+              </Button>
+            </div>
+          </div>
+        )}
+      </section>
+
+      <AgentProgress
+        providers={['ameba']}
+        active={rank.isPending}
+        defaultOpen={false}
+        hideSummaryWhenIdle
+        open={logOpen}
+        onOpenChange={setLogOpen}
+      />
+
+      {wishSuccess && (
+        <Notice
+          tone="success"
+          onClose={() => setWishSuccess(false)}
+          action={(
+            <Button size="xs" variant="outline" onClick={() => setTab('memory')}>
+              Проверить память
+            </Button>
+          )}
+        >
+          Ameba пересчитала план с учётом пожелания и обновила память.
+        </Notice>
+      )}
 
       {rank.data?.unchanged && (
         <Notice tone="info">
-          {rank.data.status === 'running' ? 'Ameba уже работает с этими данными.' : 'Данные не изменились.'}
+          {rank.data.status === 'running' ? 'Ameba уже работает с этими данными.' : 'Данные не изменились — план уже актуален.'}
         </Notice>
       )}
       {error && <Notice tone="error">{error.message}</Notice>}
 
-      {/* Tabs + Inline Metrics Row + Conditional Risks Sidebar */}
+      {/* Open Plan Summary Card */}
+      {data?.has_plan && !data?.plan_reset && (
+        <section className="border border-[#303030] bg-[#111111] px-3.5 py-2.5 flex flex-col gap-1.5 text-[12px]">
+          {data.explanation && (
+            <p className="text-[#EAEAEA] leading-snug m-0 whitespace-pre-wrap break-words">{data.explanation}</p>
+          )}
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[#929292] tabular-nums">
+            {activeSchedule?.hours_label && (
+              <span>Объём работ: <strong className="text-[#EAEAEA] font-medium">{activeSchedule.hours_label}</strong></span>
+            )}
+            <span>
+              Задач в плане: <strong className="text-[#EAEAEA] font-medium">{data.ranked_count ?? 0}</strong>
+              {data.pending_count > 0 && (
+                <span className="text-[#D4A24C]"> (ещё {data.pending_count} ждут разбора Monocle)</span>
+              )}
+            </span>
+            <span>Защищённый резерв: <strong className="text-[#EAEAEA] font-medium">{reservePct}%</strong></span>
+            {unfitted.length > 0 && (
+              <span className="text-[#D4A24C]">Не поместилось: {unfitted.length}</span>
+            )}
+            {conflicts.length > 0 && (
+              <span className="text-[#D4A24C]">Конфликтов сроков: {conflicts.length}</span>
+            )}
+          </div>
+          {(restAssumption || activeSchedule?.adaptation_summary || data?.observations_count > 0) && (
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-[#7D7D7D]">
+              {restAssumption && <span>{restAssumption}</span>}
+              {activeSchedule?.adaptation_summary && <span>· {activeSchedule.adaptation_summary}</span>}
+              {data.observations_count > 0 && <span className="tabular-nums">· Откликов: {data.observations_count}</span>}
+            </div>
+          )}
+          {hasManualAdjustments && (
+            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[#222222] pt-1.5 mt-0.5">
+              <span className="text-[11px] text-[#6FA3CC]">Применены ручные правки дней, переносов или остатков времени.</span>
+              <Button
+                size="xs"
+                variant="outline"
+                leftIcon={<RotateCcw className="h-3 w-3" />}
+                disabled={isRunning || adjustPlan.isPending}
+                onClick={() => adjustPlan.mutate({ reset: true })}
+              >
+                Сбросить ручные правки
+              </Button>
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* Tabs + Conditional Risks Sidebar */}
       <div className={hasSidebar ? 'grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_300px] gap-4 items-start' : 'grid grid-cols-1'}>
         <Tabs value={tab} onValueChange={setTab} className="min-w-0">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#303030]">
             <TabsList className="border-b-0">
-              <TabsTrigger value="periods">Периоды</TabsTrigger>
-              <TabsTrigger value="load">Нагрузка</TabsTrigger>
-              <TabsTrigger value="timeline">Временная шкала</TabsTrigger>
+              <TabsTrigger value="periods">План по дням</TabsTrigger>
+              <TabsTrigger value="tasks">
+                Приоритет задач{data?.ranked_count != null ? ` (${data.ranked_count})` : ''}
+              </TabsTrigger>
+              <TabsTrigger value="load">Нагрузка по дням</TabsTrigger>
+              <TabsTrigger value="memory">Память ({memoryCount})</TabsTrigger>
             </TabsList>
-
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pb-1.5 text-[12px] text-[#929292] tabular-nums">
-              {activeSchedule?.hours_label && (
-                <span>Объём: <strong className="text-[#EAEAEA] font-medium">{activeSchedule.hours_label}</strong></span>
-              )}
-              <span>
-                Задач: <strong className="text-[#EAEAEA] font-medium">{data?.ranked_count ?? 0}</strong>
-                {data?.pending_count > 0 && <span className="text-[#D4A24C]"> (+{data.pending_count})</span>}
-              </span>
-              <span>Резерв: <strong className="text-[#EAEAEA] font-medium">{reservePct}%</strong></span>
-              {(unfitted.length > 0 || conflicts.length > 0) && (
-                <span className="text-[#D4A24C]">
-                  {unfitted.length ? `Не помест.: ${unfitted.length}` : `Конфл.: ${conflicts.length}`}
-                </span>
-              )}
-            </div>
           </div>
 
           <TabsContent value="periods">
@@ -941,6 +951,19 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
             </TabTransition>
           </TabsContent>
 
+          <TabsContent value="tasks">
+            <TabTransition transitionKey="tasks">
+              <PriorityTasksTab
+                reasons={data?.reasons ?? []}
+                timeline={activeTimeline}
+                taskIds={data?.task_ids ?? []}
+                manualOverrides={manual.estimate_overrides ?? {}}
+                onAdjust={(payload) => adjustPlan.mutate(payload)}
+                busy={adjustPlan.isPending || isRunning}
+              />
+            </TabTransition>
+          </TabsContent>
+
           <TabsContent value="load">
             <TabTransition transitionKey="load">
               <LoadAnalysisTab
@@ -952,17 +975,14 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
             </TabTransition>
           </TabsContent>
 
-          <TabsContent value="timeline">
-            <TabTransition transitionKey="timeline">
-              <ExactTimelineTab
-                baseDate={activeSchedule?.generated_date}
-                reasons={data?.reasons ?? []}
-                timeline={activeTimeline}
-                taskIds={data?.task_ids ?? []}
-                manualOverrides={manual.estimate_overrides ?? {}}
-                onAdjust={(payload) => adjustPlan.mutate(payload)}
-                busy={adjustPlan.isPending || isRunning}
-              />
+          <TabsContent value="memory">
+            <TabTransition transitionKey="memory">
+              <div className="flex flex-col gap-3">
+                <p className="text-[12px] text-[#929292] m-0">
+                  Устойчивые факты и предпочтения, которые учитывает Ameba и другие агенты. Разовые пожелания сохраняются сюда.
+                </p>
+                <AgentMemory />
+              </div>
             </TabTransition>
           </TabsContent>
         </Tabs>
@@ -1005,15 +1025,6 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
           </aside>
         )}
       </div>
-
-      <AgentProgress
-        providers={['ameba']}
-        active={rank.isPending}
-        defaultOpen={false}
-        hideSummaryWhenIdle
-        open={logOpen}
-        onOpenChange={setLogOpen}
-      />
     </div>
   );
 }

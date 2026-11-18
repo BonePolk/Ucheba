@@ -1,7 +1,7 @@
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import { X } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { AnimatePresence, EASE_OUT, FAST_TRANSITION, motion, PANEL_TRANSITION } from '@/lib/motion';
+import { AnimatePresence, EASE_OUT, FAST_TRANSITION, motion, PANEL_TRANSITION, useReducedMotion } from '@/lib/motion';
 
 const sizeMap = {
   sm: 'max-w-[380px]',
@@ -10,8 +10,11 @@ const sizeMap = {
   xl: 'max-w-[1040px]',
 };
 
+const INSTANT_TRANSITION = { duration: 0.01 };
+
 export function Modal({ opened, open, onClose, title, description, size = 'md', children, className }) {
   const isOpen = Boolean(opened ?? open);
+  const reduced = useReducedMotion();
   return (
     <DialogPrimitive.Root open={isOpen} onOpenChange={(next) => { if (!next) onClose?.(); }}>
       <AnimatePresence>
@@ -20,10 +23,10 @@ export function Modal({ opened, open, onClose, title, description, size = 'md', 
             <DialogPrimitive.Overlay forceMount asChild>
               <motion.div
                 key="modal-overlay"
-                initial={{ opacity: 0 }}
+                initial={reduced ? false : { opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
-                transition={FAST_TRANSITION}
+                transition={reduced ? INSTANT_TRANSITION : FAST_TRANSITION}
                 className="fixed inset-0 z-50 bg-black/75"
               />
             </DialogPrimitive.Overlay>
@@ -35,10 +38,10 @@ export function Modal({ opened, open, onClose, title, description, size = 'md', 
               >
                 <motion.div
                   key="modal-content"
-                  initial={{ opacity: 0, y: 8, scale: 0.985 }}
+                  initial={reduced ? false : { opacity: 0, y: 8, scale: 0.985 }}
                   animate={{ opacity: 1, y: 0, scale: 1 }}
-                  exit={{ opacity: 0, y: 6, scale: 0.985 }}
-                  transition={{ duration: 0.16, ease: EASE_OUT }}
+                  exit={reduced ? { opacity: 0 } : { opacity: 0, y: 6, scale: 0.985 }}
+                  transition={reduced ? INSTANT_TRANSITION : { duration: 0.16, ease: EASE_OUT }}
                   className={cn(
                     'pointer-events-auto w-full rounded-none bg-[#111111] border border-[#303030] text-[#EAEAEA] flex flex-col max-h-[calc(100dvh-24px)] focus:outline-none',
                     sizeMap[size] ?? sizeMap.md,
@@ -85,6 +88,7 @@ const drawerAxis = {
 
 export function Drawer({ opened, open, onClose, title, side = 'right', widthClass = 'w-[440px] max-w-[100vw]', children }) {
   const isOpen = Boolean(opened ?? open);
+  const reduced = useReducedMotion();
   const sideClasses = {
     right: `right-0 top-0 bottom-0 border-l ${widthClass}`,
     left: `left-0 top-0 bottom-0 border-r ${widthClass}`,
@@ -99,20 +103,20 @@ export function Drawer({ opened, open, onClose, title, side = 'right', widthClas
             <DialogPrimitive.Overlay forceMount asChild>
               <motion.div
                 key="drawer-overlay"
-                initial={{ opacity: 0 }}
+                initial={reduced ? false : { opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
-                transition={FAST_TRANSITION}
+                transition={reduced ? INSTANT_TRANSITION : FAST_TRANSITION}
                 className="fixed inset-0 z-50 bg-black/70"
               />
             </DialogPrimitive.Overlay>
             <DialogPrimitive.Content forceMount asChild aria-describedby={undefined}>
               <motion.div
                 key="drawer-content"
-                initial={motionProps.initial}
+                initial={reduced ? false : motionProps.initial}
                 animate={motionProps.animate}
-                exit={motionProps.exit}
-                transition={PANEL_TRANSITION}
+                exit={reduced ? { opacity: 0 } : motionProps.exit}
+                transition={reduced ? INSTANT_TRANSITION : PANEL_TRANSITION}
                 className={cn(
                   'fixed z-50 rounded-none bg-[#111111] border-[#303030] text-[#EAEAEA] flex flex-col focus:outline-none',
                   sideClasses[side] ?? sideClasses.right,

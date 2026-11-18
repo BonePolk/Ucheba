@@ -20,7 +20,7 @@ from common.identity import user_id
 from common.rpc import internal_token
 from common.office import spreadsheet_text, table_text
 
-LIMIT = 10 * 1024 * 1024
+LIMIT = 25 * 1024 * 1024
 migrated_files = set()
 
 
@@ -39,7 +39,12 @@ def silo_request(name, arguments):
     except httpx.HTTPError:
         raise HTTPException(503, 'Не удалось подключиться к Silo. Загрузка не подтверждена как сохранённая') from None
     if not response.is_success:
-        raise HTTPException(response.status_code, 'Не удалось прочитать или сохранить файл в Silo')
+        detail = 'Не удалось прочитать или сохранить файл в Silo'
+        try:
+            detail = str(response.json().get('detail') or detail)[:500]
+        except ValueError:
+            pass
+        raise HTTPException(response.status_code, detail)
     return response.json()['output']
 
 
@@ -106,11 +111,13 @@ def read(file_id, page=1):
 
 def read_content(name, content, page=1, info=None):
     if len(content) > LIMIT:
-        raise ValueError('Файл больше 10 МБ')
+        raise ValueError('Файл больше 25 МБ')
     suffix = Path(name).suffix.lower()
     result = dict(info or {'name': name, 'size': len(content)})
     if suffix == '.pdf' or content.startswith(b'%PDF'):
         reader = PdfReader(io.BytesIO(content))
+        if reader.is_encrypted and reader.decrypt('') == 0:
+            raise ValueError('PDF защищён паролем открытия')
         if page < 1 or page > len(reader.pages):
             raise ValueError('Нет такой страницы PDF')
         result.update(pages=len(reader.pages), page=page, text=(reader.pages[page - 1].extract_text() or '')[:40000])
@@ -198,7 +205,7 @@ async def request_file(args, tab, validate_url, safe_url):
                 async for chunk in response.aiter_bytes():
                     content.extend(chunk)
                     if len(content) > LIMIT:
-                        raise ValueError('Ответ больше 10 МБ')
+                        raise ValueError('Ответ больше 25 МБ')
                 content = bytes(content)
                 kind = response.headers.get('content-type', '').split(';')[0]
                 if args['action'] == 'python_http_request' and (kind.startswith('text/') or kind in ('application/json', 'application/xml')):

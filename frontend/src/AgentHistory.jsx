@@ -5,7 +5,7 @@ import { request, agentName } from './api';
 import { Button } from '@/components/ui/button';
 import { Badge, EmptyState, Notice, PageLoader, SectionHeader } from '@/components/ui/surface';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow, TableContainer } from '@/components/ui/table';
-import { FAST_TRANSITION, motion } from '@/lib/motion';
+import { FAST_TRANSITION, motion, useReducedMotion } from '@/lib/motion';
 
 const statuses = {
   running: { label: 'В работе', variant: 'accent' },
@@ -14,6 +14,7 @@ const statuses = {
 };
 
 export default function AgentHistory() {
+  const reduced = useReducedMotion();
   const [before, setBefore] = useState(null);
   const [expandedId, setExpandedId] = useState(null);
   const history = useQuery({
@@ -90,9 +91,9 @@ export default function AgentHistory() {
                       <TableRow className="bg-[#0D0D0D] hover:bg-[#0D0D0D]">
                         <TableCell colSpan={5} className="p-3">
                           <motion.div
-                            initial={{ opacity: 0, y: -4 }}
+                            initial={reduced ? false : { opacity: 0, y: -4 }}
                             animate={{ opacity: 1, y: 0 }}
-                            transition={FAST_TRANSITION}
+                            transition={reduced ? { duration: 0.01 } : FAST_TRANSITION}
                             className="flex flex-col gap-2"
                           >
                             {summary && (

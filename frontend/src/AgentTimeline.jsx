@@ -19,7 +19,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { Badge, EmptyState, Notice } from '@/components/ui/surface';
 import { HintTooltip } from '@/components/ui/tooltip';
-import { CollapseSection, LAYOUT_TRANSITION, motion } from '@/lib/motion';
+import { CollapseSection, LAYOUT_TRANSITION, motion, useReducedMotion } from '@/lib/motion';
 
 const LOAD_META = {
   free: { label: 'Свободно', variant: 'default', accent: '#454545' },
@@ -37,10 +37,10 @@ const KIND_LABELS = {
 };
 
 const OUTCOMES = [
-  { value: 'done', label: 'Выполнено' },
-  { value: 'partial', label: 'Частично' },
-  { value: 'too_hard', label: 'Тяжело' },
-  { value: 'missed', label: 'Не вышло' },
+  { value: 'done', label: 'Выполнено полностью', optionalMinutes: true },
+  { value: 'partial', label: 'Сделана часть…', optionalMinutes: false },
+  { value: 'too_hard', label: 'Идёт тяжелее оценки…', optionalMinutes: false },
+  { value: 'missed', label: 'Не вышло позаниматься', optionalMinutes: true },
 ];
 
 const MONTHS_SHORT = ['янв', 'фев', 'мар', 'апр', 'мая', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
@@ -109,6 +109,7 @@ export default function AgentTimeline({
   onRefresh,
   hideConflicts = false,
 }) {
+  const reduced = useReducedMotion();
   const [expanded, setExpanded] = useState(false);
   const [changesOpen, setChangesOpen] = useState(false);
   const [openDetails, setOpenDetails] = useState({});
@@ -144,8 +145,18 @@ export default function AgentTimeline({
         )}
 
         {previewDays.length > 0 ? (
-          <div className="border border-[#303030] bg-[#111111] p-3 flex flex-col gap-2">
-            <span className="text-[12px] font-medium text-[#EAEAEA]">Ближайшие дни</span>
+          <div className="border border-[#303030] bg-[#111111] p-3 flex flex-col gap-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-col gap-0.5">
+                <span className="text-[12px] font-medium text-[#EAEAEA]">Ближайшие дни по календарю</span>
+                <span className="text-[11px] text-[#929292]">
+                  План Ameba ещё не построен — при запуске она оценит задачи, учтёт календарь и память и распределит работу по дням.
+                </span>
+              </div>
+              {finished && onRefresh && (
+                <Button size="sm" variant="primary" onClick={onRefresh}>Построить план</Button>
+              )}
+            </div>
             <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
               {previewDays.slice(0, 7).map((day) => (
                 <div key={day.date} className="border border-[#262626] bg-[#0D0D0D] px-2.5 py-2 flex flex-col gap-0.5">
@@ -153,7 +164,7 @@ export default function AgentTimeline({
                     {formatShortDate(day.date)} · {WEEKDAYS[parseIsoDate(day.date).getUTCDay()]}
                   </div>
                   <div className="text-[11px] text-[#929292]">
-                    {day.busy_minutes > 0 ? durationLabel(day.busy_minutes) : 'Свободно'}
+                    {day.busy_minutes > 0 ? `Занято ${durationLabel(day.busy_minutes)}` : 'Свободно'}
                   </div>
                   {day.markers?.length > 0 && (
                     <div className="text-[11px] text-[#D4A24C] truncate">{day.markers.map((m) => m.title).join(', ')}</div>
@@ -165,8 +176,11 @@ export default function AgentTimeline({
         ) : (
           <EmptyState
             icon={<CalendarDays className="h-5 w-5" />}
-            title={finished ? 'План не построен' : 'Ameba оценивает задачи…'}
-            action={finished && onRefresh ? <Button variant="primary" onClick={onRefresh}>Обновить план</Button> : undefined}
+            title={finished ? 'План ещё не построен' : 'Ameba оценивает задачи…'}
+            description={finished
+              ? 'Ameba оценит задачи, учтёт ваш календарь и память и соберёт гибкий план по дням.'
+              : 'Изучает задачи, календарь и сохранённые предпочтения, чтобы составить план по дням.'}
+            action={finished && onRefresh ? <Button variant="primary" onClick={onRefresh}>Построить план</Button> : undefined}
           />
         )}
       </div>
@@ -280,13 +294,14 @@ export default function AgentTimeline({
           );
           const accent = period.kind === 'free' ? LOAD_META.free.accent : period.kind !== 'work' ? LOAD_META.light.accent : load.accent;
           const detailsVisible = Boolean(openDetails[period.id]);
-          const hasDetails = Boolean(period.day_hints?.length || period.rest_note || markers.length || commitments.length);
+          const hasHiddenHints = !isCurrent && Boolean(period.day_hints?.length || period.rest_note);
+          const hasDetails = Boolean(hasHiddenHints || markers.length || commitments.length);
 
           return (
             <motion.section
               key={period.id}
-              layout="position"
-              transition={LAYOUT_TRANSITION}
+              layout={reduced ? false : 'position'}
+              transition={reduced ? { duration: 0.01 } : LAYOUT_TRANSITION}
               className="grid grid-cols-1 md:grid-cols-[170px_minmax(0,1fr)] gap-2.5 px-3 py-2.5 border-l-2"
               style={{
                 borderLeftColor: accent,
@@ -327,7 +342,7 @@ export default function AgentTimeline({
                         onClick={() => toggleDetails(period.id)}
                       >
                         {detailsVisible ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-                        <span>Детали</span>
+                        <span>{detailsVisible ? 'Свернуть' : 'Расписание и подсказки'}</span>
                       </Button>
                     )}
                     {onAdjust && (
@@ -338,7 +353,9 @@ export default function AgentTimeline({
                           </Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent>
-                          <DropdownMenuLabel>{formatDateRange(period.start_date, period.end_date)}</DropdownMenuLabel>
+                          <DropdownMenuLabel>Режим дней (пересчёт без ИИ)</DropdownMenuLabel>
+                          <DropdownMenuLabel className="text-[#EAEAEA]">{formatDateRange(period.start_date, period.end_date)}</DropdownMenuLabel>
+                          <DropdownMenuSeparator />
                           <DropdownMenuItem
                             onClick={() => onAdjust({
                               day_overrides: Object.fromEntries((period.days_summary ?? []).map((d) => [d.date, 'light'])),
@@ -381,6 +398,7 @@ export default function AgentTimeline({
                       const dlText = formatDeadline(task.deadline, schedule.timezone);
                       const isPinned = Boolean(taskPins[String(task.task_id)]);
                       const manualVal = estimateOverrides[String(task.task_id)];
+                      const activeOutcome = editingThis ? OUTCOMES.find((o) => o.value === feedbackDraft.outcome) : null;
 
                       return (
                         <div key={task.task_id} className="px-2.5 py-1.5 flex flex-col gap-1.5">
@@ -392,9 +410,13 @@ export default function AgentTimeline({
                                 </a>
                                 <Badge variant="accent" className="tabular-nums">{task.hours_label}</Badge>
                                 {!task.completes_task && (
-                                  <span className="text-[11px] text-[#929292] tabular-nums">{task.share_percent}%</span>
+                                  <HintTooltip label="Доля оставшейся работы по задаче в этом периоде">
+                                    <Badge variant="outline" className="tabular-nums cursor-help">
+                                      часть · ~{task.share_percent}%
+                                    </Badge>
+                                  </HintTooltip>
                                 )}
-                                {isPinned && <Badge variant="info">Сдвиг</Badge>}
+                                {isPinned && <Badge variant="info">Перенесена</Badge>}
                                 {manualVal !== undefined && <Badge variant="info">Ост. {manualVal}м</Badge>}
                                 {dlText && (
                                   <span className={`text-[11px] tabular-nums ${task.deadline_policy === 'soft' ? 'text-[#929292]' : 'text-[#D4A24C]'}`}>
@@ -414,7 +436,7 @@ export default function AgentTimeline({
                                 {onFeedback && (
                                   <DropdownMenu>
                                     <DropdownMenuTrigger asChild>
-                                      <Button size="xs" variant="accent-subtle" disabled={busy}>Отклик</Button>
+                                      <Button size="xs" variant="accent-subtle" disabled={busy}>Отметить прогресс</Button>
                                     </DropdownMenuTrigger>
                                     <DropdownMenuContent>
                                       {OUTCOMES.map((item) => (
@@ -434,23 +456,23 @@ export default function AgentTimeline({
                                     </DropdownMenuTrigger>
                                     <DropdownMenuContent>
                                       <DropdownMenuItem onClick={() => onAdjust({ task_pin: { task_id: task.task_id, shift_days: -1 } })}>
-                                        Сдвинуть раньше (−1 д)
+                                        Перенести на день раньше (−1 д)
                                       </DropdownMenuItem>
                                       <DropdownMenuItem onClick={() => onAdjust({ task_pin: { task_id: task.task_id, shift_days: 1 } })}>
-                                        Сдвинуть позже (+1 д)
+                                        Перенести на день позже (+1 д)
                                       </DropdownMenuItem>
                                       {isPinned && (
                                         <DropdownMenuItem onClick={() => onAdjust({ task_pin: { task_id: task.task_id, clear: true } })}>
-                                          Сбросить сдвиг
+                                          Сбросить перенос
                                         </DropdownMenuItem>
                                       )}
                                       <DropdownMenuSeparator />
                                       <DropdownMenuItem onClick={() => openEstimateEditor(task, period.id, manualVal)}>
-                                        Оценка остатка…
+                                        Изменить остаток времени…
                                       </DropdownMenuItem>
                                       {manualVal !== undefined && (
                                         <DropdownMenuItem onClick={() => onAdjust({ estimate_override: { task_id: task.task_id, remaining_minutes: null } })}>
-                                          Сбросить оценку
+                                          Сбросить ручной остаток
                                         </DropdownMenuItem>
                                       )}
                                     </DropdownMenuContent>
@@ -464,21 +486,24 @@ export default function AgentTimeline({
                             {editingThis && (
                               <div className="flex flex-wrap items-center gap-1.5 border-t border-dashed border-[#303030] pt-1.5">
                                 <span className="text-[12px] font-medium text-[#EAEAEA]">
-                                  {OUTCOMES.find((o) => o.value === feedbackDraft.outcome)?.label}:
+                                  {activeOutcome?.label?.replace('…', '')}:
+                                </span>
+                                <span className="text-[12px] text-[#929292]">
+                                  Сколько минут потратили{activeOutcome?.optionalMinutes ? ' (необяз.)' : ''}:
                                 </span>
                                 <Input
                                   type="number"
                                   min={0}
                                   max={1440}
-                                  placeholder="Мин"
+                                  placeholder={activeOutcome?.optionalMinutes ? 'необяз.' : 'Минуты'}
                                   value={customMinutes}
                                   onChange={(event) => setCustomMinutes(event.currentTarget.value)}
-                                  className="w-[90px] h-[25px] text-[12px]"
+                                  className="w-[92px] h-[25px] text-[12px]"
                                 />
-                                <Button size="xs" variant="outline" onClick={() => submitDraft(30)}>+30м</Button>
-                                <Button size="xs" variant="outline" onClick={() => submitDraft(60)}>+1ч</Button>
-                                <Button size="xs" variant="outline" onClick={() => submitDraft(120)}>+2ч</Button>
-                                <Button size="xs" variant="primary" loading={busy} onClick={() => submitDraft()}>OK</Button>
+                                <Button size="xs" variant="outline" onClick={() => submitDraft(30)}>30 мин</Button>
+                                <Button size="xs" variant="outline" onClick={() => submitDraft(60)}>1 ч</Button>
+                                <Button size="xs" variant="outline" onClick={() => submitDraft(120)}>2 ч</Button>
+                                <Button size="xs" variant="primary" loading={busy} onClick={() => submitDraft()}>Сохранить</Button>
                                 <Button size="xs" variant="ghost" onClick={() => setFeedbackDraft(null)}>✕</Button>
                               </div>
                             )}
@@ -487,12 +512,12 @@ export default function AgentTimeline({
                           <CollapseSection open={editingEstThis}>
                             {editingEstThis && (
                               <div className="flex flex-wrap items-center gap-1.5 border-t border-dashed border-[#303030] pt-1.5">
-                                <span className="text-[12px] text-[#929292]">Остаток (мин):</span>
+                                <span className="text-[12px] text-[#929292]">Сколько минут осталось (для пересчёта):</span>
                                 <Input
                                   type="number"
                                   min={0}
                                   max={10000}
-                                  placeholder="Мин"
+                                  placeholder="Минуты"
                                   value={estimateInput}
                                   onChange={(event) => setEstimateInput(event.currentTarget.value)}
                                   className="w-[90px] h-[25px] text-[12px]"
@@ -507,7 +532,7 @@ export default function AgentTimeline({
                                     setEstimateDraft(null);
                                   }}
                                 >
-                                  OK
+                                  Сохранить
                                 </Button>
                                 <Button size="xs" variant="ghost" onClick={() => setEstimateDraft(null)}>✕</Button>
                               </div>
@@ -527,12 +552,23 @@ export default function AgentTimeline({
                   </div>
                 )}
 
-                <CollapseSection open={detailsVisible}>
-                  <div className="border-t border-[#242424] pt-2 flex flex-col gap-1.5 text-[12px]">
+                {isCurrent && (period.day_hints?.length > 0 || period.rest_note) && (
+                  <div className="flex flex-col gap-1 text-[12px]">
                     {period.day_hints?.map((hint, idx) => (
                       <div key={idx} className="text-[#B8B8B8]">• {hint}</div>
                     ))}
                     {period.rest_note && (
+                      <div className="text-[#6EBE86]">{period.rest_note}</div>
+                    )}
+                  </div>
+                )}
+
+                <CollapseSection open={detailsVisible}>
+                  <div className="border-t border-[#242424] pt-2 flex flex-col gap-1.5 text-[12px]">
+                    {!isCurrent && period.day_hints?.map((hint, idx) => (
+                      <div key={idx} className="text-[#B8B8B8]">• {hint}</div>
+                    ))}
+                    {!isCurrent && period.rest_note && (
                       <div className="text-[#6EBE86]">{period.rest_note}</div>
                     )}
                     {markers.length > 0 && (

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
 import { ChevronDown, ChevronRight, Paperclip, X } from 'lucide-react';
+import { MAX_FILE_SIZE } from './fileUpload';
 import { Button, IconButton } from '@/components/ui/button';
 import { Checkbox, FileTrigger } from '@/components/ui/controls';
 import { Modal } from '@/components/ui/dialog';
@@ -9,7 +10,7 @@ import { Field, Input, Textarea } from '@/components/ui/input';
 import { SelectField } from '@/components/ui/select';
 import { Notice } from '@/components/ui/surface';
 import { cn } from '@/lib/utils';
-import { AnimatePresence, CollapseSection, FAST_TRANSITION, motion } from '@/lib/motion';
+import { AnimatePresence, CollapseSection, FAST_TRANSITION, motion, useReducedMotion } from '@/lib/motion';
 
 dayjs.extend(utc);
 
@@ -36,6 +37,7 @@ export default function TaskForm({
   allowContext = false,
 }) {
   const isEdit = Boolean(task?.id);
+  const reduced = useReducedMotion();
   const fileReset = useRef(null);
   const [title, setTitle] = useState(task?.title ?? '');
   const [description, setDescription] = useState(task?.description ?? '');
@@ -65,8 +67,12 @@ export default function TaskForm({
       setFileError('Можно прикрепить до пяти файлов за раз');
       return;
     }
-    if (selected.some((file) => file.size > 10 * 1024 * 1024)) {
-      setFileError('Максимальный размер файла — 10 МБ');
+    if (selected.some((file) => file.size === 0)) {
+      setFileError('Нельзя прикрепить пустой файл (0 байт)');
+      return;
+    }
+    if (selected.some((file) => file.size > MAX_FILE_SIZE)) {
+      setFileError('Максимальный размер файла — 25 МБ');
       return;
     }
     setFiles([...files, ...selected]);
@@ -204,7 +210,7 @@ export default function TaskForm({
             <FileTrigger multiple resetRef={fileReset} onChange={addFiles} disabled={pending}>
               {(props) => (
                 <Button {...props} size="sm" variant="subtle" leftIcon={<Paperclip className="h-3.5 w-3.5" />} className="w-full justify-center">
-                  Прикрепить файлы · до 5 × 10 МБ
+                  Прикрепить файлы · до 5 × 25 МБ
                 </Button>
               )}
             </FileTrigger>
@@ -212,10 +218,10 @@ export default function TaskForm({
               {files.map((file, index) => (
                 <motion.div
                   key={`${file.name}:${file.size}:${index}`}
-                  initial={{ opacity: 0, height: 0 }}
+                  initial={reduced ? false : { opacity: 0, height: 0 }}
                   animate={{ opacity: 1, height: 'auto' }}
-                  exit={{ opacity: 0, height: 0 }}
-                  transition={FAST_TRANSITION}
+                  exit={reduced ? { opacity: 0 } : { opacity: 0, height: 0 }}
+                  transition={reduced ? { duration: 0.01 } : FAST_TRANSITION}
                   className="overflow-hidden"
                 >
                   <div className="flex items-center justify-between gap-2 px-1.5 py-1 bg-[#141414] border border-[#242424] text-[12px]">

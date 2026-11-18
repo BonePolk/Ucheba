@@ -7,12 +7,13 @@ import { Button, IconButton } from '@/components/ui/button';
 import { Modal } from '@/components/ui/dialog';
 import { Field, Input, PasswordField } from '@/components/ui/input';
 import { Badge, EmptyState, Notice, PageLoader, SectionHeader } from '@/components/ui/surface';
-import { AnimatePresence, LAYOUT_TRANSITION, motion } from '@/lib/motion';
+import { AnimatePresence, LAYOUT_TRANSITION, motion, useReducedMotion } from '@/lib/motion';
 
 const empty = { name: '', url: '', username: '', password: '', description: '', group: '', color: '#7f49b4' };
 
 export default function Cabinets() {
   const client = useQueryClient();
+  const reduced = useReducedMotion();
   const [search, setSearch] = useState('');
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(empty);
@@ -83,11 +84,11 @@ export default function Cabinets() {
             {visible.map((site) => (
               <motion.div
                 key={site.id}
-                layout="position"
-                initial={{ opacity: 0, y: 3 }}
+                layout={reduced ? false : 'position'}
+                initial={reduced ? false : { opacity: 0, y: 3 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0 }}
-                transition={LAYOUT_TRANSITION}
+                transition={reduced ? { duration: 0.01 } : LAYOUT_TRANSITION}
                 className="flex flex-wrap items-center justify-between gap-3 px-3 py-2 border-l-2 hover:bg-[#161616] transition-colors"
                 style={{ borderLeftColor: site.color || '#7f49b4' }}
               >

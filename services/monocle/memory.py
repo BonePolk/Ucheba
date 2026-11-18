@@ -3,6 +3,7 @@ import io
 import json
 import os
 import re
+from threading import Lock
 
 from fastapi import HTTPException
 from minio import Minio
@@ -12,24 +13,32 @@ from urllib3.util import Timeout
 
 from common.identity import user_id
 
+_ready_buckets = set()
+_bucket_lock = Lock()
+
 
 class Memory:
     def __init__(self):
         self.prefix = f'users/{user_id()}/context/'
         self.bucket = 'context-memory'
-        access = os.getenv('SILO_ACCESS_KEY', '')
-        secret = os.getenv('SILO_SECRET_KEY', '')
+        access = os.getenv('SILO_ACCESS_KEY', '').strip()
+        secret = os.getenv('SILO_SECRET_KEY', '').strip()
         if not access or not secret:
-            raise HTTPException(503, 'Настройте доступ context к Silo')
+            raise HTTPException(503, 'Не заданы SILO_ACCESS_KEY / SILO_SECRET_KEY в .env для хранилища Silo')
         self.client = Minio(
             'silo:9000', access_key=access, secret_key=secret, secure=False,
-            http_client=PoolManager(timeout=Timeout(connect=3, read=5), retries=False),
+            http_client=PoolManager(timeout=Timeout(connect=5, read=60), retries=False),
         )
-        try:
-            self.client.make_bucket(self.bucket)
-        except S3Error as exc:
-            if exc.code not in ('BucketAlreadyOwnedByYou', 'BucketAlreadyExists'):
-                raise
+        if self.bucket not in _ready_buckets:
+            with _bucket_lock:
+                if self.bucket not in _ready_buckets:
+                    if not self.client.bucket_exists(self.bucket):
+                        try:
+                            self.client.make_bucket(self.bucket)
+                        except S3Error as exc:
+                            if exc.code not in ('BucketAlreadyOwnedByYou', 'BucketAlreadyExists'):
+                                raise
+                    _ready_buckets.add(self.bucket)
 
     def list_files(self):
         files = []
@@ -51,7 +60,7 @@ class Memory:
     def read(self, filename):
         return self.read_bytes(self.key(filename)[len(self.prefix):], 32000).decode('utf-8', errors='replace')
 
-    def read_bytes(self, key, limit=15 * 1024 * 1024):
+    def read_bytes(self, key, limit=30 * 1024 * 1024):
         response = self.client.get_object(self.bucket, self.prefix + key)
         try:
             return response.read(limit)

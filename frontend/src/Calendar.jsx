@@ -14,7 +14,7 @@ import { calendarColors as colors, calendarBlockColor } from './calendarColors';
 import AgentProblemReport from './AgentProblemReport';
 import AgentProgress from './AgentProgress';
 import { useMediaQuery } from '@/lib/utils';
-import { SlidePanel } from '@/lib/motion';
+import { LiveHorizon, SlidePanel } from '@/lib/motion';
 import { Button, IconButton } from '@/components/ui/button';
 import { Drawer, Modal } from '@/components/ui/dialog';
 import { Field, Input, Textarea } from '@/components/ui/input';
@@ -361,7 +361,8 @@ export default function Calendar({ features = {} }) {
 
       {/* Compact live Straus banner when working in background */}
       {busy && !strausOpen && (
-        <div className="border border-[#543476] bg-[#16101D] px-3 py-1.5 flex flex-wrap items-center justify-between gap-2 text-[12px]">
+        <div className="relative overflow-hidden border border-[#543476] bg-[#16101D] px-3 py-1.5 flex flex-wrap items-center justify-between gap-2 text-[12px]">
+          <LiveHorizon active />
           <div className="flex items-center gap-2">
             <StatusIndicator tone="active" pulse />
             <span>Straus обновляет расписание в фоне…</span>

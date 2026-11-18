@@ -17,11 +17,10 @@ async def library_request(name, args):
                 continue
             if not response.is_success:
                 detail = 'Не удалось выполнить операцию с библиотекой файлов'
-                if response.status_code in (400, 404, 409, 413, 415, 422):
-                    try:
-                        detail = str(response.json().get('detail', detail))[:500]
-                    except ValueError:
-                        pass
+                try:
+                    detail = str(response.json().get('detail') or detail)[:500]
+                except ValueError:
+                    pass
                 raise HTTPException(response.status_code, detail)
             return response.json()
         except httpx.TransportError:

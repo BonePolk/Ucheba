@@ -17,7 +17,7 @@ from uuid import uuid4
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 import httpx
-from minio.error import S3Error
+from minio.error import MinioException, S3Error
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
 from pydantic import BaseModel, Field, ValidationError
 from urllib3.exceptions import HTTPError as StorageConnectionError
@@ -54,7 +54,8 @@ def workspace_tree():
 
 class WorkspaceUpload(BaseModel):
     path: str = Field(min_length=1, max_length=500)
-    content: str = Field(max_length=14 * 1024 * 1024)
+    content: str = Field(max_length=36 * 1024 * 1024)
+    overwrite: bool = False
 
 
 class WorkspaceArchive(BaseModel):
@@ -68,7 +69,7 @@ def upload_workspace_file(body: WorkspaceUpload):
         content = base64.b64decode(body.content, validate=True)
     except ValueError:
         raise HTTPException(422, 'Некорректный файл') from None
-    return workspace.save_binary(Memory(), body.path, content)
+    return workspace.save_binary(Memory(), body.path, content, overwrite=body.overwrite)
 
 
 @app.post('/workspace/archive')
@@ -179,7 +180,7 @@ async def attach(task_id: int, name: str, request: Request):
     async for chunk in request.stream():
         content.extend(chunk)
         if len(content) > materials.MAX_SIZE:
-            raise HTTPException(413, 'Максимальный размер файла — 10 МБ')
+            raise HTTPException(413, 'Максимальный размер файла — 25 МБ')
     memory = await asyncio.to_thread(Memory)
     return await asyncio.to_thread(materials.upload, memory, task_id, name, bytes(content))
 
@@ -248,11 +249,21 @@ async def luna_screen():
     return await browser_request('/screen', method='GET')
 
 
+@app.exception_handler(MinioException)
 @app.exception_handler(S3Error)
 @app.exception_handler(StorageConnectionError)
 async def storage_error(request: Request, exc):
-    logging.getLogger('uvicorn.error').error('Silo: %s', type(exc).__name__)
-    return JSONResponse(status_code=503, content={'detail': 'Память Monocle недоступна. Проверьте Silo и настройки доступа.'})
+    code = exc.code if isinstance(exc, S3Error) else None
+    logging.getLogger('uvicorn.error').error('Silo: %s (%s)', type(exc).__name__, code or 'no-code')
+    if isinstance(exc, StorageConnectionError):
+        detail = 'Хранилище файлов Silo (silo:9000) недоступно. Проверьте, что контейнер silo запущен и SILO_SECRET_KEY не короче 8 символов.'
+    elif code in ('InvalidAccessKeyId', 'SignatureDoesNotMatch', 'AccessDenied'):
+        detail = 'Хранилище Silo отклонило ключи доступа: проверьте совпадение SILO_ACCESS_KEY и SILO_SECRET_KEY в .env с данными тома silo-data.'
+    elif code in ('XMinioStorageFull', 'QuotaExceeded'):
+        detail = 'Недостаточно свободного места в хранилище Silo.'
+    else:
+        detail = f'Ошибка хранилища файлов Silo ({code or type(exc).__name__}).'
+    return JSONResponse(status_code=503, content={'detail': detail})
 
 
 @app.exception_handler(APIConnectionError)
@@ -599,7 +610,7 @@ async def run_agent(client, memory, task_id, body, progress):
                 progress.add('Инструмент получил некорректные аргументы')
                 output = {'error': 'Некорректные аргументы инструмента'}
             except HTTPException as exc:
-                progress.add('Инструмент недоступен или не смог выполнить действие')
+                progress.add(f'Не удалось выполнить действие: {exc.detail}')
                 output = {'status': 'unavailable', 'reason': exc.detail}
             except S3Error as exc:
                 if exc.code not in ('NoSuchKey', 'NoSuchObject'):

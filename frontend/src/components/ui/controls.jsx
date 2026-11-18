@@ -3,7 +3,7 @@ import * as CheckboxPrimitive from '@radix-ui/react-checkbox';
 import * as SwitchPrimitive from '@radix-ui/react-switch';
 import { Check } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { EASE_OUT, motion } from '@/lib/motion';
+import { EASE_OUT, motion, useReducedMotion } from '@/lib/motion';
 
 export const Checkbox = forwardRef(function Checkbox(
   { className, label, checked, onCheckedChange, onChange, disabled, id, ...props },
@@ -28,7 +28,7 @@ export const Checkbox = forwardRef(function Checkbox(
       )}
       {...props}
     >
-      <CheckboxPrimitive.Indicator className="text-white flex items-center justify-center">
+      <CheckboxPrimitive.Indicator className="text-white flex items-center justify-center u-check-in">
         <Check className="h-3 w-3 stroke-[2.5]" />
       </CheckboxPrimitive.Indicator>
     </CheckboxPrimitive.Root>
@@ -91,6 +91,7 @@ const progressTones = {
 
 export function Progress({ value = 0, max = 100, tone = 'accent', className }) {
   const pct = max > 0 ? Math.max(0, Math.min(100, (value / max) * 100)) : 0;
+  const reduced = useReducedMotion();
   return (
     <div
       role="progressbar"
@@ -102,7 +103,7 @@ export function Progress({ value = 0, max = 100, tone = 'accent', className }) {
       <motion.div
         initial={false}
         animate={{ width: `${pct}%` }}
-        transition={{ duration: 0.22, ease: EASE_OUT }}
+        transition={reduced ? { duration: 0.01 } : { duration: 0.22, ease: EASE_OUT }}
         className={cn('h-full', progressTones[tone] ?? progressTones.accent)}
       />
     </div>
@@ -121,19 +122,22 @@ export function FileTrigger({ onChange, multiple = false, accept, resetRef, disa
       <input
         ref={inputRef}
         type="file"
-        className="hidden"
+        tabIndex={-1}
+        aria-hidden="true"
+        className="sr-only"
         multiple={multiple}
         accept={accept}
         onChange={(event) => {
           const list = Array.from(event.currentTarget.files ?? []);
           if (!list.length) return;
           onChange?.(multiple ? list : list[0]);
-          event.currentTarget.value = '';
         }}
       />
       {children({
         onClick: () => {
-          if (!disabled) inputRef.current?.click();
+          if (disabled) return;
+          if (inputRef.current) inputRef.current.value = '';
+          inputRef.current?.click();
         },
         disabled,
       })}

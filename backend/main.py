@@ -86,4 +86,17 @@ def health():
 
 @app.exception_handler(RequestValidationError)
 async def validation_error(request, exc):
+    errors = exc.errors()
+    for item in errors:
+        loc = tuple(item.get('loc') or ())
+        if 'content' in loc and item.get('type') == 'string_too_long':
+            return JSONResponse(status_code=413, content={'detail': 'Файл превышает максимальный размер 25 МБ'})
+    if errors:
+        item = errors[0]
+        loc = [str(part) for part in (item.get('loc') or ()) if part != 'body']
+        field = '.'.join(loc)
+        msg = item.get('msg') or ''
+        if field:
+            detail = f'Проверьте поле «{field}»: {msg}' if msg else f'Проверьте поле «{field}»'
+            return JSONResponse(status_code=422, content={'detail': detail})
     return JSONResponse(status_code=422, content={'detail': 'Проверьте введённые данные'})

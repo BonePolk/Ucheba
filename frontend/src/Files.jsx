@@ -19,7 +19,7 @@ import {
   X,
 } from 'lucide-react';
 import { request } from './api';
-import { fileContent } from './fileUpload';
+import { fileContent, safeFileName, uploadTaskFiles } from './fileUpload';
 import { useMediaQuery } from '@/lib/utils';
 import { CollapseSection, SlidePanel } from '@/lib/motion';
 import { Button, IconButton } from '@/components/ui/button';
@@ -225,18 +225,47 @@ export default function Files() {
 
   const upload = useMutation({
     mutationFn: async ({ files: list, target }) => {
-      if (target.startsWith('@')) throw new Error('Выберите личную папку для загрузки');
+      if (target === '@tasks') {
+        throw new Error('Откройте конкретную задачу в «Файлах задач» или выберите личную папку');
+      }
+      if (target.startsWith('@tasks/')) {
+        const taskId = Number(target.split('/')[1]);
+        if (!Number.isInteger(taskId) || taskId <= 0) {
+          throw new Error('Выберите папку конкретной задачи для загрузки');
+        }
+        await uploadTaskFiles(taskId, list);
+        return { targetTask: taskId };
+      }
       for (const file of list) {
-        await request('/integrations/monocle/workspace/upload', {
-          method: 'POST',
-          body: JSON.stringify({
-            path: target ? `${target}/${file.name}` : file.name,
-            content: await fileContent(file),
-          }),
-        });
+        const fileName = safeFileName(file.name, 200);
+        const path = target ? `${target}/${fileName}` : fileName;
+        const content = await fileContent(file);
+        try {
+          await request('/integrations/monocle/workspace/upload', {
+            method: 'POST',
+            body: JSON.stringify({ path, content }),
+          });
+        } catch (err) {
+          if (err?.status === 409 && window.confirm(`Файл «${fileName}» уже существует. Заменить его?`)) {
+            await request('/integrations/monocle/workspace/upload', {
+              method: 'POST',
+              body: JSON.stringify({ path, content, overwrite: true }),
+            });
+          } else {
+            throw err;
+          }
+        }
+      }
+      return { targetTask: null };
+    },
+    onSuccess: (res) => {
+      setNotice(res?.targetTask ? `Файлы прикреплены к задаче #${res.targetTask}` : 'Файлы сохранены в Silo');
+      if (res?.targetTask) {
+        for (const key of ['context-file-library', 'context-files', 'context', 'tasks']) {
+          client.invalidateQueries({ queryKey: [key] });
+        }
       }
     },
-    onSuccess: () => setNotice('Файлы сохранены в Silo'),
     onSettled: refresh,
   });
 
@@ -377,7 +406,15 @@ export default function Files() {
                 <div className="flex flex-wrap items-center gap-1.5">
                   <FileTrigger multiple onChange={(list) => { if (list.length) upload.mutate({ files: list, target: folder }); }}>
                     {(props) => (
-                      <Button {...props} size="sm" variant="default" leftIcon={<Upload className="h-3 w-3" />} loading={upload.isPending} disabled={busy || folder.startsWith('@')}>
+                      <Button
+                        {...props}
+                        size="sm"
+                        variant="default"
+                        leftIcon={<Upload className="h-3 w-3" />}
+                        loading={upload.isPending}
+                        disabled={busy || folder === '@tasks'}
+                        title={folder === '@tasks' ? 'Откройте конкретную задачу или выберите личную папку' : undefined}
+                      >
                         Загрузить
                       </Button>
                     )}

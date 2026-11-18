@@ -24,7 +24,7 @@ import { Field, Textarea } from '@/components/ui/input';
 import { Combobox } from '@/components/ui/select';
 import { Badge, EmptyState, Notice, SectionHeader, StatusIndicator } from '@/components/ui/surface';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow, TableContainer } from '@/components/ui/table';
-import { AnimatePresence, CollapseSection, ExpandableText, motion, PANEL_TRANSITION, StageSwap } from '@/lib/motion';
+import { AnimatePresence, CollapseSection, ExpandableText, LiveHorizon, motion, PANEL_TRANSITION, StageSwap, useReducedMotion } from '@/lib/motion';
 
 const runStatusMeta = {
   queued: { label: 'В очереди', variant: 'info' },
@@ -104,6 +104,7 @@ function RunResultCard({ run, disabled, onContinue, defaultFilesOpen = false }) 
 
 export default function ArrodesWorkspace({ task: fixedTask = null, features = {}, compact = false, initialTaskId = null }) {
   const client = useQueryClient();
+  const reduced = useReducedMotion();
   const [selectedTaskId, setSelectedTaskId] = useState(() => (
     fixedTask?.id ?? (initialTaskId ? Number(initialTaskId) : null)
   ));
@@ -379,12 +380,16 @@ export default function ArrodesWorkspace({ task: fixedTask = null, features = {}
         {liveActiveCard && (
           <motion.div
             key="arrodes-live"
-            initial={{ opacity: 0, y: 6 }}
+            initial={reduced ? false : { opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -4 }}
-            transition={PANEL_TRANSITION}
-            className="border border-[#543476] bg-[#131018] p-3 flex flex-col gap-2.5"
+            exit={reduced ? { opacity: 0 } : { opacity: 0, y: -4 }}
+            transition={reduced ? { duration: 0.01 } : PANEL_TRANSITION}
+            className="relative overflow-hidden border border-[#543476] bg-[#131018] p-3 flex flex-col gap-2.5"
           >
+            <LiveHorizon
+              active={Boolean((arrodesRunning || liveRun?.status === 'running') && !liveRun?.pending_question)}
+              tone={liveRun?.status === 'failed' ? 'danger' : liveRun?.pending_question ? 'warning' : 'accent'}
+            />
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2 min-w-0">
                 <StatusIndicator tone={liveRun?.pending_question ? 'warning' : 'active'} pulse={!liveRun?.pending_question} />

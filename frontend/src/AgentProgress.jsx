@@ -6,7 +6,7 @@ import AgentExplanation from './AgentExplanation';
 import AgentQuestion from './AgentQuestion';
 import MonocleBrowser from './MonocleBrowser';
 import { useMediaQuery } from '@/lib/utils';
-import { CollapseSection, StageSwap } from '@/lib/motion';
+import { CollapseSection, LiveHorizon, StageSwap } from '@/lib/motion';
 import { Button } from '@/components/ui/button';
 import { SelectField } from '@/components/ui/select';
 import { Badge, Notice, Spinner, StatusIndicator } from '@/components/ui/surface';
@@ -278,6 +278,7 @@ export default function AgentProgress({
   const hasTokens = Boolean(run?.token_usage && (run.token_usage.input_tokens != null || run.token_usage.output_tokens != null));
   const hasQuestion = entries.some((entry) => entry.run?.pending_question);
   const hasFailure = run?.status === 'failed';
+  const horizonTone = hasFailure ? 'danger' : hasQuestion ? 'warning' : 'accent';
 
   if (!providers.length) return null;
   if (hideSummaryWhenIdle && !running && !opened && !streamError && !hasQuestion && !hasFailure && entries.every((e) => e.available)) {
@@ -285,7 +286,8 @@ export default function AgentProgress({
   }
 
   return (
-    <section className="border border-[#303030] bg-[#111111] px-3 py-2 flex flex-col gap-2">
+    <section className="relative overflow-hidden border border-[#303030] bg-[#111111] px-3 py-2 flex flex-col gap-2">
+      <LiveHorizon active={running && !run?.pending_question} tone={horizonTone} />
       <div className="flex flex-wrap items-center justify-between gap-2 min-h-[28px]">
         <div className="flex flex-wrap items-center gap-2 min-w-0">
           <StatusIndicator tone={indicatorTone} pulse={running && !run?.pending_question} />
