@@ -81,9 +81,12 @@ async def sandbox_available():
         detail = ''
         if process.returncode != 0:
             text = error.decode(errors='replace').lower()
-            detail = ('Контейнер запрещает создание namespace для bubblewrap. Примените seccomp-профиль arrodes из Compose.'
-                      if 'no permissions to create' in text and 'namespace' in text else
-                      'Не удалось запустить Linux sandbox; код завершения ' + str(process.returncode))
+            if 'no permissions to create' in text and 'namespace' in text:
+                detail = 'Контейнер запрещает создание namespace для bubblewrap. Примените security_opt сервиса arrodes из Compose.'
+            elif 'failed to make / slave' in text or ('bwrap:' in text and ('permission denied' in text or 'operation not permitted' in text)):
+                detail = 'Профиль безопасности контейнера (AppArmor/mount) блокирует bubblewrap. Пересоздайте arrodes с актуальным Compose.'
+            else:
+                detail = 'Не удалось запустить Linux sandbox; код завершения ' + str(process.returncode)
         state().sandbox_error = detail
         return process.returncode == 0
     except TimeoutError:
@@ -327,7 +330,7 @@ def prepare_directories():
             shutil.move(str(item), legacy / item.name)
     for item in (owner_home, legacy):
         os.chown(item, 10001, 10001)
-    for item in (root, users):
+    for item in (HOME, root, users):
         os.chown(item, 0, 0)
         item.chmod(0o711)
     WORK.mkdir(exist_ok=True)

@@ -95,6 +95,7 @@ services:
     # Bubblewrap needs nested namespaces; retain the default syscall restrictions otherwise.
     security_opt:
       - no-new-privileges:true
+      - apparmor:unconfined
       - seccomp=./services/arrodes/seccomp.json
     healthcheck: *health
     environment:
