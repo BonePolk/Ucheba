@@ -1,9 +1,15 @@
-import { Alert, Button, Checkbox, FileButton, Group, Modal, NumberInput, Select, SimpleGrid, Stack, Text, Textarea, TextInput } from '@mantine/core';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
-import { DateTimePicker } from '@mantine/dates';
-import { useForm } from '@mantine/form';
+import { ChevronDown, ChevronRight, Paperclip, X } from 'lucide-react';
+import { Button, IconButton } from '@/components/ui/button';
+import { Checkbox, FileTrigger } from '@/components/ui/controls';
+import { Modal } from '@/components/ui/dialog';
+import { Field, Input, Textarea } from '@/components/ui/input';
+import { SelectField } from '@/components/ui/select';
+import { Notice } from '@/components/ui/surface';
+import { cn } from '@/lib/utils';
+import { AnimatePresence, CollapseSection, FAST_TRANSITION, motion } from '@/lib/motion';
 
 dayjs.extend(utc);
 
@@ -12,6 +18,7 @@ export const priorities = [
   { value: 'medium', label: 'Средний' },
   { value: 'high', label: 'Высокий' },
 ];
+
 export const statuses = [
   { value: 'todo', label: 'К выполнению' },
   { value: 'in_progress', label: 'В процессе' },
@@ -19,66 +26,292 @@ export const statuses = [
   { value: 'done', label: 'Выполнено' },
 ];
 
-export default function TaskForm({ task, onClose, onSubmit, pending, error, allowAutomation = false, allowContext = false }) {
+export default function TaskForm({
+  task,
+  onClose,
+  onSubmit,
+  pending,
+  error,
+  allowAutomation = false,
+  allowContext = false,
+}) {
+  const isEdit = Boolean(task?.id);
+  const fileReset = useRef(null);
+  const [title, setTitle] = useState(task?.title ?? '');
+  const [description, setDescription] = useState(task?.description ?? '');
+  const [deadline, setDeadline] = useState(
+    task?.deadline ? dayjs.utc(task.deadline).local().format('YYYY-MM-DDTHH:mm') : '',
+  );
+  const [priority, setPriority] = useState(task?.priority ?? 'medium');
+  const [status, setStatus] = useState(task?.status ?? 'todo');
+  const [category, setCategory] = useState(task?.category ?? '');
+  const [completedWorkMinutes, setCompletedWorkMinutes] = useState(String(task?.completed_work_minutes ?? 0));
+  const [agentNotes, setAgentNotes] = useState('');
   const [openAutomation, setOpenAutomation] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(isEdit);
+  const [titleError, setTitleError] = useState('');
+
   const [files, setFiles] = useState([]);
   const [fileError, setFileError] = useState('');
   const [dragging, setDragging] = useState(false);
-  useEffect(() => { if (error?.remainingFiles) setFiles(error.remainingFiles); }, [error]);
+
+  useEffect(() => {
+    if (error?.remainingFiles) setFiles(error.remainingFiles);
+  }, [error]);
+
   function addFiles(selected) {
     if (pending) return;
-    if (files.length + selected.length > 5) { setFileError('Можно прикрепить до пяти файлов за раз'); return; }
-    if (selected.some((file) => file.size > 10 * 1024 * 1024)) { setFileError('Максимальный размер файла — 10 МБ'); return; }
-    setFiles([...files, ...selected]); setFileError('');
+    if (files.length + selected.length > 5) {
+      setFileError('Можно прикрепить до пяти файлов за раз');
+      return;
+    }
+    if (selected.some((file) => file.size > 10 * 1024 * 1024)) {
+      setFileError('Максимальный размер файла — 10 МБ');
+      return;
+    }
+    setFiles([...files, ...selected]);
+    setFileError('');
   }
-  const form = useForm({
-    initialValues: {
-      title: task?.title ?? '',
-      description: task?.description ?? '',
-      deadline: task?.deadline ? dayjs.utc(task.deadline).local().format('YYYY-MM-DD HH:mm:ss') : null,
-      priority: task?.priority ?? 'medium',
-      status: task?.status ?? 'todo',
-      category: task?.category ?? '',
-      completed_work_minutes: task?.completed_work_minutes ?? 0,
-      ...(!task && allowContext ? { agent_notes: '' } : {}),
-    },
-    validate: { title: (value) => value.trim() ? null : 'Укажите название' },
-  });
+
+  function handleSubmit(event) {
+    event.preventDefault();
+    if (!title.trim()) {
+      setTitleError('Укажите название');
+      return;
+    }
+    setTitleError('');
+    const parsedMinutes = Math.max(0, Math.floor(Number(completedWorkMinutes) || 0));
+    const payload = {
+      title: title.trim(),
+      description: description.trim() || null,
+      deadline: deadline ? dayjs(deadline).toISOString() : null,
+      priority,
+      status,
+      category: category.trim() || null,
+      completed_work_minutes: parsedMinutes,
+      ...(!isEdit && allowContext ? { agent_notes: agentNotes } : {}),
+    };
+    onSubmit(payload, {
+      openAutomation: allowAutomation && openAutomation,
+      files,
+      taskId: error?.savedTask?.id,
+    });
+  }
+
+  function setQuickDeadline(daysOffset) {
+    setDeadline(dayjs().add(daysOffset, 'day').hour(23).minute(59).format('YYYY-MM-DDTHH:mm'));
+  }
 
   return (
-    <Modal opened onClose={onClose} title={task ? 'Редактировать задачу' : 'Новая задача'} centered size="md">
-      <form onSubmit={form.onSubmit((values) => onSubmit({
-        ...values,
-        title: values.title.trim(),
-        completed_work_minutes: Number(values.completed_work_minutes) || 0,
-        deadline: values.deadline ? dayjs(values.deadline).toISOString() : null,
-        description: values.description.trim() || null,
-        category: values.category.trim() || null,
-      }, { openAutomation: allowAutomation && openAutomation, files, taskId: error?.savedTask?.id }))}>
-        <Stack gap="xs">
-          <TextInput label="Название" placeholder="Что нужно сделать?" required autoFocus {...form.getInputProps('title')} />
-          <Textarea label="Описание" placeholder="Коротко о задаче" autosize minRows={1} maxRows={4} {...form.getInputProps('description')} />
-          <SimpleGrid cols={{ base: 1, xs: 2 }} spacing="xs">
-            <DateTimePicker label="Дедлайн" placeholder="Без срока" valueFormat="DD.MM.YYYY HH:mm" clearable {...form.getInputProps('deadline')} />
-            <Select label="Приоритет" data={priorities} allowDeselect={false} {...form.getInputProps('priority')} />
-          </SimpleGrid>
-          {allowContext && <div className={`task-file-drop ${dragging ? 'file-drop-active' : ''}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); addFiles(Array.from(event.dataTransfer.files)); }}>
-            <FileButton multiple onChange={addFiles}>{(props) => <Button {...props} fullWidth variant="subtle" size="xs" disabled={pending}>Перетащите файлы или выберите · до 5 × 10 МБ</Button>}</FileButton>
-            {files.map((file, index) => <Group key={`${file.name}:${index}`} justify="space-between" gap="xs"><Text size="xs" style={{ overflowWrap: 'anywhere', flex: 1 }}>{file.name}</Text><Button variant="subtle" size="compact-xs" disabled={pending} onClick={() => setFiles(files.filter((_, number) => number !== index))}>Убрать</Button></Group>)}
-          </div>}
-          {fileError && <Alert color="red">{fileError}</Alert>}
-          <details open={task ? true : undefined}><summary style={{ cursor: 'pointer', fontSize: 12, color: 'var(--mantine-color-dimmed)' }}>Дополнительно</summary><Stack gap="xs" mt="xs">
-            {!task && allowContext && <Textarea label="Заметки для Monocle" placeholder="Что проверить и учесть" autosize minRows={1} maxRows={4} maxLength={12000} {...form.getInputProps('agent_notes')} />}
-            {task && <NumberInput label="Выполнено полезной работы, мин" description="Всего подтверждено вами. Прошедшие блоки не засчитываются автоматически." min={0} allowDecimal={false} allowNegative={false} {...form.getInputProps('completed_work_minutes')} />}
-            <SimpleGrid cols={2} spacing="xs"><Select label="Статус" data={statuses} allowDeselect={false} {...form.getInputProps('status')} /><TextInput label="Категория" {...form.getInputProps('category')} /></SimpleGrid>
-          </Stack></details>
-          {allowAutomation && <Checkbox label="Открыть действия ИИ после сохранения" checked={openAutomation} onChange={(event) => setOpenAutomation(event.currentTarget.checked)} />}
-          {error && <Alert color="red">{error.message}</Alert>}
-          <Group justify="flex-end">
-            <Button variant="default" onClick={onClose}>Отмена</Button>
-            <Button type="submit" loading={pending}>Сохранить</Button>
-          </Group>
-        </Stack>
+    <Modal opened onClose={onClose} title={isEdit ? 'Редактировать задачу' : 'Новая задача'} size="md">
+      <form className="flex flex-col gap-3" onSubmit={handleSubmit}>
+        <Field label="Название" error={titleError} htmlFor="task-form-title">
+          <Input
+            id="task-form-title"
+            placeholder="Что нужно сделать?"
+            required
+            autoFocus
+            value={title}
+            error={Boolean(titleError)}
+            onChange={(event) => {
+              setTitle(event.currentTarget.value);
+              if (titleError) setTitleError('');
+            }}
+          />
+        </Field>
+
+        <Field label="Описание" htmlFor="task-form-desc">
+          <Textarea
+            id="task-form-desc"
+            placeholder="Коротко о задаче"
+            rows={2}
+            value={description}
+            onChange={(event) => setDescription(event.currentTarget.value)}
+          />
+        </Field>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+          <Field
+            label="Дедлайн"
+            htmlFor="task-form-deadline"
+            rightLabel={(
+              <span className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => setQuickDeadline(0)}
+                  className="text-[10px] text-[#929292] hover:text-[#EAEAEA] cursor-pointer"
+                >
+                  Сегодня
+                </button>
+                <span className="text-[#454545]">·</span>
+                <button
+                  type="button"
+                  onClick={() => setQuickDeadline(1)}
+                  className="text-[10px] text-[#929292] hover:text-[#EAEAEA] cursor-pointer"
+                >
+                  Завтра
+                </button>
+              </span>
+            )}
+          >
+            <div className="flex items-center gap-1">
+              <Input
+                id="task-form-deadline"
+                type="datetime-local"
+                value={deadline}
+                onChange={(event) => setDeadline(event.currentTarget.value)}
+              />
+              {deadline && (
+                <IconButton
+                  size="icon"
+                  variant="default"
+                  aria-label="Очистить дедлайн"
+                  onClick={() => setDeadline('')}
+                >
+                  <X className="h-3.5 w-3.5" />
+                </IconButton>
+              )}
+            </div>
+          </Field>
+
+          <Field label="Приоритет" htmlFor="task-form-priority">
+            <SelectField
+              id="task-form-priority"
+              value={priority}
+              options={priorities}
+              onChange={(val) => { if (val) setPriority(val); }}
+            />
+          </Field>
+        </div>
+
+        {allowContext && (
+          <div
+            className={cn(
+              'border border-dashed border-[#303030] bg-[#0D0D0D] p-2 flex flex-col gap-1.5',
+              dragging && 'file-drop-active',
+            )}
+            onDragOver={(event) => {
+              event.preventDefault();
+              setDragging(true);
+            }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={(event) => {
+              event.preventDefault();
+              setDragging(false);
+              addFiles(Array.from(event.dataTransfer.files));
+            }}
+          >
+            <FileTrigger multiple resetRef={fileReset} onChange={addFiles} disabled={pending}>
+              {(props) => (
+                <Button {...props} size="sm" variant="subtle" leftIcon={<Paperclip className="h-3.5 w-3.5" />} className="w-full justify-center">
+                  Прикрепить файлы · до 5 × 10 МБ
+                </Button>
+              )}
+            </FileTrigger>
+            <AnimatePresence initial={false}>
+              {files.map((file, index) => (
+                <motion.div
+                  key={`${file.name}:${file.size}:${index}`}
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: 'auto' }}
+                  exit={{ opacity: 0, height: 0 }}
+                  transition={FAST_TRANSITION}
+                  className="overflow-hidden"
+                >
+                  <div className="flex items-center justify-between gap-2 px-1.5 py-1 bg-[#141414] border border-[#242424] text-[12px]">
+                    <span className="truncate">{file.name}</span>
+                    <Button
+                      size="xs"
+                      variant="ghost"
+                      disabled={pending}
+                      onClick={() => setFiles(files.filter((_, number) => number !== index))}
+                    >
+                      Убрать
+                    </Button>
+                  </div>
+                </motion.div>
+              ))}
+            </AnimatePresence>
+          </div>
+        )}
+
+        {fileError && <Notice tone="error">{fileError}</Notice>}
+
+        <div className="border-t border-[#222222] pt-2">
+          <button
+            type="button"
+            onClick={() => setMoreOpen(!moreOpen)}
+            aria-expanded={moreOpen}
+            className="inline-flex items-center gap-1 text-[12px] text-[#929292] hover:text-[#EAEAEA] cursor-pointer"
+          >
+            {moreOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+            <span>Дополнительно</span>
+          </button>
+
+          <CollapseSection open={moreOpen}>
+            <div className="mt-2.5 flex flex-col gap-2.5">
+              {!isEdit && allowContext && (
+                <Field label="Заметки для Monocle" htmlFor="task-form-notes">
+                  <Textarea
+                    id="task-form-notes"
+                    placeholder="Что проверить и учесть"
+                    rows={2}
+                    maxLength={12000}
+                    value={agentNotes}
+                    onChange={(event) => setAgentNotes(event.currentTarget.value)}
+                  />
+                </Field>
+              )}
+
+              {isEdit && (
+                <Field label="Выполнено, мин" htmlFor="task-form-minutes">
+                  <Input
+                    id="task-form-minutes"
+                    type="number"
+                    min={0}
+                    step={1}
+                    value={completedWorkMinutes}
+                    onChange={(event) => setCompletedWorkMinutes(event.currentTarget.value)}
+                  />
+                </Field>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <Field label="Статус" htmlFor="task-form-status">
+                  <SelectField
+                    id="task-form-status"
+                    value={status}
+                    options={statuses}
+                    onChange={(val) => { if (val) setStatus(val); }}
+                  />
+                </Field>
+                <Field label="Категория" htmlFor="task-form-category">
+                  <Input
+                    id="task-form-category"
+                    placeholder="Учёба"
+                    value={category}
+                    onChange={(event) => setCategory(event.currentTarget.value)}
+                  />
+                </Field>
+              </div>
+            </div>
+          </CollapseSection>
+        </div>
+
+        {allowAutomation && (
+          <Checkbox
+            label="Открыть задачу после сохранения"
+            checked={openAutomation}
+            onCheckedChange={setOpenAutomation}
+          />
+        )}
+
+        {error && <Notice tone="error">{error.message}</Notice>}
+
+        <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#222222]">
+          <Button variant="default" onClick={onClose}>Отмена</Button>
+          <Button type="submit" variant="primary" loading={pending}>Сохранить</Button>
+        </div>
       </form>
     </Modal>
   );

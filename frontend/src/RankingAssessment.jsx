@@ -1,35 +1,101 @@
-import { Badge, Group, Stack, Text, Tooltip } from '@mantine/core';
+import { AlertTriangle, ChevronDown, ChevronRight } from 'lucide-react';
+import { useState } from 'react';
+import { Badge } from '@/components/ui/surface';
+import { HintTooltip } from '@/components/ui/tooltip';
+import { CollapseSection } from '@/lib/motion';
 
 export function DeadlineRisk({ reason }) {
-  return reason ? <Tooltip multiline w={260} label={`Большой риск не успеть: ${reason}`} events={{ hover: true, focus: true, touch: true }}>
-    <Text component="span" tabIndex={0} c="orange" ml={6} style={{ display: 'inline-flex', verticalAlign: 'middle', cursor: 'help' }} aria-label={`Большой риск не успеть: ${reason}`}>
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M10.3 3.9 2 18.2A2 2 0 0 0 3.7 21h16.6a2 2 0 0 0 1.7-2.8L13.7 3.9a2 2 0 0 0-3.4 0Z" /><path d="M12 9v4m0 4h.01" /></svg>
-    </Text>
-  </Tooltip> : null;
+  if (!reason) return null;
+  return (
+    <HintTooltip label={`Риск срока: ${reason}`}>
+      <span
+        tabIndex={0}
+        aria-label={`Риск срока: ${reason}`}
+        className="inline-flex items-center align-middle ml-1 text-[#D4A24C] cursor-help"
+      >
+        <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
+      </span>
+    </HintTooltip>
+  );
 }
 
 export default function RankingAssessment({ assessment, compact = false }) {
+  const [stepsOpen, setStepsOpen] = useState(false);
   if (!assessment) return null;
   const plan = assessment.plan;
-  const time = plan?.hours_label || (plan ? `${Math.round(plan.min_minutes / 60 * 10) / 10}–${Math.round(plan.max_minutes / 60 * 10) / 10} ч` : 'Время');
-  return <Stack gap={5} maw={320}>
-    {!compact && <Group gap={4}>
-      {assessment.time_estimate && <Tooltip multiline w={260} label={assessment.time_estimate}><Badge size="xs" variant="light" color="purple">{time}</Badge></Tooltip>}
-      {assessment.effort && <Tooltip multiline w={260} label={assessment.effort}><Badge size="xs" variant="light" color="gray">Силы</Badge></Tooltip>}
-      {assessment.impact && <Tooltip multiline w={260} label={assessment.impact}><Badge size="xs" variant="light" color="gray">Эффект</Badge></Tooltip>}
-    </Group>}
-    <Tooltip multiline w={280} label={assessment.reason} events={{ hover: true, focus: true, touch: true }}>
-      <Text component="button" type="button" size="xs" c="dimmed" style={{ cursor: 'help', background: 'none', border: 0, padding: 0, textAlign: 'left', width: 'fit-content' }}>Почему такой порядок</Text>
-    </Tooltip>
-    {!compact && plan && <details>
-      <summary style={{ cursor: 'pointer', fontSize: 11, color: 'var(--mantine-color-dimmed)' }}>Этапы работы</summary>
-      <Stack gap={5} mt={6}>
-        {assessment.time_estimate && <Text size="xs" c="dimmed">Время: {assessment.time_estimate}</Text>}
-        {assessment.effort && <Text size="xs" c="dimmed">Силы: {assessment.effort}</Text>}
-        {assessment.impact && <Text size="xs" c="dimmed">Эффект: {assessment.impact}</Text>}
-        {plan?.steps.map((step, index) => <Text key={index} size="xs">{index + 1}. {step.title} · {step.min_minutes}–{step.max_minutes} мин{step.wait_minutes > 0 ? `; ожидание ${step.wait_minutes} мин` : ''}</Text>)}
-        {plan?.assumptions.map((text, index) => <Text key={index} size="xs" c="dimmed">{text}</Text>)}
-      </Stack>
-    </details>}
-  </Stack>;
+  const time = plan?.hours_label || (plan ? `${Math.round((plan.min_minutes / 60) * 10) / 10}–${Math.round((plan.max_minutes / 60) * 10) / 10} ч` : 'Время');
+
+  return (
+    <div className="flex flex-col gap-1.5 max-w-md min-w-0">
+      {!compact && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          {assessment.time_estimate && (
+            <HintTooltip label={assessment.time_estimate}>
+              <Badge variant="accent" className="cursor-help">{time}</Badge>
+            </HintTooltip>
+          )}
+          {assessment.effort && (
+            <HintTooltip label={assessment.effort}>
+              <Badge variant="default" className="cursor-help">Силы</Badge>
+            </HintTooltip>
+          )}
+          {assessment.impact && (
+            <HintTooltip label={assessment.impact}>
+              <Badge variant="default" className="cursor-help">Эффект</Badge>
+            </HintTooltip>
+          )}
+          {assessment.reason && (
+            <HintTooltip label={assessment.reason}>
+              <button
+                type="button"
+                className="text-[11px] text-[#929292] hover:text-[#EAEAEA] cursor-help"
+              >
+                Причина
+              </button>
+            </HintTooltip>
+          )}
+        </div>
+      )}
+
+      {compact && assessment.reason && (
+        <HintTooltip label={assessment.reason}>
+          <button
+            type="button"
+            className="text-left text-[11px] text-[#929292] hover:text-[#EAEAEA] cursor-help w-fit"
+          >
+            Причина
+          </button>
+        </HintTooltip>
+      )}
+
+      {!compact && plan && (
+        <div className="flex flex-col gap-1">
+          <button
+            type="button"
+            onClick={() => setStepsOpen(!stepsOpen)}
+            aria-expanded={stepsOpen}
+            className="inline-flex items-center gap-1 text-[11px] text-[#929292] hover:text-[#EAEAEA] w-fit cursor-pointer"
+          >
+            {stepsOpen ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+            <span>Этапы ({plan.steps?.length ?? 0})</span>
+          </button>
+          <CollapseSection open={stepsOpen}>
+            <div className="border-l border-[#303030] pl-2.5 flex flex-col gap-1 text-[12px] pt-1">
+              {assessment.time_estimate && <div className="text-[#929292]">Время: <span className="text-[#EAEAEA]">{assessment.time_estimate}</span></div>}
+              {assessment.effort && <div className="text-[#929292]">Силы: <span className="text-[#EAEAEA]">{assessment.effort}</span></div>}
+              {assessment.impact && <div className="text-[#929292]">Эффект: <span className="text-[#EAEAEA]">{assessment.impact}</span></div>}
+              {plan.steps?.map((step, index) => (
+                <div key={index} className="text-[#DCDCDC]">
+                  {index + 1}. {step.title} · <span className="text-[#929292] tabular-nums">{step.min_minutes}–{step.max_minutes} м{step.wait_minutes > 0 ? ` (+${step.wait_minutes}м)` : ''}</span>
+                </div>
+              ))}
+              {plan.assumptions?.map((text, index) => (
+                <div key={index} className="text-[11px] text-[#929292]">• {text}</div>
+              ))}
+            </div>
+          </CollapseSection>
+        </div>
+      )}
+    </div>
+  );
 }

@@ -39,12 +39,40 @@ def agent_routes(app, label):
         return sorted(result)
 
 
+def response_text(response) -> str:
+    """Извлекает текстовый итог из output_text, message.content или буфера потока."""
+    direct = getattr(response, 'output_text', None)
+    if isinstance(direct, str) and direct.strip():
+        return direct
+    parts = []
+    for item in getattr(response, 'output', None) or ():
+        item_type = item.get('type') if isinstance(item, dict) else getattr(item, 'type', None)
+        if item_type in ('output_text', 'text'):
+            text = item.get('text') if isinstance(item, dict) else getattr(item, 'text', None)
+            if isinstance(text, str) and text:
+                parts.append(text)
+        elif item_type == 'message':
+            content = item.get('content') if isinstance(item, dict) else getattr(item, 'content', None)
+            for part in content or ():
+                part_type = part.get('type') if isinstance(part, dict) else getattr(part, 'type', None)
+                if part_type in ('output_text', 'text'):
+                    text = part.get('text') if isinstance(part, dict) else getattr(part, 'text', None)
+                    if isinstance(text, str) and text:
+                        parts.append(text)
+    if parts and ''.join(parts).strip():
+        return ''.join(parts)
+    streamed = getattr(response, '_streamed_output_text', '')
+    return streamed if isinstance(streamed, str) and streamed.strip() else ''
+
+
 async def stream_model_response(client, progress, **arguments):
     """Первые данные и паузы потока — до 3 минут; временные сбои повторяются до ответа."""
     retryable = (APIConnectionError, httpx.TransportError, TimeoutError)
     attempt = 0
     while True:
         received_data = False
+        text_chunks = []
+        done_chunks = []
         try:
             # Счётчик включает открытие соединения. Служебные created/in_progress
             # не продлевают ожидание: нужны новые данные ответа или вызова инструмента.
@@ -52,6 +80,10 @@ async def stream_model_response(client, progress, **arguments):
                 async with client.responses.stream(**arguments) as stream:
                     async for event in stream:
                         progress.model_event(event)
+                        if event.type == 'response.output_text.delta' and getattr(event, 'delta', None):
+                            text_chunks.append(event.delta)
+                        elif event.type == 'response.output_text.done' and getattr(event, 'text', None):
+                            done_chunks.append(event.text)
                         if event.type in ('response.completed', 'response.incomplete'):
                             response = event.response
                             idle.reschedule(None)
@@ -61,6 +93,12 @@ async def stream_model_response(client, progress, **arguments):
                             idle.reschedule(asyncio.get_running_loop().time() + MODEL_IDLE_TIMEOUT)
                     else:
                         response = await stream.get_final_response()
+            streamed = ''.join(text_chunks) if text_chunks else ''.join(done_chunks)
+            if streamed:
+                try:
+                    object.__setattr__(response, '_streamed_output_text', streamed)
+                except Exception:
+                    pass
             progress.finish_response(response)
             return response
         except (APIConnectionError, APIStatusError, httpx.TransportError, TimeoutError) as exc:

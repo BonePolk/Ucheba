@@ -107,3 +107,191 @@ class LibraryReconnect(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(calls, ['900004', '900004'])
         finally:
             current_user_id.reset(token)
+
+
+class MonocleStructuredOutput(unittest.IsolatedAsyncioTestCase):
+    VALID_CONTEXT = {
+        'status': 'ready',
+        'summary': 'Сделать лабораторную работу по сетям до пятницы.',
+        'time_estimate': '3–4 ч',
+        'effort': 'Средняя: настройка топологии и отчёт',
+        'impact': 'Зачёт по лабораторной работе',
+        'full_markdown': '## Условия\nСделать лабораторную.\n\n## Время\n3–4 ч\n\n## Силы\nСредние\n\n## Эффект результата\nЗачёт',
+        'task_update': {'title': None},
+        'questions': [],
+    }
+
+    async def asyncSetUp(self):
+        from common.identity import current_user_id
+        self.token = current_user_id.set(900005)
+
+    async def asyncTearDown(self):
+        from common.identity import current_user_id
+        current_user_id.reset(self.token)
+
+    async def run_monocle(self, responses):
+        from unittest.mock import MagicMock, patch
+        from common.progress import Progress
+        import main
+        captured = []
+
+        async def fake_stream(client, progress, **kwargs):
+            captured.append(kwargs)
+            return responses[len(captured) - 1]
+
+        memory = MagicMock()
+        body = {'task_id': 1, 'task': {'title': 'Лаба'}, 'subject': '', 'owner_notes': ''}
+        with Progress('Monocle', 1) as progress, \
+             patch.object(main.materials, 'model_input', return_value=[]), \
+             patch.object(main.materials, 'browser_site', return_value=None), \
+             patch.object(main, 'stream_model_response', side_effect=fake_stream):
+            result = await main.run_agent(MagicMock(), memory, 1, body, progress)
+        return result, captured, memory
+
+    def test_strict_context_result_schema(self):
+        import main
+
+        def check_strict(node):
+            if isinstance(node, dict):
+                if node.get('type') == 'object':
+                    self.assertFalse(node.get('additionalProperties', True))
+                    self.assertEqual(set(node.get('properties', {})), set(node.get('required', [])))
+                for value in node.values():
+                    check_strict(value)
+            elif isinstance(node, list):
+                for item in node:
+                    check_strict(item)
+
+        check_strict(main.ContextResult.model_json_schema())
+
+    async def test_empty_output_after_tool_recovers_structured_json(self):
+        import json
+        from types import SimpleNamespace
+        responses = [
+            SimpleNamespace(status='completed', usage=None, output_text='', output=[
+                SimpleNamespace(type='function_call', name='agent_note', arguments=json.dumps({'text': 'Читает задачу'}), call_id='c1'),
+            ]),
+            SimpleNamespace(status='completed', usage=None, output_text='', output=[
+                SimpleNamespace(type='reasoning', id='r1', summary=[]),
+            ]),
+            SimpleNamespace(status='completed', usage=None, output_text=json.dumps(self.VALID_CONTEXT, ensure_ascii=False), output=[]),
+        ]
+        result, captured, memory = await self.run_monocle(responses)
+        self.assertEqual(result['status'], 'ready')
+        self.assertEqual(captured[-1]['tool_choice'], 'none')
+        self.assertEqual(captured[-1]['reasoning']['effort'], 'low')
+        memory.save.assert_called_once()
+
+    async def test_streamed_deltas_used_when_completed_response_has_empty_output(self):
+        import json
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+        from common.progress import Progress
+        import main
+
+        payload = json.dumps(self.VALID_CONTEXT, ensure_ascii=False)
+        midpoint = len(payload) // 2
+
+        class DeltaStream:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+            def __aiter__(self): return self.events()
+            async def events(self):
+                yield SimpleNamespace(type='response.output_text.delta', delta=payload[:midpoint])
+                yield SimpleNamespace(type='response.output_text.delta', delta=payload[midpoint:])
+                yield SimpleNamespace(type='response.completed', response=SimpleNamespace(status='completed', usage=None, output=[], output_text=''))
+
+        client = SimpleNamespace(responses=SimpleNamespace(stream=lambda **kwargs: DeltaStream()))
+        memory = MagicMock()
+        body = {'task_id': 1, 'task': {'title': 'Лаба'}, 'subject': '', 'owner_notes': ''}
+        with Progress('Monocle', 1) as progress, \
+             patch.object(main.materials, 'model_input', return_value=[]), \
+             patch.object(main.materials, 'browser_site', return_value=None):
+            result = await main.run_agent(client, memory, 1, body, progress)
+        self.assertEqual(result['status'], 'ready')
+        self.assertEqual(result['summary'], self.VALID_CONTEXT['summary'])
+
+    async def test_alternative_message_part_text_extracted(self):
+        import json
+        from types import SimpleNamespace
+        payload = json.dumps(self.VALID_CONTEXT, ensure_ascii=False)
+        responses = [
+            SimpleNamespace(status='completed', usage=None, output_text='', output=[
+                SimpleNamespace(type='message', content=[SimpleNamespace(type='text', text=payload)]),
+            ]),
+        ]
+        result, captured, _ = await self.run_monocle(responses)
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(result['status'], 'ready')
+
+    async def test_prose_fenced_json_and_edge_fields_normalized(self):
+        import json
+        from types import SimpleNamespace
+        fenced_data = dict(self.VALID_CONTEXT, time_estimate='  ', task_update={'title': ''}, questions=[' ', 'Уточните номер группы?'])
+        text = 'Вот итоговый разбор задачи:\n```json\n' + json.dumps(fenced_data, ensure_ascii=False) + '\n```\nГотово.'
+        responses = [SimpleNamespace(status='completed', usage=None, output_text=text, output=[])]
+        result, _, _ = await self.run_monocle(responses)
+        self.assertEqual(result['status'], 'needs_context')
+        self.assertEqual(result['questions'], ['Уточните номер группы?'])
+        self.assertEqual(result['time_estimate'], 'недостаточно данных')
+        self.assertIsNone(result['task_update']['title'])
+
+    async def test_plain_text_triggers_repair_and_succeeds(self):
+        import json
+        from types import SimpleNamespace
+        responses = [
+            SimpleNamespace(status='completed', usage=None, output_text='Нужно уточнить формат сдачи у преподавателя.', output=[
+                SimpleNamespace(type='message', content=[SimpleNamespace(type='output_text', text='Нужно уточнить формат сдачи у преподавателя.')]),
+            ]),
+            SimpleNamespace(status='completed', usage=None, output_text=json.dumps(self.VALID_CONTEXT, ensure_ascii=False), output=[]),
+        ]
+        result, captured, _ = await self.run_monocle(responses)
+        self.assertEqual(len(captured), 2)
+        self.assertEqual(captured[1]['tool_choice'], 'none')
+        self.assertEqual(result['status'], 'ready')
+
+    async def test_incomplete_response_retries_with_low_reasoning_and_succeeds(self):
+        import json
+        from types import SimpleNamespace
+        responses = [
+            SimpleNamespace(status='incomplete', usage=None, output_text='', output=[
+                SimpleNamespace(type='reasoning', id='r1', summary=[]),
+                SimpleNamespace(type='function_call', name='agent_note', arguments='{"text":"x"}', call_id='partial_call'),
+            ]),
+            SimpleNamespace(status='completed', usage=None, output_text=json.dumps(self.VALID_CONTEXT, ensure_ascii=False), output=[]),
+        ]
+        result, captured, _ = await self.run_monocle(responses)
+        self.assertEqual(result['status'], 'ready')
+        self.assertEqual(captured[1]['tool_choice'], 'none')
+        self.assertEqual(captured[1]['reasoning']['effort'], 'low')
+        self.assertFalse(any(getattr(item, 'type', None) == 'function_call' for item in captured[1]['input']))
+
+    async def test_persistent_empty_output_raises_502(self):
+        from types import SimpleNamespace
+        from fastapi import HTTPException
+        empty = SimpleNamespace(status='completed', usage=None, output_text='', output=[])
+        with self.assertRaises(HTTPException) as exc:
+            await self.run_monocle([empty, empty, empty])
+        self.assertEqual(exc.exception.status_code, 502)
+        self.assertIn('не вернул структурированный контекст', exc.exception.detail)
+
+    async def test_refusal_and_null_usage_tokens(self):
+        import json
+        from types import SimpleNamespace
+        from fastapi import HTTPException
+        refusal = SimpleNamespace(status='completed', usage=None, output_text='', output=[
+            SimpleNamespace(type='message', content=[SimpleNamespace(type='refusal', refusal='Blocked')]),
+        ])
+        with self.assertRaises(HTTPException) as exc:
+            await self.run_monocle([refusal])
+        self.assertEqual(exc.exception.status_code, 502)
+
+        null_usage = SimpleNamespace(
+            status='completed',
+            usage=SimpleNamespace(input_tokens=None, output_tokens=None),
+            output_text=json.dumps(self.VALID_CONTEXT, ensure_ascii=False),
+            output=[],
+        )
+        result, _, _ = await self.run_monocle([null_usage])
+        self.assertEqual(result['usage']['input_tokens'], 0)
+        self.assertEqual(result['usage']['output_tokens'], 0)

@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field, ValidationError
 
-from common.agent_api import agent_routes, stream_model_response
+from common.agent_api import agent_routes, response_text, stream_model_response
 from common.agent_history import with_history
 from common.agent_issues import ISSUE_INSTRUCTION, ISSUE_TOOL, report_problem
 from common.agent_memory import MEMORY_INSTRUCTION, MEMORY_NAMES, MEMORY_TOOLS, memory_tool
@@ -38,6 +38,7 @@ class RankingReason(BaseModel):
 
 
 class RankingResult(BaseModel):
+    model_config = {'extra': 'forbid'}
     task_ids: list[int]
     explanation: str = Field(min_length=1, max_length=400)
     reasons: list[RankingReason]
@@ -45,9 +46,18 @@ class RankingResult(BaseModel):
 
 def read_ranking(text, expected):
     text = text.strip().lstrip('\ufeff')
-    if text.startswith('```') and text.endswith('```'):
-        text = text.split('\n', 1)[-1].rsplit('```', 1)[0].strip()
-    data = json.loads(text)
+    if '```' in text:
+        start, end = text.find('```'), text.rfind('```')
+        if end > start:
+            fenced = text[start + 3:end]
+            text = fenced.split('\n', 1)[-1].strip() if '\n' in fenced else fenced.strip()
+    try:
+        data = json.loads(text)
+    except ValueError:
+        left, right = text.find('{'), text.rfind('}')
+        if left == -1 or right <= left:
+            raise
+        data = json.loads(text[left:right + 1])
     if not isinstance(data, dict):
         raise ValueError('Expected object')
     if isinstance(data.get('explanation'), str):
@@ -58,6 +68,8 @@ def read_ranking(text, expected):
                 for name in ('reason', 'time_estimate', 'effort', 'impact'):
                     if isinstance(item.get(name), str):
                         item[name] = item[name][:180]
+                if isinstance(item.get('deadline_risk'), str) and not item['deadline_risk'].strip():
+                    item['deadline_risk'] = None
     result = RankingResult.model_validate(data)
     reasons = [item.task_id for item in result.reasons]
     if (len(result.task_ids) != len(expected) or set(result.task_ids) != set(expected)
@@ -81,7 +93,7 @@ async def check_model(body: dict):
             reasoning={'effort': 'low'},
             max_output_tokens=1000,
         )
-    if response.status != 'completed' or not response.output_text.strip():
+    if response.status != 'completed' or not response_text(response).strip():
         raise HTTPException(502, 'Модель не завершила проверочный ответ')
     return {'ok': True, 'comparisons': 0}
 
@@ -352,7 +364,7 @@ async def rank(body: dict):
                         }, ensure_ascii=False)})
                         continue
                     try:
-                        result = read_ranking(response.output_text, expected)
+                        result = read_ranking(response_text(response), expected)
                         if schedule is None or schedule.get('timeline_error') or result.task_ids != schedule['task_ids']:
                             raise ValueError('Final order differs from verified plan')
                         break

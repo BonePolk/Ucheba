@@ -1,5 +1,5 @@
 from common.agent_questions import QUESTION_TOOL, QUESTION_INSTRUCTION, ask_user
-from common.agent_api import stream_model_response
+from common.agent_api import response_text, stream_model_response
 from common.browser_tools import BROWSER_TOOLS, BROWSER_NAMES, VISUAL_ACTIONS, run_browser_tool
 from common.agent_issues import ISSUE_TOOL, ISSUE_INSTRUCTION, report_problem
 from common.agent_memory import MEMORY_TOOLS, MEMORY_NAMES, MEMORY_INSTRUCTION, memory_tool
@@ -268,9 +268,10 @@ async def provider_error(request: Request, exc):
         detail = 'Monocle: не удалось подключиться к шлюзу. Проверьте endpoint провайдера и доступ к нему из контейнера.'
     elif isinstance(exc, ValidationError):
         # Не выводим str(exc): Pydantic включает туда содержимое ответа модели.
+        known = ('status', 'summary', 'time_estimate', 'effort', 'impact', 'full_markdown', 'task_update', 'questions')
         errors = []
         for error in exc.errors(include_input=False, include_context=False, include_url=False)[:5]:
-            field = next((part for part in error['loc'] if part in ('status', 'summary', 'questions')), 'JSON')
+            field = next((part for part in error['loc'] if part in known), 'JSON')
             errors.append(f"{field}: {error['type']}")
         reason = '; '.join(errors)
         logging.getLogger('uvicorn.error').error('Monocle: invalid context (%s)', reason)
@@ -287,6 +288,7 @@ async def provider_error(request: Request, exc):
 
 
 class ContextResult(BaseModel):
+    model_config = {'extra': 'forbid'}
     status: Literal['ready', 'needs_context']
     summary: str = Field(max_length=2000)
     time_estimate: str = Field(min_length=1, max_length=400)
@@ -295,6 +297,65 @@ class ContextResult(BaseModel):
     full_markdown: str = Field(min_length=1, max_length=24000)
     task_update: ContextTaskUpdate
     questions: list[str]
+
+
+RETRY_JSON_PROMPT = (
+    'Верни только итоговый JSON без вызова инструментов и без Markdown-обёртки: '
+    '{"status":"ready","summary":"краткие известные факты до 2000 символов",'
+    '"questions":[],"time_estimate":"примерная длительность или недостаточно данных",'
+    '"effort":"оценка нагрузки или недостаточно данных",'
+    '"impact":"ожидаемый эффект или недостаточно данных",'
+    '"full_markdown":"полная версия задачи в Markdown","task_update":{"title":null}}. '
+    'Допустимый status: ready или needs_context. Для needs_context обязательно заполни questions.'
+)
+
+
+def read_context(text: str) -> ContextResult:
+    raw = text.strip().lstrip('\ufeff')
+    if not raw:
+        raise ValueError('Empty context response')
+    if '```' in raw:
+        start = raw.find('```')
+        end = raw.rfind('```')
+        if end > start:
+            fenced = raw[start + 3:end]
+            raw = fenced.split('\n', 1)[-1].strip() if '\n' in fenced else fenced.strip()
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        left, right = raw.find('{'), raw.rfind('}')
+        if left == -1 or right <= left:
+            raise
+        data = json.loads(raw[left:right + 1])
+    if not isinstance(data, dict):
+        raise ValueError('Expected JSON object')
+    if data.get('summary') is None:
+        data['summary'] = ''
+    elif isinstance(data.get('summary'), str):
+        data['summary'] = data['summary'].strip()[:2000]
+    if isinstance(data.get('full_markdown'), str):
+        data['full_markdown'] = data['full_markdown'].strip()[:24000]
+    if not data.get('full_markdown') and isinstance(data.get('summary'), str) and data['summary']:
+        data['full_markdown'] = data['summary']
+    for name in ('time_estimate', 'effort', 'impact'):
+        value = data.get(name)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            data[name] = 'недостаточно данных'
+        elif isinstance(value, str):
+            data[name] = value.strip()[:400]
+    update = data.get('task_update')
+    if update is None:
+        data['task_update'] = {'title': None}
+    elif isinstance(update, dict):
+        title = update.get('title')
+        if isinstance(title, str):
+            title = title.strip()[:300] or None
+        data['task_update'] = {'title': title}
+    if data.get('questions') is None:
+        data['questions'] = []
+    elif isinstance(data.get('questions'), list):
+        data['questions'] = [item.strip() for item in data['questions'] if isinstance(item, str) and item.strip()]
+    return ContextResult.model_validate(data)
 
 
 @app.post('/analyze')
@@ -342,14 +403,15 @@ async def run_agent(client, memory, task_id, body, progress):
         content.append({'type': 'input_text', 'text': f'Предпочтительный ЛК владельца для задачи: {site_id}. Можно выбрать другой подходящий ЛК из browser_sites.'})
     messages = [{'role': 'user', 'content': content}]
     usage = {'input_tokens': 0, 'output_tokens': 0}
-    repaired = False
+    repair_attempts = 0
     sources = {}
     browser_elements = {}
     # Агент сам завершает работу итоговым ответом; число шагов не ограничиваем.
     while True:
+        repaired = repair_attempts > 0
         progress.begin_response()
         response = await stream_model_response(client, progress,
-            model=model, reasoning={'effort': 'medium', 'summary': 'auto'}, max_output_tokens=8000,
+            model=model, reasoning={'effort': 'low' if repaired else 'medium', 'summary': 'auto'}, max_output_tokens=16000,
             instructions=QUESTION_INSTRUCTION + ISSUE_INSTRUCTION + MEMORY_INSTRUCTION + FILE_INSTRUCTION + NOTE_INSTRUCTION + (
                 'Если передан review_request, Ameba просит перепроверить конкретные факты для приоритизации. '
                 'Используй previous_context как прошлую оценку, проверь причину запроса и обнови полный контекст. '
@@ -448,39 +510,42 @@ async def run_agent(client, memory, task_id, body, progress):
         )
         progress.finish_response(response)
         if response.usage:
-            usage['input_tokens'] += response.usage.input_tokens
-            usage['output_tokens'] += response.usage.output_tokens
-        calls = [item for item in response.output if item.type == 'function_call']
+            usage['input_tokens'] += getattr(response.usage, 'input_tokens', 0) or 0
+            usage['output_tokens'] += getattr(response.usage, 'output_tokens', 0) or 0
+        output_items = getattr(response, 'output', None) or ()
+        non_empty_output = [item for item in output_items if getattr(item, 'type', None) != 'message' or getattr(item, 'content', None)]
+        calls = [item for item in output_items if getattr(item, 'type', None) == 'function_call']
         if response.status == 'incomplete':
-            raise HTTPException(502, 'Monocle: ответ не завершён. Возможно, исчерпан лимит токенов.')
-        if not calls:
-            if any(part.type == 'refusal' for item in response.output if item.type == 'message' for part in item.content):
-                raise HTTPException(502, 'Monocle отказался обрабатывать этот запрос.')
-            if not response.output_text:
-                raise HTTPException(502, 'Monocle не вернул структурированный контекст')
-            # Промежуточный текст рядом с вызовом инструмента не является итогом.
-            text = response.output_text.strip().lstrip('\ufeff')
-            if text.startswith('```') and text.endswith('```'):
-                text = text.split('\n', 1)[-1].rsplit('```', 1)[0].strip()
-            try:
-                result = ContextResult.model_validate_json(text)
-            except ValidationError:
-                if repaired:
-                    raise
-                repaired = True
-                logging.getLogger('uvicorn.error').warning('Monocle: retrying invalid final JSON')
-                messages.extend(response.output)
-                messages.append({'role': 'user', 'content':
-                    'Исправь формат последнего ответа. Верни только JSON: '
-                    '{"status":"needs_context","summary":"краткие известные факты до 2000 символов",'
-                    '"questions":["вопросы, существенно влияющие на порядок выполнения"],'
-                    '"time_estimate":"примерная длительность или недостаточно данных",'
-                    '"effort":"оценка нагрузки или недостаточно данных",'
-                    '"impact":"ожидаемый эффект или недостаточно данных",'
-                    '"full_markdown":"полная версия задачи в Markdown","task_update":{"title":null}}. '
-                    'Допустимый status: ready или needs_context. Для ready questions должен быть пустым массивом. '
-                    'Не оборачивай JSON в Markdown. Сохрани Markdown внутри full_markdown и не меняй известные факты.'})
+            if repair_attempts < 2:
+                repair_attempts += 1
+                logging.getLogger('uvicorn.error').warning('Monocle: incomplete response, retrying compact JSON (attempt %d)', repair_attempts)
+                progress.add('Ответ не завершён — запрашивает компактный итог')
+                messages.extend([item for item in non_empty_output if getattr(item, 'type', None) != 'function_call'])
+                messages.append({'role': 'user', 'content': RETRY_JSON_PROMPT})
                 continue
+            raise HTTPException(502, 'Monocle: ответ не завершён. Возможно, исчерпан лимит токенов.')
+        if response.status != 'completed':
+            raise HTTPException(502, 'Monocle не завершил анализ задачи.')
+        if not calls:
+            if any(getattr(part, 'type', None) == 'refusal' for item in output_items if getattr(item, 'type', None) == 'message' for part in (getattr(item, 'content', None) or ())):
+                raise HTTPException(502, 'Monocle отказался обрабатывать этот запрос.')
+            raw_text = response_text(response)
+            try:
+                result = read_context(raw_text)
+            except (ValidationError, ValueError) as exc:
+                if repair_attempts < 2:
+                    repair_attempts += 1
+                    empty = not raw_text.strip()
+                    logging.getLogger('uvicorn.error').warning('Monocle: retrying %s final response (attempt %d)', 'empty' if empty else type(exc).__name__, repair_attempts)
+                    progress.add('Формирует итоговый структурированный контекст' if empty else 'Исправляет формат итогового контекста')
+                    messages.extend(non_empty_output)
+                    messages.append({'role': 'user', 'content': RETRY_JSON_PROMPT})
+                    continue
+                if not raw_text.strip():
+                    raise HTTPException(502, 'Monocle не вернул структурированный контекст') from None
+                if isinstance(exc, ValidationError):
+                    raise
+                raise HTTPException(502, 'Monocle вернул некорректный формат контекста.') from None
             if result.questions:
                 result.status = 'needs_context'
             if result.status == 'needs_context' and not result.questions:
