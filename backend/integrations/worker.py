@@ -41,7 +41,8 @@ async def run():
                         refresh = bool(saved and saved.snapshot == ameba.task_state(session)[0]
                                        and ameba.plan_expired(json.loads(saved.result)))
                     if refresh:
-                        await provider_call('ameba', ameba.rank_all())
+                        if not await ameba.refresh_saved_plan():
+                            await provider_call('ameba', ameba.rank_all())
             agent, _ = read_settings('arrodes')
             if agent['enabled'] and agent['auto_prepare'] and now >= next_prepare and not (arrodes.job_tasks.get(user_id()) and not arrodes.job_tasks[user_id()].done()):
                 next_prepare = now + 60

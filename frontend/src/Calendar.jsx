@@ -1,7 +1,7 @@
 import AgentProblemReport from './AgentProblemReport';
 import { calendarColors as colors, calendarBlockColor } from './calendarColors';
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Anchor, Badge, Button, Group, Modal, NumberInput, Paper, Select, Stack, Text, Textarea, TextInput, Title, Tooltip, Switch } from '@mantine/core';
+import { Alert, Anchor, Badge, Button, Group, Modal, NumberInput, Paper, Select, Stack, Text, Textarea, TextInput, Title, Tooltip } from '@mantine/core';
 import { useMediaQuery } from '@mantine/hooks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { agentRequest, request } from './api';
@@ -38,7 +38,6 @@ export default function Calendar({ features = {} }) {
   const compact = useMediaQuery('(max-width: 767px)', window.innerWidth < 768);
   const [date, setDate] = useState(() => dateKey(new Date()));
   const [view, setView] = useState('week');
-  const [showAmeba, setShowAmeba] = useState(true);
   const [editor, setEditor] = useState(null);
   const [error, setError] = useState('');
   const [command, setCommand] = useState('');
@@ -59,7 +58,7 @@ export default function Calendar({ features = {} }) {
   const stop = useMutation({ mutationFn: () => request('/integrations/monocle/schedule/import/stop', { method: 'POST' }), onSuccess: async () => { editAgent.reset(); await refresh(); } });
   const busy = Boolean(status.data?.running || editAgent.isPending || stop.isPending);
   useEffect(() => { if (viewport.current && view === 'week') viewport.current.scrollTop = 7 * 44; }, [start, view]);
-  const events = (calendar.data?.events ?? []).filter((event) => event.source !== 'ameba' || (showAmeba && features.ameba !== false));
+  const events = calendar.data?.events ?? [];
   const taskList = (tasks.data ?? []).filter((task) => task.status !== 'done');
   const config = calendar.data?.config;
   const days = Array.from({ length: view === 'week' ? 7 : 42 }, (_, index) => addDays(start, index));
@@ -82,10 +81,6 @@ export default function Calendar({ features = {} }) {
   }
   function edit(event, day = event.date, startTime = event.start) {
     if (!config) return;
-    if (event.source === 'ameba') {
-      setError('Это временный план Ameba. Он пересоздаётся при её следующем запуске; постоянные события редактируются отдельно.');
-      return;
-    }
     save.reset();
     const original = config.events.find((item) => item.id === event.id);
     const duration = minutes(event.end) - minutes(event.start);
@@ -109,10 +104,10 @@ export default function Calendar({ features = {} }) {
   }
   function renderEvent(event) {
     return <Tooltip key={`${event.id}:${event.date}`} multiline w={260} label={<>{event.start}–{event.end} · {event.title}{event.summary ? <><br />{event.summary}</> : null}</>}>
-      <button className={`calendar-event ${event.source === 'ameba' ? 'calendar-ameba-event' : ''}`} style={{ top: minutes(event.start) / 1440 * 1056, height: (minutes(event.end) - minutes(event.start)) / 1440 * 1056, padding: minutes(event.end) - minutes(event.start) < 15 ? 0 : undefined, borderWidth: minutes(event.end) - minutes(event.start) < 3 ? 0 : undefined, left: `calc(${event.lane / event.columns * 100}% + 2px)`, width: `calc(${100 / event.columns}% - 4px)`, background: calendarBlockColor(event.kind, event.source === 'ameba'), borderColor: colors[event.kind] }}
-        draggable={event.source === 'calendar'} onDragStart={(drag) => drag.dataTransfer.setData('text/plain', event.id)}
+      <button className="calendar-event" style={{ top: minutes(event.start) / 1440 * 1056, height: (minutes(event.end) - minutes(event.start)) / 1440 * 1056, padding: minutes(event.end) - minutes(event.start) < 15 ? 0 : undefined, borderWidth: minutes(event.end) - minutes(event.start) < 3 ? 0 : undefined, left: `calc(${event.lane / event.columns * 100}% + 2px)`, width: `calc(${100 / event.columns}% - 4px)`, background: calendarBlockColor(event.kind, false), borderColor: colors[event.kind] }}
+        draggable onDragStart={(drag) => drag.dataTransfer.setData('text/plain', event.id)}
         onClick={(click) => { click.stopPropagation(); edit(event); }}>
-        <span>{event.start} {event.title}{event.source === 'ameba' ? ' · Ameba' : ''}</span>
+        <span>{event.start} {event.title}</span>
         {event.summary && <small>{event.summary}</small>}
       </button>
     </Tooltip>;
@@ -125,19 +120,18 @@ export default function Calendar({ features = {} }) {
     </Group>
     <Paper withBorder p="md" radius="md"><Stack gap="sm">
     <Text fw={500}>{asDate(view === 'month' ? monthStart(date) : start).toLocaleDateString('ru-RU', view === 'month' ? { month: 'long', year: 'numeric' } : { day: 'numeric', month: 'long' })}{view === 'week' && ` — ${asDate(end).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' })}`}</Text>
-    {features.ameba !== false && <Group gap="xs"><Switch size="xs" label="Временный план Ameba" checked={showAmeba} onChange={(event) => setShowAmeba(event.currentTarget.checked)} /></Group>}
     {calendar.error && <Alert color="red">{calendar.error.message}</Alert>}
     {error && !editor && <Alert color="yellow">{error}</Alert>}
     {compact ? <div className="calendar-agenda">{days.map((day) => <section key={day} className={`agenda-day ${day === calendar.data?.today ? 'is-today' : ''}`}>
       <div className="agenda-date"><Text fw={700}>{asDate(day).toLocaleDateString('ru-RU', { day: 'numeric' })}</Text><Text size="xs" c="dimmed">{asDate(day).toLocaleDateString('ru-RU', { weekday: 'short', month: 'short' })}</Text></div>
-      <div className="agenda-events">{events.filter((event) => event.date === day).sort((a, b) => a.start.localeCompare(b.start)).map((event) => <button type="button" key={event.id} className="agenda-event" style={{ borderLeftColor: colors[event.kind], background: calendarBlockColor(event.kind, event.source === 'ameba') }} onClick={() => edit(event)}>
-        <span>{event.start}–{event.end}{event.source === 'ameba' ? ' · Ameba' : ''}</span><strong>{event.title}</strong>{event.summary && <small>{event.summary}</small>}
+      <div className="agenda-events">{events.filter((event) => event.date === day).sort((a, b) => a.start.localeCompare(b.start)).map((event) => <button type="button" key={event.id} className="agenda-event" style={{ borderLeftColor: colors[event.kind], background: calendarBlockColor(event.kind, false) }} onClick={() => edit(event)}>
+        <span>{event.start}–{event.end}</span><strong>{event.title}</strong>{event.summary && <small>{event.summary}</small>}
       </button>)}<button type="button" className="agenda-add" onClick={() => create(day)}>+ Событие</button></div>
     </section>)}</div> : view === 'week' ? <div className="calendar-scroll" ref={viewport}><div className="calendar-week">
       <div className="calendar-week-header"><div />{days.map((day) => <div key={day} className={day === calendar.data?.today ? 'calendar-today' : ''}>{asDate(day).toLocaleDateString('ru-RU', { weekday: 'short', day: 'numeric', month: 'short' })}</div>)}</div>
       <div className="calendar-week-body"><div className="calendar-hours">{Array.from({ length: 24 }, (_, hour) => <span key={hour} style={{ top: hour * 44 }}>{String(hour).padStart(2, '0')}:00</span>)}</div>
         {days.map((day) => <div key={day} className="calendar-day" onClick={(click) => { const box = click.currentTarget.getBoundingClientRect(); create(day, Math.min(1410, Math.floor((click.clientY - box.top) / 1056 * 96) * 15)); }}
-          onDragOver={(drag) => drag.preventDefault()} onDrop={(drag) => { drag.preventDefault(); const event = events.find((item) => item.id === drag.dataTransfer.getData('text/plain')); if (!event || event.source !== 'calendar') return; const box = drag.currentTarget.getBoundingClientRect(); const minute = Math.min(1410, Math.floor((drag.clientY - box.top) / 1056 * 96) * 15); edit(event, day, clock(minute)); }}>
+          onDragOver={(drag) => drag.preventDefault()} onDrop={(drag) => { drag.preventDefault(); const event = events.find((item) => item.id === drag.dataTransfer.getData('text/plain')); if (!event) return; const box = drag.currentTarget.getBoundingClientRect(); const minute = Math.min(1410, Math.floor((drag.clientY - box.top) / 1056 * 96) * 15); edit(event, day, clock(minute)); }}>
           {events.filter((event) => event.date === day && event.kind === 'work').map((event) => <button type="button" key={event.id} className="calendar-work" onClick={(click) => { click.stopPropagation(); edit(event); }} style={{ top: minutes(event.start) / 1440 * 1056, height: (minutes(event.end) - minutes(event.start)) / 1440 * 1056 }}>{event.title}</button>)}
           {layout(events.filter((event) => event.date === day && event.kind !== 'work')).map(renderEvent)}
         </div>)}
@@ -145,7 +139,7 @@ export default function Calendar({ features = {} }) {
     </div></div> : <div className="calendar-month">{days.map((day) => {
       const items = events.filter((event) => event.date === day && event.kind !== 'work');
       return <div key={day} className={`calendar-month-day ${day === calendar.data?.today ? 'calendar-today' : ''}`}><button className="calendar-date" onClick={() => create(day)}>{asDate(day).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short', weekday: 'short' })}</button>
-        {items.slice(0, 4).map((event) => <button key={event.id} className={`calendar-month-event ${event.source === 'ameba' ? 'calendar-ameba-event' : ''}`} style={{ borderLeftColor: colors[event.kind], background: calendarBlockColor(event.kind, event.source === 'ameba') }} onClick={() => edit(event)}>{event.start} {event.title}{event.source === 'ameba' ? ' · Ameba' : ''}</button>)}
+        {items.slice(0, 4).map((event) => <button key={event.id} className="calendar-month-event" style={{ borderLeftColor: colors[event.kind], background: calendarBlockColor(event.kind, false) }} onClick={() => edit(event)}>{event.start} {event.title}</button>)}
         {items.length > 4 && <Button variant="subtle" size="compact-xs" onClick={() => { setDate(day); setView('week'); }}>Ещё {items.length - 4}</Button>}
       </div>;
     })}</div>}

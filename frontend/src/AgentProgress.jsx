@@ -1,11 +1,10 @@
-import { agentName as publicAgentName, request } from './api';
+import { agentName as publicAgentName } from './api';
 import AgentExplanation from './AgentExplanation';
 import AgentQuestion from './AgentQuestion';
 import MonocleBrowser from './MonocleBrowser';
-import AgentTimeline from './AgentTimeline';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useMediaQuery } from '@mantine/hooks';
-import { Alert, Badge, Button, Group, Loader, Modal, Paper, Select, Stack, Text } from '@mantine/core';
+import { Alert, Badge, Button, Group, Loader, Paper, Select, Stack, Text } from '@mantine/core';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 
 const names = { monocle: 'Monocle', straus: 'Straus', context: 'Monocle', ameba: 'Ameba', arrodes: 'Arrodes' };
@@ -93,10 +92,8 @@ export default function AgentProgress({ taskId = 0, providers = [], active = fal
   const selectionKey = ['agent-progress-selected', taskId, providerList];
   const [opened, setOpened] = useState(() => new URLSearchParams(window.location.search).get('browser') === '1' || (client.getQueryData(openKey) ?? !compact));
   const [selected, setSelected] = useState(() => client.getQueryData(selectionKey) ?? null);
-  const [expanded, setExpanded] = useState(false);
   const [streamError, setStreamError] = useState(false);
   const query = useQuery({ queryKey: ['agent-progress', taskId, providerList], queryFn: async () => [], initialData: [], enabled: false, gcTime: Infinity });
-  const ranking = useQuery({ queryKey: ['ameba-ranking'], queryFn: () => request('/integrations/ameba/ranking'), enabled: providers.includes('ameba'), refetchInterval: providers.includes('ameba') ? 5000 : false });
   useEffect(() => {
     for (const prefix of ['agent-run', 'agent-log-view', 'agent-progress-open', 'agent-progress-selected']) client.setQueryDefaults([prefix], { gcTime: Infinity });
   }, [client]);
@@ -108,6 +105,16 @@ export default function AgentProgress({ taskId = 0, providers = [], active = fal
     stream.onmessage = (event) => {
       try {
         const entries = JSON.parse(event.data);
+        const amebaEntry = entries.find((item) => item.provider === 'ameba')?.run;
+        if (amebaEntry) {
+          client.setQueryData(['ameba-live-plan'], {
+            running: amebaEntry.status === 'running',
+            started_at: amebaEntry.started_at,
+            schedule: amebaEntry.schedule ?? null,
+            timeline: amebaEntry.timeline ?? [],
+          });
+          if (amebaEntry.status !== 'running') client.invalidateQueries({ queryKey: ['ameba-ranking'] });
+        }
         client.setQueryData(key, (previous = []) => entries.map((entry) => {
           const previousRun = previous.find((item) => item.provider === entry.provider)?.run;
           const runId = entry.run?.id ?? previousRun?.id;
@@ -145,12 +152,6 @@ export default function AgentProgress({ taskId = 0, providers = [], active = fal
   const elapsed = current?.receivedAt == null ? 0 : Math.max(0, performance.now() - current.receivedAt);
   const quietMinutes = lastActivity && Number.isFinite(serverTime) ? Math.max(0, Math.floor((serverTime + elapsed - Date.parse(lastActivity)) / 60000)) : 0;
   const browserUsed = current?.available && run?.status === 'running' && (run.browser_used || run.events?.some((event) => /^(Входит через сохранённый вход|Читает (текущую )?страницу|Переходит по выбранной ссылке|Скачивает документ из браузера|Ищет в Google|Смотрит снимок браузера|Перемещает курсор|Нажимает|Вводит текст|Прокручивает страницу|Открывает страницу|Возвращается назад|Переходит вперёд|Рассматривает изображение|Ждёт, пока владелец завершит CAPTCHA)/.test(event.message)));
-  const ameba = current?.provider === 'ameba' || !current && taskId === 0 && providers.includes('ameba');
-  const livePlan = ameba && (run?.status === 'running' || run?.status === 'completed' && run.started_at > (ranking.data?.generated_at ?? ''));
-  const tasks = livePlan ? run.timeline : ranking.data?.timeline;
-  const plan = livePlan ? run.schedule : ranking.data?.plan_reset ? null : ranking.data?.schedule;
-  const schedule = plan ?? ranking.data?.calendar_schedule;
-  const hasTimeline = ameba && (schedule?.blocks?.length > 0 || tasks?.some((task) => task.plan));
   if (!providers.length) return null;
   return <Paper withBorder p="sm" radius="md" className="agent-progress">
     <Group justify="space-between" align="center" wrap="wrap">
@@ -168,13 +169,9 @@ export default function AgentProgress({ taskId = 0, providers = [], active = fal
     </div>}
     {run?.status === 'failed' && <Alert color="red">{run.error || 'Агент завершился с ошибкой. Повторите поручение.'}</Alert>}
     {entries.filter((entry) => entry.run?.pending_question).map((entry) => <AgentQuestion key={entry.run.pending_question.id} question={entry.run.pending_question} agent={entry.run.agent} />)}
-    {opened && <div className={`agent-log-body ${browserUsed || hasTimeline ? 'has-visual' : ''}`}>
-      {(browserUsed || hasTimeline) && <aside className="agent-visual">
-        {browserUsed && <MonocleBrowser key={run.id} active />}
-        {hasTimeline && <Stack gap={4}>
-          <Button size="compact-xs" variant="subtle" onClick={() => setExpanded(true)}>Увеличить таймлайн ↗</Button>
-          <AgentTimeline tasks={tasks} schedule={schedule} compact calendarOnly={!plan} finished={run?.status !== 'running'} />
-        </Stack>}
+    {opened && <div className={`agent-log-body ${browserUsed ? 'has-visual' : ''}`}>
+      {browserUsed && <aside className="agent-visual">
+        <MonocleBrowser key={run.id} active />
       </aside>}
       <div className="agent-log-content">
         <Text size="xs" c="dimmed">{run?.token_usage ? `Подтверждённые токены: вход ${run.token_usage.input_tokens ?? 'нет данных'} · выход ${run.token_usage.output_tokens ?? 'нет данных'}` : 'Токены: нет данных'}</Text>
@@ -184,8 +181,5 @@ export default function AgentProgress({ taskId = 0, providers = [], active = fal
     </div>}
     {entries.filter((entry) => !entry.available).map((entry) => <Text key={entry.provider} size="xs" c="yellow">{names[entry.provider]}: журнал пока недоступен</Text>)}
     {streamError && <Alert color="yellow">Соединение с журналом потеряно. Переподключаемся…</Alert>}
-    <Modal opened={expanded && hasTimeline} onClose={() => setExpanded(false)} title="План Ameba" size="90vw" fullScreen={compact} centered>
-      {hasTimeline && <AgentTimeline tasks={tasks} schedule={schedule} calendarOnly={!plan} finished={run?.status !== 'running'} />}
-    </Modal>
   </Paper>;
 }

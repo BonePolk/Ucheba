@@ -11,7 +11,7 @@ export function DeadlineRisk({ reason }) {
 export default function RankingAssessment({ assessment, compact = false }) {
   if (!assessment) return null;
   const plan = assessment.plan;
-  const time = plan ? `${Math.round(plan.min_minutes / 60 * 10) / 10}–${Math.round(plan.max_minutes / 60 * 10) / 10} ч` : 'Время';
+  const time = plan?.hours_label || (plan ? `${Math.round(plan.min_minutes / 60 * 10) / 10}–${Math.round(plan.max_minutes / 60 * 10) / 10} ч` : 'Время');
   return <Stack gap={5} maw={320}>
     {!compact && <Group gap={4}>
       {assessment.time_estimate && <Tooltip multiline w={260} label={assessment.time_estimate}><Badge size="xs" variant="light" color="purple">{time}</Badge></Tooltip>}

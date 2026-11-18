@@ -10,6 +10,7 @@ import utc from 'dayjs/plugin/utc';
 import TaskForm, { priorities, statuses } from './TaskForm';
 import AgentQueue from './AgentQueue';
 import AgentProgress from './AgentProgress';
+import AgentTimeline from './AgentTimeline';
 import RankingAssessment, { DeadlineRisk } from './RankingAssessment';
 
 dayjs.extend(utc);
@@ -70,9 +71,19 @@ export default function TaskBoard({ features = {} }) {
     mutationFn: () => request('/integrations/ameba/plan', { method: 'DELETE' }),
     onSuccess: async () => {
       rank.reset();
+      queryClient.setQueryData(['ameba-live-plan'], null);
       await Promise.all([refresh(), queryClient.invalidateQueries({ queryKey: ['calendar'] })]);
     },
   });
+  const feedback = useMutation({
+    mutationFn: (payload) => request('/integrations/ameba/feedback', { method: 'POST', body: JSON.stringify(payload) }),
+    onSuccess: async () => { await refresh(); },
+  });
+  const adjustPlan = useMutation({
+    mutationFn: (payload) => request('/integrations/ameba/plan', { method: 'PATCH', body: JSON.stringify(payload) }),
+    onSuccess: async () => { await refresh(); },
+  });
+  const livePlan = useQuery({ queryKey: ['ameba-live-plan'], queryFn: async () => null, enabled: false, initialData: null });
   const rankingReasons = new Map((ranking.data?.reasons ?? []).map((item) => [item.task_id, item]));
   const positions = new Map((ranking.data?.task_ids ?? []).map((id, index) => [id, index + 1]));
   const save = useMutation({
@@ -107,7 +118,15 @@ export default function TaskBoard({ features = {} }) {
   });
   const remove = useMutation({ mutationFn: deleteTask, onSuccess: refresh });
   const rows = tasks.data ?? [];
-  const error = tasks.error || update.error || remove.error || ranking.error || rank.error || clearPlan.error;
+  const error = tasks.error || update.error || remove.error || ranking.error || rank.error || clearPlan.error || feedback.error || adjustPlan.error;
+  const liveActive = Boolean(livePlan.data?.running || (ranking.data?.has_plan && livePlan.data?.started_at && livePlan.data.started_at > (ranking.data?.generated_at ?? '')));
+  const activeSchedule = (liveActive ? livePlan.data?.schedule : null) ?? (ranking.data?.plan_reset ? null : ranking.data?.schedule);
+  const activeTimeline = (liveActive ? livePlan.data?.timeline : null) ?? ranking.data?.timeline ?? [];
+  const hasManualAdjustments = Boolean(
+    Object.keys(ranking.data?.manual_adjustments?.day_overrides ?? {}).length
+    || Object.keys(ranking.data?.manual_adjustments?.task_pins ?? {}).length
+    || Object.keys(ranking.data?.manual_adjustments?.estimate_overrides ?? {}).length,
+  );
   const changeFilter = (name, value) => setFilters((current) => ({ ...current, [name]: value }));
 
   return (
@@ -138,16 +157,27 @@ export default function TaskBoard({ features = {} }) {
         </Paper>
         {!archived && (features.monocle !== false || features.ameba !== false) && <AgentQueue queue={queue.data} error={queue.error} />}
         {features.ameba !== false && !archived && <Paper withBorder radius="lg" p="md" className="planner-panel"><Stack gap="sm">
-          <Group justify="space-between"><Group gap="xs"><span className={`planner-dot ${queue.data?.ameba_running ? 'is-active' : ''}`} /><Text fw={600} size="sm">План дня</Text></Group><Button size="compact-sm" variant="subtle" onClick={() => setPlannerOpen(!plannerOpen)} aria-expanded={plannerOpen}>{plannerOpen ? 'Свернуть' : 'Настроить'}</Button></Group>
+          <Group justify="space-between"><Group gap="xs"><span className={`planner-dot ${queue.data?.ameba_running ? 'is-active' : ''}`} /><Text fw={600} size="sm">План и нагрузка · Ameba</Text></Group><Button size="compact-sm" variant="subtle" onClick={() => setPlannerOpen(!plannerOpen)} aria-expanded={plannerOpen}>{plannerOpen ? 'Свернуть' : 'Настроить'}</Button></Group>
           {plannerOpen && <>
-          <Textarea label="Пожелания к расписанию" placeholder="Например: оставь утро свободным, а лабораторную перенеси на вечер"
+          <Textarea label="Пожелания к нагрузке и отдыху" placeholder="Например: в понедельник после пар не ставь сложные задачи, а пятницу сделай облегчённой"
             autosize minRows={1} maxRows={4} maxLength={4000} value={planFeedback ?? ranking.data?.feedback ?? ''}
             onChange={(event) => setPlanFeedback(event.currentTarget.value)} />
-          </>}<Group>
-          <Button variant="light" loading={rank.isPending && !queue.data?.ameba_running} disabled={clearPlan.isPending || queue.data?.browser_busy} onClick={() => rank.mutate()}>{queue.data?.ameba_running ? 'Применить изменения' : 'Обновить расписание'}</Button>
+          </>}<Group wrap="wrap">
+          <Button variant="light" loading={rank.isPending && !queue.data?.ameba_running} disabled={clearPlan.isPending || queue.data?.browser_busy} onClick={() => rank.mutate()}>{queue.data?.ameba_running ? 'Применить изменения' : 'Обновить план'}</Button>
           <Button variant="subtle" color="red" loading={clearPlan.isPending} disabled={!ranking.data?.has_plan || rank.isPending || queue.data?.ameba_running} onClick={() => clearPlan.mutate()}>Удалить план</Button>
-          <Text size="sm" c="dimmed">{ranking.data?.needs_refresh ? 'Порядок нужно обновить.' : `Сравнено задач: ${ranking.data?.ranked_count ?? 0}.`}{ranking.data?.pending_count > 0 && ` Ожидают контекста Monocle: ${ranking.data.pending_count}.`}{ranking.data?.uncertain_comparisons > 0 && ' При неуверенном сравнении сохранён ручной приоритет и дедлайн.'}</Text>
-        </Group>{rank.data?.unchanged && <Text size="xs" c="dimmed">{rank.data.status === 'running' ? 'Ameba уже работает с этими данными.' : 'Данные не изменились — сохранённый порядок остаётся.'}</Text>}{ranking.data?.explanation && <Tooltip multiline w={320} label={ranking.data.explanation} events={{ hover: true, focus: true, touch: true }}><Text component="button" type="button" size="xs" c="dimmed" style={{ cursor: 'help', background: 'none', border: 0, padding: 0, width: 'fit-content' }}>{ranking.data.needs_refresh ? 'О последней сортировке' : 'Почему такой порядок'}</Text></Tooltip>}</Stack></Paper>}
+          {hasManualAdjustments && <Button variant="subtle" color="gray" loading={adjustPlan.isPending} disabled={rank.isPending || queue.data?.ameba_running} onClick={() => adjustPlan.mutate({ reset: true })}>Сбросить правки</Button>}
+          <Text size="sm" c="dimmed">{ranking.data?.needs_refresh ? 'План нужно обновить.' : `Задач в плане: ${ranking.data?.ranked_count ?? 0}.`}{ranking.data?.pending_count > 0 && ` Ожидают контекста Monocle: ${ranking.data.pending_count}.`}</Text>
+        </Group>{rank.data?.unchanged && <Text size="xs" c="dimmed">{rank.data.status === 'running' ? 'Ameba уже работает с этими данными.' : 'Данные не изменились — сохранённый план остаётся.'}</Text>}{ranking.data?.explanation && <Tooltip multiline w={320} label={ranking.data.explanation} events={{ hover: true, focus: true, touch: true }}><Text component="button" type="button" size="xs" c="dimmed" style={{ cursor: 'help', background: 'none', border: 0, padding: 0, width: 'fit-content' }}>{ranking.data.needs_refresh ? 'О последнем плане' : 'Логика приоритетов и рисков'}</Text></Tooltip>}
+          <AgentTimeline
+            tasks={activeTimeline}
+            schedule={activeSchedule ?? ranking.data?.calendar_schedule}
+            calendarOnly={!activeSchedule}
+            finished={!livePlan.data?.running && !queue.data?.ameba_running}
+            busy={feedback.isPending || adjustPlan.isPending || rank.isPending}
+            onFeedback={(payload) => feedback.mutate(payload)}
+            onAdjust={(payload) => adjustPlan.mutate(payload)}
+          />
+        </Stack></Paper>}
         {!archived && <AgentProgress providers={['monocle', 'straus', 'arrodes', 'ameba'].filter((name) => features[name] !== false)} active={rank.isPending} />}
         {error && <Alert color="red">{error.message}</Alert>}
         {tasks.isPending ? <div className="page-loading"><Loader aria-label="Загрузка задач" /></div> : (

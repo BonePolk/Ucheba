@@ -5,10 +5,6 @@ from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field, model_validator
-from sqlmodel import Session
-
-from common.database import get_engine
-from common.models.integration import IntegrationSetting
 
 
 class Slot(BaseModel):
@@ -105,12 +101,18 @@ def default_week():
 
 
 def read_week():
+    from sqlmodel import Session
+    from common.database import get_engine
+    from common.models.integration import IntegrationSetting
     with Session(get_engine()) as session:
         row = session.get(IntegrationSetting, 'weekly_schedule')
         return json.loads(row.config) if row else None
 
 
 def save_week(week):
+    from sqlmodel import Session
+    from common.database import get_engine
+    from common.models.integration import IntegrationSetting
     with Session(get_engine()) as session:
         row = session.get(IntegrationSetting, 'weekly_schedule') or IntegrationSetting(name='weekly_schedule')
         row.config = week.model_dump_json()

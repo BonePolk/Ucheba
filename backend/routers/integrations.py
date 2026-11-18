@@ -401,6 +401,50 @@ class RankingRequest(BaseModel):
     feedback: str | None = Field(default=None, max_length=4000)
 
 
+class PlanFeedbackInput(BaseModel):
+    task_id: int = Field(gt=0)
+    outcome: Literal['done', 'partial', 'missed', 'too_hard']
+    actual_minutes: int | None = Field(default=None, ge=0, le=2880)
+    period_id: str | None = Field(default=None, max_length=80)
+
+
+class TaskPinInput(BaseModel):
+    task_id: int = Field(gt=0)
+    target_date: str | None = Field(default=None, pattern=r'^\d{4}-\d{2}-\d{2}$')
+    not_before: str | None = Field(default=None, pattern=r'^\d{4}-\d{2}-\d{2}$')
+    shift_days: int | None = Field(default=None, ge=-14, le=14)
+    clear: bool = False
+
+
+class EstimateOverrideInput(BaseModel):
+    task_id: int = Field(gt=0)
+    remaining_minutes: int | None = Field(default=None, ge=0, le=10000)
+
+
+class PlanAdjustmentInput(BaseModel):
+    day_overrides: dict[str, Literal['normal', 'light', 'free', 'focused', 'auto'] | None] | None = None
+    task_pin: TaskPinInput | None = None
+    estimate_override: EstimateOverrideInput | None = None
+    reset: bool = False
+
+
+@router.post('/ameba/feedback')
+async def ameba_feedback(body: PlanFeedbackInput):
+    check_feature('ameba')
+    return await ameba.submit_feedback(body.task_id, body.outcome, body.actual_minutes, body.period_id)
+
+
+@router.patch('/ameba/plan')
+async def ameba_adjust_plan(body: PlanAdjustmentInput):
+    check_feature('ameba')
+    return await ameba.adjust_plan(
+        day_overrides=body.day_overrides,
+        task_pin=body.task_pin.model_dump() if body.task_pin else None,
+        estimate_override=body.estimate_override.model_dump() if body.estimate_override else None,
+        reset=body.reset,
+    )
+
+
 @router.post('/ameba/rank')
 async def ameba_rank(background: bool = False, body: RankingRequest | None = None):
     check_feature('ameba')

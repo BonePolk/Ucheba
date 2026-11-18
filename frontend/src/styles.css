@@ -14,42 +14,17 @@
   background: #122016;
 }
 
-.ameba-timeline-task:hover,
-.ameba-timeline-task:focus-visible {
-  z-index: 1;
-  filter: brightness(1.15);
-  box-shadow: none;
-  outline: 2px solid #b995dc;
-  outline-offset: 1px;
-}
-
-.ameba-timeline-task {
-  position: absolute;
-  box-sizing: border-box;
-  height: 34px;
-  padding: 9px 3px;
-  border-radius: 0;
-  color: white;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  font-size: 11px;
-  text-decoration: none;
-  transition: left 650ms cubic-bezier(.22, 1, .36, 1),
-    top 650ms cubic-bezier(.22, 1, .36, 1),
-    width 650ms cubic-bezier(.22, 1, .36, 1),
-    box-shadow 180ms ease;
-  animation: none;
-}
-
-.ameba-timeline-rest {
-  color: var(--mantine-color-text);
-  cursor: default;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .ameba-timeline-task { transition: none; }
-}
+.ameba-period-feed { margin-top: 4px; }
+.ameba-period-list { display: flex; flex-direction: column; gap: 10px; }
+.ameba-period-card { background: #0d0d0d; border-color: #262626; transition: border-color 180ms ease; }
+.ameba-period-card.is-current { border-color: #7f49b499; }
+.ameba-period-tasks { border-top: 1px solid #ffffff10; padding-top: 8px; }
+.ameba-period-task { padding: 6px 8px; background: #ffffff05; border-left: 2px solid #7f49b466; }
+.ameba-period-task a:hover { text-decoration: underline; }
+.ameba-feedback-bar { padding-top: 6px; border-top: 1px dashed #ffffff15; }
+.ameba-commitments summary { cursor: pointer; font-size: 12px; color: var(--mantine-color-dimmed); }
+.ameba-calendar-preview { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+.ameba-calendar-preview-day { padding: 8px 10px; border: 1px solid #262626; background: #0d0d0d; }
 
 .calendar-scroll { max-height: 620px; overflow: auto; border: 1px solid #303030; border-radius: 0; }
 .calendar-week { min-width: 940px; }
@@ -137,8 +112,6 @@
 .file-table tbody tr:nth-child(even) td { background: var(--mantine-color-body); }
 @media (max-width: 1399px) { .file-explorer.has-preview { grid-template-columns: 195px minmax(0, 1fr); } .file-preview { grid-column: 2; border-left: 0; border-top: 1px solid var(--mantine-color-default-border); } .file-explorer.has-preview .file-sidebar { grid-row: 1 / span 2; } }
 @media (prefers-reduced-motion: reduce) { .file-item { transition: none; } .file-item:hover { transform: none; } }
-
-.calendar-ameba-event { border: 1px dashed var(--mantine-color-purple-3); }
 
 .task-file-drop { border: 1px dashed var(--mantine-color-default-border); border-radius: 0; padding: 6px; }
 .file-drop-active { outline: 2px dashed var(--mantine-color-purple-4); outline-offset: -3px; background: var(--mantine-color-purple-light); }
@@ -238,12 +211,6 @@ body { background: #000; }
 .agenda-event strong { font-size: 14px; font-weight: 600; }
 .agenda-event small { opacity: .75; font-size: 12px; }
 .agenda-add { min-height: 36px; text-align: left; border: 1px dashed #ffffff15; border-radius: 0; background: none; color: #a3a3a3; padding: 8px 12px; cursor: pointer; }
-.plan-agenda { display: flex; flex-direction: column; gap: 7px; }
-.plan-agenda.is-expanded { max-height: min(18rem, 45dvh); overflow-y: auto; scrollbar-gutter: stable; overscroll-behavior: contain; }
-.plan-agenda-row { flex-shrink: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 8px; padding: 8px 10px; border-radius: 0; border-left: 3px solid; color: #fff; text-decoration: none; }
-.plan-agenda-row span { grid-column: 1 / -1; font-size: 10px; opacity: .75; }
-.plan-agenda-row strong { font-size: 12px; font-weight: 500; overflow-wrap: anywhere; }
-.plan-agenda-row small { font-size: 11px; opacity: .7; white-space: nowrap; }
 @media (min-width: 1200px) {
   .app-shell.is-collapsed { grid-template-columns: 72px minmax(0, 1fr); }
   .app-navigation.is-collapsed { padding-inline: 10px; }

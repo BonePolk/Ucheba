@@ -1,109 +1,393 @@
-import { calendarColors, calendarBlockColor } from './calendarColors';
-import { useLayoutEffect, useRef, useState } from 'react';
-import { useMediaQuery } from '@mantine/hooks';
-import { Badge, Button, Group, Paper, Stack, Text, Tooltip } from '@mantine/core';
+import { useState } from 'react';
+import { Alert, Badge, Button, Group, Menu, NumberInput, Paper, Stack, Text, Tooltip } from '@mantine/core';
+import { calendarColors } from './calendarColors';
 
-function duration(minutes) {
-  return minutes < 60 ? `${minutes} мин` : `${Math.round(minutes / 60 * 10) / 10} ч`;
+const LOAD_META = {
+  free: { label: 'Свободно', color: 'gray', accent: '#454545' },
+  light: { label: 'Лёгкая нагрузка', color: 'teal', accent: calendarColors.break },
+  medium: { label: 'Средняя нагрузка', color: 'purple', accent: calendarColors.task },
+  high: { label: 'Высокая нагрузка', color: 'orange', accent: '#c96f28' },
+  overload: { label: 'Перегрузка', color: 'red', accent: '#c93b3b' },
+};
+
+const KIND_LABELS = {
+  work: null,
+  light: 'Облегчённый режим',
+  recovery: 'Восстановление',
+  free: 'Свободный день',
+};
+
+const OUTCOMES = [
+  { value: 'done', label: 'Выполнено' },
+  { value: 'partial', label: 'Частично' },
+  { value: 'too_hard', label: 'Тяжело' },
+  { value: 'missed', label: 'Не вышло' },
+];
+
+const MONTHS_SHORT = ['янв', 'фев', 'мар', 'апр', 'мая', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
+const MONTHS_LONG = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
+const WEEKDAYS = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
+
+function parseIsoDate(iso) {
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d));
 }
 
-const rest = { break: 'Перерыв', meal: 'Еда', personal: 'Личное время', sleep: 'Сон' };
+function formatDateRange(startIso, endIso) {
+  const start = parseIsoDate(startIso);
+  const end = parseIsoDate(endIso);
+  const sDay = start.getUTCDate();
+  const eDay = end.getUTCDate();
+  const sMon = start.getUTCMonth();
+  const eMon = end.getUTCMonth();
+  const sWd = WEEKDAYS[start.getUTCDay()];
+  const eWd = WEEKDAYS[end.getUTCDay()];
+  if (startIso === endIso) return `${sDay} ${MONTHS_LONG[sMon]} · ${sWd}`;
+  if (sMon === eMon) return `${sDay}–${eDay} ${MONTHS_LONG[sMon]} · ${sWd}–${eWd}`;
+  return `${sDay} ${MONTHS_SHORT[sMon]} – ${eDay} ${MONTHS_SHORT[eMon]} · ${sWd}–${eWd}`;
+}
 
-export default function AgentTimeline({ tasks = [], finished = false, schedule, calendarOnly = false, compact: compactView }) {
-  const smallScreen = useMediaQuery('(max-width: 767px)', window.innerWidth < 768);
-  const compact = compactView ?? smallScreen;
+function formatShortDate(iso) {
+  const d = parseIsoDate(iso);
+  return `${d.getUTCDate()} ${MONTHS_SHORT[d.getUTCMonth()]}`;
+}
+
+function formatDeadline(iso, zone) {
+  if (!iso) return null;
+  const date = new Date(iso);
+  return date.toLocaleString('ru-RU', { timeZone: zone || undefined, day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+}
+
+function durationLabel(minutes) {
+  if (!minutes) return '0 мин';
+  if (minutes < 60) return `${minutes} мин`;
+  const h = Math.round((minutes / 60) * 10) / 10;
+  return `${h} ч`;
+}
+
+export default function AgentTimeline({ tasks = [], finished = true, schedule, calendarOnly = false, onFeedback, onAdjust, busy = false }) {
   const [expanded, setExpanded] = useState(false);
-  const chart = useRef(null);
-  const seen = useRef(new Set());
-  useLayoutEffect(() => {
-    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-    for (const element of chart.current?.querySelectorAll('[data-block-key]') ?? []) {
-      const key = element.dataset.blockKey;
-      if (!seen.current.has(key)) {
-        element.animate([{ transform: 'scaleX(0.02)' }, { transform: 'scaleX(1)' }],
-          { duration: 450, easing: 'cubic-bezier(.22,1,.36,1)' });
-        seen.current.add(key);
-      }
-    }
-  });
-  const planned = tasks.filter((task) => task.plan);
-  const byId = new Map(planned.map((task) => [task.id, task]));
-  let elapsed = 0;
-  const blocks = schedule?.blocks ?? planned.map((task) => {
-    const block = { id: `task-${task.id}-0`, kind: 'task', task_id: task.id, start: elapsed, minutes: task.plan.max_minutes };
-    elapsed += block.minutes;
-    return block;
-  });
-  const origin = schedule?.start_at ? new Date(schedule.start_at) : null;
-  const zone = schedule?.timezone || 'UTC';
-  const formatter = new Intl.DateTimeFormat('en-GB', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
-  function localTime(date) {
-    const parts = Object.fromEntries(formatter.formatToParts(date).map((part) => [part.type, part.value]));
-    return { date: Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day)), minutes: Number(parts.hour) * 60 + Number(parts.minute) };
+  const [feedbackDraft, setFeedbackDraft] = useState(null);
+  const [customMinutes, setCustomMinutes] = useState('');
+
+  const periods = schedule?.periods ?? [];
+  const conflicts = schedule?.deadline_conflicts ?? [];
+  const infeasibleConflicts = conflicts.filter((item) => item.infeasible);
+  const tightConflicts = conflicts.filter((item) => !item.infeasible);
+  const todayIso = schedule?.generated_date || new Date().toISOString().slice(0, 10);
+
+  if (calendarOnly || !periods.length) {
+    const previewDays = schedule?.days_summary ?? [];
+    const estimated = tasks.filter((t) => t.plan);
+    return (
+      <Stack gap="xs" className="ameba-period-feed">
+        {!finished && estimated.length > 0 && (
+          <Stack gap={4}>
+            <Text size="xs" c="dimmed">Предварительная оценка задач:</Text>
+            {estimated.map((task) => (
+              <Group key={task.id} justify="space-between" gap="xs">
+                <Text size="xs" truncate style={{ flex: 1 }}>{task.title}</Text>
+                <Badge size="xs" variant="light" color="purple">{task.plan.hours_label || task.plan.time_estimate}</Badge>
+              </Group>
+            ))}
+          </Stack>
+        )}
+        {previewDays.length > 0 ? (
+          <Stack gap={6}>
+            <Group justify="space-between" wrap="wrap">
+              <Text size="xs" c="dimmed">Расписание календаря на ближайшие дни</Text>
+              <Text size="xs" c="dimmed">Обновите план для распределения нагрузки</Text>
+            </Group>
+            <div className="ameba-calendar-preview">
+              {previewDays.slice(0, 7).map((day) => (
+                <div key={day.date} className="ameba-calendar-preview-day">
+                  <Text size="xs" fw={600}>{formatShortDate(day.date)} · {WEEKDAYS[parseIsoDate(day.date).getUTCDay()]}</Text>
+                  <Text size="xs" c="dimmed">
+                    {day.busy_minutes > 0 ? `Дела: ${durationLabel(day.busy_minutes)}` : 'Без плотной занятости'}
+                  </Text>
+                  {day.markers?.length > 0 && (
+                    <Text size="xs" c="orange">{day.markers.map((m) => m.title).join(', ')}</Text>
+                  )}
+                </div>
+              ))}
+            </div>
+          </Stack>
+        ) : (
+          <Text size="xs" c="dimmed">{finished ? 'Нажмите «Обновить план», чтобы построить периоды работы и отдыха.' : 'Оценивает задачи и доступную нагрузку…'}</Text>
+        )}
+      </Stack>
+    );
   }
-  const firstDate = origin ? localTime(origin).date : null;
-  function clockPosition(minutes) {
-    if (!origin) return minutes;
-    const local = localTime(new Date(origin.getTime() + minutes * 60000));
-    return (local.date - firstDate) / 86400000 * 1440 + local.minutes;
+
+  const visiblePeriods = expanded ? periods : periods.slice(0, 5);
+  const reservePct = schedule?.reserve_ratio != null ? Math.round(schedule.reserve_ratio * 100) : 22;
+
+  function openFeedback(taskId, periodId, outcome) {
+    setFeedbackDraft({ taskId, periodId, outcome });
+    setCustomMinutes('');
   }
-  function dayLabel(day) {
-    return firstDate === null ? `День ${day + 1}` : new Date(firstDate + day * 86400000).toLocaleDateString('ru-RU', { timeZone: 'UTC', weekday: 'long', day: 'numeric', month: 'long' });
+
+  function submitDraft(minutesOverride = null) {
+    if (!feedbackDraft || !onFeedback) return;
+    const raw = minutesOverride !== null ? minutesOverride : customMinutes === '' ? null : Number(customMinutes);
+    onFeedback({
+      task_id: feedbackDraft.taskId,
+      period_id: feedbackDraft.periodId,
+      outcome: feedbackDraft.outcome,
+      actual_minutes: Number.isFinite(raw) && raw >= 0 ? raw : null,
+    });
+    setFeedbackDraft(null);
+    setCustomMinutes('');
   }
-  const total = blocks.reduce((end, block) => Math.max(end, clockPosition(block.start + block.minutes)), 0);
-  const days = Math.max(1, Math.ceil(total / 1440));
-  const visibleDays = expanded ? days : Math.min(days, 3);
-  const slices = [];
-  for (const block of blocks) {
-    let start = clockPosition(block.start);
-    const end = clockPosition(block.start + block.minutes);
-    // При повторном часе часы могут идти назад: длительность блока всё равно реальная.
-    let remaining = end > start ? end - start : block.minutes;
-    let part = 0;
-    while (remaining > 0 && start < visibleDays * 1440) {
-      const day = Math.floor(start / 1440);
-      const minutes = Math.min(remaining, 1440 - start % 1440);
-      slices.push({ ...block, total_minutes: block.minutes, key: `${block.id}-${part}`, day, left: start % 1440 / 14.4, width: minutes / 14.4, minutes });
-      start += minutes;
-      remaining -= minutes;
-      part += 1;
-    }
-  }
-  const agenda = [...blocks].filter((block) => block.kind !== 'work').sort((a, b) => a.start - b.start);
-  return <Paper withBorder radius="md" p="sm"><Stack gap={8}>
-    {agenda.some((block) => block.kind === 'task' && !block.permanent && origin && origin.getTime() + (block.start + block.minutes) * 60000 < Date.now()) && <Text size="xs" c="dimmed">Есть прошедшие блоки. Подтвердите выполненные минуты в задаче; без подтверждения работа остаётся незавершённой.</Text>}
-    <Group justify="space-between">
-      <Tooltip multiline w={300} label={`${schedule?.rest_assumption ?? 'Время оценивается приблизительно'}${schedule?.start_at ? ` Начало: ${new Date(schedule.start_at).toLocaleString(undefined, { timeZone: schedule.timezone })}` : ''}`}><Text size="xs" c="dimmed">{calendarOnly ? 'Постоянное расписание' : finished ? 'Итоговый план' : 'План работы'}</Text></Tooltip>
-      <Group gap={6}>{!finished && !calendarOnly && <Badge size="xs" variant="light" color="gray">Черновик</Badge>}<Text size="xs" fw={600}>{calendarOnly ? 'Учитывается до начала расчёта' : planned.length || schedule?.max_minutes != null ? `${duration(schedule?.max_minutes ?? planned.reduce((sum, task) => sum + task.plan.max_minutes, 0))} работы` : 'Оценивает время'}</Text></Group>
-    </Group>
-    {schedule?.timeline_error ? <Text size="xs" c="yellow">Шкала не построена: {schedule.timeline_error}. Порядок задач сохранён.</Text> : compact ? <div className={`plan-agenda${expanded ? ' is-expanded' : ''}`}>{(expanded ? agenda : agenda.slice(0, 6)).map((block) => {
-      const task = byId.get(block.task_id);
-      const start = schedule?.start_at ? new Date(new Date(schedule.start_at).getTime() + block.start * 60000) : null;
-      const label = block.title || task?.title || rest[block.kind] || 'Занято';
-      return <a key={`${block.id}-${block.start}`} href={block.kind === 'task' && block.task_id ? `/?task=${block.task_id}` : undefined} className="plan-agenda-row" style={{ borderLeftColor: calendarColors[block.kind], background: calendarBlockColor(block.kind, !block.permanent) }}>
-        <span>{start ? start.toLocaleString('ru-RU', { timeZone: zone, weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : `+${duration(block.start)}`}</span>
-        <strong>{label}</strong><small>{duration(block.minutes)}</small>
-      </a>;
-    })}{!agenda.length && <Text size="xs" c="dimmed">{calendarOnly ? 'В календаре пока пусто' : 'План появится по мере расчёта'}</Text>}</div> : <div style={{ overflowX: 'auto', padding: '5px 0' }}>
-      <div ref={chart} style={{ position: 'relative', minWidth: 760, height: visibleDays * 66 + 18 }}>
-        {Array.from({ length: visibleDays }, (_, day) => <div key={day} style={{ position: 'absolute', top: day * 66, width: '100%' }}>
-          <Text size="xs" c="dimmed">{dayLabel(day)}</Text>
-          <div style={{ position: 'absolute', top: 24, width: '100%', height: 34, borderRadius: 0, background: 'var(--mantine-color-dark-7)' }} />
-        </div>)}
-        {!planned.length && !calendarOnly && <Text size="xs" c="dimmed" style={{ position: 'absolute', top: 32, left: 12 }}>Оценивает задачи — блоки появятся по мере расчёта</Text>}
-        {slices.map((block) => {
-          const task = byId.get(block.task_id);
-          const label = block.title || task?.title || rest[block.kind] || 'Занято';
-          return <Tooltip key={block.key} multiline w={270} label={`${label} · ${block.permanent ? 'Постоянный календарь' : 'План Ameba'} · ${duration(block.total_minutes)}${block.total_minutes !== block.minutes ? ' весь блок' : ''}${block.focus_minutes ? ` · концентрация ${block.focus_minutes} мин` : ''}${task?.plan.expected_result ? ` · ${task.plan.expected_result}` : ''}`}>
-            <a data-block-key={block.key} className={`ameba-timeline-task ${block.kind !== 'task' ? 'ameba-timeline-rest' : ''}`} href={block.kind === 'task' && block.task_id ? `/?task=${block.task_id}` : undefined} aria-label={label} style={{ transformOrigin: 'left center', top: block.day * 66 + (block.kind === 'work' ? 60 : 24), height: block.kind === 'work' ? 6 : undefined, left: `${block.left}%`, width: `${block.width}%`, padding: block.width < 1 || block.kind === 'work' ? 0 : undefined, background: calendarBlockColor(block.kind, !block.permanent), border: block.permanent && block.width >= 0.5 ? `1px solid ${calendarColors[block.kind] ?? calendarColors.busy}` : 0 }}>{label}</a>
-          </Tooltip>;
+
+  return (
+    <Stack gap="sm" className="ameba-period-feed">
+      <Group justify="space-between" wrap="wrap" gap="xs">
+        <Group gap={6} wrap="wrap">
+          <Badge size="xs" variant="light" color={!schedule.feasible ? 'orange' : tightConflicts.length ? 'yellow' : 'teal'}>
+            {!schedule.feasible ? 'Есть невыполнимые сроки' : tightConflicts.length ? 'Плотный план' : 'План реалистичен'}
+          </Badge>
+          {!finished && <Badge size="xs" variant="light" color="gray">Черновик</Badge>}
+          {schedule.hours_label && <Text size="xs" fw={600}>Всего работы: {schedule.hours_label}</Text>}
+          <Text size="xs" c="dimmed">· резерв {reservePct}%</Text>
+        </Group>
+        {schedule.adaptation_summary && (
+          <Tooltip multiline w={300} label={schedule.adaptation_summary}>
+            <Text size="xs" c="dimmed" style={{ cursor: 'help' }}>Адаптация активна</Text>
+          </Tooltip>
+        )}
+      </Group>
+
+      {schedule.plan_changes?.length > 0 && (
+        <Text size="xs" c="dimmed">Изменения: {schedule.plan_changes.join(' · ')}</Text>
+      )}
+
+      {infeasibleConflicts.length > 0 && (
+        <Alert color="orange" variant="light" title="Недостаточно реалистичной ёмкости до дедлайнов">
+          <Stack gap={6}>
+            {infeasibleConflicts.map((item) => (
+              <div key={item.task_id}>
+                <Text size="xs" fw={600}>{item.reason}</Text>
+                {item.options?.length > 0 && (
+                  <Text size="xs" c="dimmed">Варианты: {item.options.join('; ')}.</Text>
+                )}
+              </div>
+            ))}
+          </Stack>
+        </Alert>
+      )}
+
+      {tightConflicts.length > 0 && !infeasibleConflicts.length && (
+        <Alert color="yellow" variant="light">
+          <Stack gap={4}>
+            {tightConflicts.map((item) => (
+              <Text key={item.task_id} size="xs">{item.reason}</Text>
+            ))}
+          </Stack>
+        </Alert>
+      )}
+
+      <div className="ameba-period-list">
+        {visiblePeriods.map((period) => {
+          const load = LOAD_META[period.load_level] || LOAD_META.medium;
+          const isCurrent = period.start_date <= todayIso && todayIso <= period.end_date;
+          const commitments = (period.days_summary ?? []).flatMap((day) =>
+            (day.commitments ?? []).map((c) => ({ ...c, date: day.date })),
+          );
+          const markers = (period.days_summary ?? []).flatMap((day) =>
+            (day.markers ?? []).map((m) => ({ ...m, date: day.date })),
+          );
+          const accent = period.kind === 'free' ? LOAD_META.free.accent : period.kind !== 'work' ? LOAD_META.light.accent : load.accent;
+
+          return (
+            <Paper
+              key={period.id}
+              withBorder
+              radius="md"
+              p="sm"
+              className={`ameba-period-card ${isCurrent ? 'is-current' : ''}`}
+              style={{ borderLeft: `3px solid ${accent}` }}
+            >
+              <Stack gap="xs">
+                <Group justify="space-between" align="flex-start" wrap="wrap" gap="xs">
+                  <Group gap={6} wrap="wrap">
+                    <Text fw={700} size="sm">{formatDateRange(period.start_date, period.end_date)}</Text>
+                    {isCurrent && <Badge size="xs" variant="filled" color="purple">Сейчас</Badge>}
+                    {KIND_LABELS[period.kind] && (
+                      <Badge size="xs" variant="light" color="teal">{KIND_LABELS[period.kind]}</Badge>
+                    )}
+                  </Group>
+                  <Group gap={6} wrap="wrap">
+                    <Badge size="xs" variant="light" color={load.color}>{load.label}</Badge>
+                    {period.kind === 'work' && (
+                      <Text size="xs" fw={600} c="dimmed">{period.hours_label}</Text>
+                    )}
+                    {onAdjust && (
+                      <Menu position="bottom-end" withinPortal>
+                        <Menu.Target>
+                          <Button size="compact-xs" variant="subtle" color="gray" disabled={busy}>Режим дней</Button>
+                        </Menu.Target>
+                        <Menu.Dropdown>
+                          <Menu.Label>{formatDateRange(period.start_date, period.end_date)}</Menu.Label>
+                          <Menu.Item onClick={() => onAdjust({ day_overrides: Object.fromEntries((period.days_summary ?? []).map((d) => [d.date, 'light'])) })}>
+                            Сделать {period.start_date === period.end_date ? 'облегчённым' : 'эти дни облегчёнными'}
+                          </Menu.Item>
+                          <Menu.Item onClick={() => onAdjust({ day_overrides: Object.fromEntries((period.days_summary ?? []).map((d) => [d.date, 'free'])) })}>
+                            Оставить {period.start_date === period.end_date ? 'выходным' : 'эти дни выходными'}
+                          </Menu.Item>
+                          <Menu.Item onClick={() => onAdjust({ day_overrides: Object.fromEntries((period.days_summary ?? []).map((d) => [d.date, 'auto'])) })}>
+                            Обычный расчёт
+                          </Menu.Item>
+                        </Menu.Dropdown>
+                      </Menu>
+                    )}
+                  </Group>
+                </Group>
+
+                <Text size="sm" fw={600}>
+                  {period.kind === 'work' ? `Цель: ${period.title}` : period.title}
+                </Text>
+
+                {period.tasks?.length > 0 && (
+                  <Stack gap={6} className="ameba-period-tasks">
+                    {period.tasks.map((task) => {
+                      const editingThis = feedbackDraft?.taskId === task.task_id && feedbackDraft?.periodId === period.id;
+                      const dlText = formatDeadline(task.deadline, schedule.timezone);
+                      return (
+                        <div key={task.task_id} className="ameba-period-task">
+                          <Group justify="space-between" align="flex-start" wrap="wrap" gap="xs">
+                            <div style={{ flex: 1, minWidth: 180 }}>
+                              <Group gap={6} wrap="wrap">
+                                <Text component="a" href={`/?task=${task.task_id}`} size="sm" fw={500} c="inherit" td="none">
+                                  {task.title}
+                                </Text>
+                                <Badge size="xs" variant="outline" color="purple">{task.hours_label}</Badge>
+                                {!task.completes_task && (
+                                  <Text size="xs" c="dimmed">≈ {task.share_percent}% от остатка</Text>
+                                )}
+                              </Group>
+                              {task.goal && (
+                                <Text size="xs" c="dimmed">{task.goal}</Text>
+                              )}
+                              {dlText && (
+                                <Text size="xs" c={task.deadline_policy === 'soft' ? 'dimmed' : 'orange'}>
+                                  Срок: {dlText}{task.deadline_policy === 'expires' ? ' (строго)' : ''}
+                                </Text>
+                              )}
+                            </div>
+                            {(onFeedback || onAdjust) && (
+                              <Group gap={4} wrap="wrap">
+                                {onAdjust && (
+                                  <>
+                                    <Tooltip label="Сдвинуть раньше">
+                                      <Button size="compact-xs" variant="subtle" color="gray" disabled={busy}
+                                        onClick={() => onAdjust({ task_pin: { task_id: task.task_id, shift_days: -1 } })}>
+                                        ←
+                                      </Button>
+                                    </Tooltip>
+                                    <Tooltip label="Сдвинуть позже">
+                                      <Button size="compact-xs" variant="subtle" color="gray" disabled={busy}
+                                        onClick={() => onAdjust({ task_pin: { task_id: task.task_id, shift_days: 1 } })}>
+                                        →
+                                      </Button>
+                                    </Tooltip>
+                                  </>
+                                )}
+                                {onFeedback && (
+                                  <Menu position="bottom-end" withinPortal>
+                                    <Menu.Target>
+                                      <Button size="compact-xs" variant="light" color="purple" disabled={busy}>Отклик</Button>
+                                    </Menu.Target>
+                                    <Menu.Dropdown>
+                                      {OUTCOMES.map((item) => (
+                                        <Menu.Item key={item.value} onClick={() => openFeedback(task.task_id, period.id, item.value)}>
+                                          {item.label}
+                                        </Menu.Item>
+                                      ))}
+                                    </Menu.Dropdown>
+                                  </Menu>
+                                )}
+                              </Group>
+                            )}
+                          </Group>
+                          {editingThis && (
+                            <Group gap="xs" mt={6} wrap="wrap" className="ameba-feedback-bar">
+                              <Text size="xs" fw={500}>
+                                {OUTCOMES.find((o) => o.value === feedbackDraft.outcome)?.label}:
+                              </Text>
+                              <NumberInput
+                                size="xs"
+                                w={120}
+                                min={0}
+                                max={1440}
+                                placeholder="Мин (необяз.)"
+                                value={customMinutes}
+                                onChange={setCustomMinutes}
+                              />
+                              <Button size="compact-xs" variant="subtle" onClick={() => submitDraft(30)}>+30м</Button>
+                              <Button size="compact-xs" variant="subtle" onClick={() => submitDraft(60)}>+1ч</Button>
+                              <Button size="compact-xs" variant="subtle" onClick={() => submitDraft(120)}>+2ч</Button>
+                              <Button size="compact-xs" color="purple" loading={busy} onClick={() => submitDraft()}>Сохранить</Button>
+                              <Button size="compact-xs" variant="subtle" color="gray" onClick={() => setFeedbackDraft(null)}>Отмена</Button>
+                            </Group>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </Stack>
+                )}
+
+                {period.day_hints?.length > 0 && (
+                  <Stack gap={2}>
+                    {period.day_hints.map((hint, idx) => (
+                      <Text key={idx} size="xs" c="dimmed">• {hint}</Text>
+                    ))}
+                  </Stack>
+                )}
+
+                {period.rest_note && (
+                  <Text size="xs" c="teal">Отдых: {period.rest_note}</Text>
+                )}
+
+                {period.risks?.length > 0 && (
+                  <Stack gap={2}>
+                    {period.risks.map((risk, idx) => (
+                      <Text key={idx} size="xs" c="orange">Риск: {risk}</Text>
+                    ))}
+                  </Stack>
+                )}
+
+                {markers.length > 0 && (
+                  <Text size="xs" c="dimmed">
+                    События-ориентиры в календаре: {markers.map((m) => `${formatShortDate(m.date)} — ${m.title}`).join('; ')}
+                  </Text>
+                )}
+
+                {commitments.length > 0 && (
+                  <details className="ameba-commitments">
+                    <summary>
+                      Обязательные события календаря ({commitments.length}) · {durationLabel(period.days_summary.reduce((s, d) => s + (d.busy_minutes || 0), 0))}
+                    </summary>
+                    <Stack gap={3} mt={6}>
+                      {commitments.map((c, idx) => (
+                        <Text key={`${c.id}-${c.date}-${idx}`} size="xs" c="dimmed">
+                          {formatShortDate(c.date)} · {c.all_day ? 'Весь день' : `${c.start}–${c.end}`} — {c.title}
+                        </Text>
+                      ))}
+                    </Stack>
+                  </details>
+                )}
+              </Stack>
+            </Paper>
+          );
         })}
-        <Group justify="space-between" style={{ position: 'absolute', bottom: 0, width: '100%' }}><Text size="xs" c="dimmed">{origin ? '00:00' : 'Начало условного дня'}</Text><Text size="xs" c="dimmed">24 ч</Text></Group>
       </div>
-    </div>}
-    {(compact ? agenda.length > 6 : days > 3) && <Button size="compact-xs" variant="subtle" onClick={() => setExpanded(!expanded)}>{expanded ? 'Свернуть' : compact ? 'Весь план' : `Все ${days} дней`}</Button>}
-    <Group gap={6}><Badge size="xs" variant="light">Работа</Badge><Badge size="xs" color={calendarColors.sleep} variant="light">Сон</Badge><Badge size="xs" color={calendarColors.meal} variant="light">Еда</Badge><Badge size="xs" color={calendarColors.break} variant="light">Отдых</Badge><Badge size="xs" color={calendarColors.busy} variant="light">Календарь</Badge>{!schedule?.start_at && <Text size="xs" c="dimmed">Условные дни, не часы личного расписания</Text>}</Group>
-    {schedule && <Group gap={6}>{Object.entries(schedule.potential_rewards ?? {}).map(([unit, value]) => <Badge key={unit} size="xs" variant="light">≈ {value} {unit}</Badge>)}</Group>}
-    {tasks.length > planned.length && <Text size="xs" c="dimmed">Ещё {tasks.length - planned.length} в оценке</Text>}
-  </Stack></Paper>;
+
+      {periods.length > 5 && (
+        <Button size="compact-xs" variant="subtle" onClick={() => setExpanded(!expanded)}>
+          {expanded ? 'Свернуть' : `Показать все периоды (${periods.length})`}
+        </Button>
+      )}
+    </Stack>
+  );
 }

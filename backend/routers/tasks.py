@@ -136,9 +136,12 @@ def update_task(task_id: int, data: TaskUpdate):
             row.updated_at = datetime.now(timezone.utc)
             task.ai_score = task.ai_details = task.ai_scored_at = None
             session.add(row)
+        previous_status = task.status
         task.sqlmodel_update(changes)
         if set(changes) & {'title', 'description', 'deadline', 'priority', 'status', 'category'}:
             task.ai_score = task.ai_details = task.ai_scored_at = None
+        if changes.get('status') == 'done' and previous_status != 'done':
+            ameba_order.record_task_completion(session, task)
         session.add(TaskAction(task_id=task_id, action='update', details=json.dumps(
             {key: value for key, value in changes.items() if key in {'status', 'priority', 'archived'}})))
         task.updated_at = datetime.now(timezone.utc)

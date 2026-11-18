@@ -1,4 +1,4 @@
-"""Локальные регрессии Ameba: синтетические задачи, временная SQLite, без модели."""
+"""Локальные тесты новой адаптивной Ameba: периоды, ёмкость, отдых, персонализация, стабильность."""
 import asyncio
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -13,303 +13,296 @@ from unittest.mock import AsyncMock, MagicMock, patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / 'services/ameba'), str(ROOT / 'backend')]
 
-import blocks
-import planning
 import main as ameba_service
+import planning
 from common import calendar
 from common.database import init_db
 from common.identity import current_user_id
-from common.models.integration import IntegrationSetting, TaskRanking
+from common.models.integration import IntegrationSetting, TaskContext, TaskRanking
 from common.models.task import Task
-from common.schedule import default_week
-from integrations import ameba, scheduler
+from integrations import ameba, context as monocle_context, scheduler
 from sqlalchemy import create_engine, text
 from sqlmodel import Session
 
-NOW = '2026-11-12T08:00:00+00:00'
+NOW = '2026-11-16T08:00:00+00:00'  # Понедельник
 
 
-def estimate(work=3000, policy='soft', completed=0):
-    return planning.calculate(json.dumps({'plans': [{
-        'task_id': 1, 'available_from': None, 'deadline_policy': policy, 'focus_minutes': 10,
-        'steps': [{'title': 'Работа', 'min_minutes': work, 'max_minutes': work, 'wait_minutes': 0}],
-        'assumptions': [], 'effort': 'medium', 'expected_result': 'Готово', 'reward': None, 'reward_unit': '',
-    }]}), [1], {1: completed})
+def empty_week(tz='UTC', events=None):
+    return {'timezone': tz, 'days': [[] for _ in range(7)], 'events': [], 'calendar_events': events or []}
 
 
-class Planning(unittest.TestCase):
-    def setUp(self):
-        self.week = default_week()
-        self.order = json.dumps({'task_ids': [1], 'keep_previous_times': True})
-        self.draft = {'start_at': NOW, 'timezone': 'UTC', 'blocks': []}
+def make_plan(task_id, work_min, work_max=None, policy='soft', effort='medium', importance='medium',
+              splittable=True, available_from=None, depends_on=None, steps=None):
+    work_max = work_max if work_max is not None else work_min
+    return {
+        'task_id': task_id,
+        'available_from': available_from,
+        'depends_on': depends_on or [],
+        'deadline_policy': policy,
+        'importance': importance,
+        'effort': effort,
+        'splittable': splittable,
+        'steps': steps or [{'title': 'Основная работа', 'min_minutes': work_min, 'max_minutes': work_max, 'wait_minutes': 0}],
+        'assumptions': [],
+        'expected_result': 'Задача выполнена',
+        'reward': None,
+        'reward_unit': '',
+    }
 
-    def test_partial_work_is_preserved(self):
-        schedule = planning.reorder(self.order, estimate(), [1], self.week, NOW)
-        self.assertIsNone(schedule['timeline_error'])
-        self.assertGreater(schedule['remaining'][0]['remaining_work_minutes'], 0)
-        self.assertTrue(any(b['kind'] == 'task' for b in schedule['blocks']))
 
-    def test_week_overflow_keeps_blocks_and_remaining(self):
-        schedule = planning.reorder(self.order, estimate(), [1], self.week, NOW)
-        self.assertIsNone(schedule['timeline_error'])
-        self.assertTrue(any(b['kind'] == 'task' for b in schedule['blocks']))
-        self.assertGreater(schedule['remaining'][0]['remaining_work_minutes'], 0)
+def calc_plans(items, completed=None, profile=None, tasks=None, adjustments=None):
+    return planning.calculate(
+        json.dumps({'plans': items}),
+        [item['task_id'] for item in items],
+        completed=completed,
+        profile=profile,
+        tasks=tasks,
+        adjustments=adjustments,
+    )
 
-    def test_incomplete_hard_deadline_without_blocks_is_reported(self):
-        schedule = planning.reorder(self.order, estimate(policy='finish_before'), [1], self.week, NOW,
-                                    tasks=[{'id': 1, 'title': 'Обязательная', 'deadline': '2026-11-12T10:00:00Z'}])
-        self.assertTrue(schedule['deadline_conflicts'][0]['infeasible'])
 
-    def test_partial_hard_deadline_keeps_useful_work(self):
-        plans = estimate(policy='finish_before')
-        schedule = planning.reorder(self.order, plans, [1], self.week, NOW,
-                                    tasks=[{'id': 1, 'title': 'Обязательная', 'deadline': '2026-11-12T10:00:00Z'}])
-        self.assertTrue(any(b['kind'] == 'task' for b in schedule['blocks']))
-        self.assertEqual(len(schedule['deadline_conflicts']), 1)
+def rest_args(**overrides):
+    base = {
+        'sleep_hours': 8,
+        'preferred_daily_minutes': None,
+        'prefer_free_evenings': False,
+        'max_heavy_days_in_row': 2,
+        'preferred_weekdays': [],
+        'light_weekdays': [],
+        'day_overrides': [],
+        'assumption': 'Базовый режим для тестов',
+    }
+    return json.dumps(base | overrides)
 
-    def test_automatic_blocks_never_extend_past_hard_deadline(self):
-        schedule = planning.reorder(self.order, estimate(policy='expires'), [1], self.week, NOW,
-                                    tasks=[{'id': 1, 'title': 'Сдача', 'deadline': '2026-11-12T10:00:00Z'}])
-        end = max(b['start'] + b['minutes'] for b in schedule['blocks'] if b['kind'] == 'task')
-        self.assertLessEqual(end, 120)
-        self.assertTrue(schedule['deadline_conflicts'])
 
-    def test_permanent_overlap_is_allowed_but_temporary_conflict_is_not(self):
-        occupied = [{'id': str(i), 'kind': 'busy', 'start': i * 10, 'minutes': 60, 'permanent': True} for i in range(2)]
-        planning.validate_blocks(occupied)
-        with self.assertRaises(ValueError):
-            planning.validate_blocks(occupied + [{'kind': 'task', 'start': 20, 'minutes': 10}])
+def order_args(task_ids, keep=True, period_notes=None):
+    return json.dumps({'task_ids': task_ids, 'keep_previous_plan': keep, 'period_notes': period_notes or []})
 
-    def test_rest_required_on_each_date(self):
-        week = default_week()
-        week['days'][4] = [slot for slot in week['days'][4] if slot['kind'] != 'meal']
-        with self.assertRaisesRegex(ValueError, '2026-11-13'):
-            planning.with_rest(week, NOW, json.dumps({'patterns': [], 'assumption': 'Из календаря', 'load_limits': None}))
 
-    def test_confirmed_work_is_subtracted_once(self):
-        plan = estimate(200, completed=80)[1]
-        self.assertEqual(plan['work_max_minutes'], 120)
-        self.assertEqual(plan['max_minutes'], 130)
-        self.assertEqual(estimate(200, completed=200)[1]['max_minutes'], 0)
+class PlanningScenarios(unittest.TestCase):
+    def test_scenario_1_busy_university_week(self):
+        # Пн и Вт: по 6 ч обязательных пар (09:00-12:00 и 13:00-16:00), Ср и Чт: свободные дни.
+        events = []
+        for d in ('2026-11-16', '2026-11-17'):
+            events.append({'id': f'lec1-{d}', 'kind': 'busy', 'title': 'Лекции', 'date': d, 'start': '09:00', 'end': '12:00'})
+            events.append({'id': f'lec2-{d}', 'kind': 'busy', 'title': 'Практика', 'date': d, 'start': '13:00', 'end': '16:00'})
+        week = planning.with_rest(empty_week(events=events), NOW, rest_args())
+        days = planning.analyze_days(week, NOW, horizon_days=7)
 
-    def test_past_blocks_are_not_confirmed_work(self):
-        previous = deepcopy(self.draft)
-        previous['blocks'] = [{'id': 'past', 'kind': 'task', 'task_id': 1, 'start': 0, 'minutes': 60}]
-        draft = blocks.initial(previous, [1], '2026-11-12T10:00:00Z', 'UTC')
-        self.assertEqual(blocks.remaining(draft, estimate(200), [1])[0]['remaining_work_minutes'], 200)
+        # После 6 ч пар при ~5 ч физически свободного вечера реалистичная ёмкость существенно ограничена.
+        self.assertGreater(days[0]['physical_free_minutes'], 200)
+        self.assertLessEqual(days[0]['realistic_capacity_minutes'], 90)
+        self.assertGreaterEqual(days[2]['realistic_capacity_minutes'], 240)
 
-    def test_free_windows_subtract_tasks(self):
-        placed = [{'kind': 'task', 'start': 60, 'minutes': 60}]
-        windows = planning.free_windows(self.week, NOW, placed)
-        first = [w for w in windows if w['date'] == '2026-11-12'][0]
-        self.assertEqual((first['start'], first['end']), ('10:00', '12:00'))
+        plans = calc_plans([make_plan(1, 300, 360, effort='medium')])
+        tasks = [{'id': 1, 'title': 'Лабораторная'}]
+        schedule = planning.reorder(order_args([1]), plans, [1], week, NOW, tasks=tasks)
+        alloc_by_date = {d['date']: d['allocated_minutes'] for d in schedule['daily_allocations']}
+        # Основная нагрузка НЕ идёт на загруженные Пн/Вт, а уходит на свободные Ср/Чт.
+        self.assertGreater(alloc_by_date['2026-11-18'] + alloc_by_date['2026-11-19'],
+                           alloc_by_date['2026-11-16'] + alloc_by_date['2026-11-17'])
 
-    def test_future_block_keeps_id_and_absolute_time(self):
-        previous = deepcopy(self.draft)
-        previous['blocks'] = [{'id': 'keep', 'kind': 'task', 'task_id': 1, 'start': 120, 'minutes': 60}]
-        draft = blocks.initial(previous, [1], '2026-11-12T09:00:00Z', 'UTC')
-        self.assertEqual(draft['blocks'][0]['id'], 'keep')
-        origin = datetime.fromisoformat(draft['start_at'])
-        self.assertEqual(origin + timedelta(minutes=draft['blocks'][0]['start']), datetime.fromisoformat(NOW) + timedelta(minutes=120))
+    def test_scenario_2_competing_deadlines(self):
+        week = planning.with_rest(empty_week(), NOW, rest_args())
+        plans = calc_plans([
+            make_plan(1, 240, 300, policy='soft', effort='medium', splittable=True),
+            make_plan(2, 120, 150, policy='finish_before', effort='high', splittable=False),
+            make_plan(3, 180, 210, policy='expires', effort='medium', splittable=True),
+        ])
+        tasks = [
+            {'id': 1, 'title': 'Большой проект без срока'},
+            {'id': 2, 'title': 'Срочный тест', 'deadline': '2026-11-17T20:00:00Z'},
+            {'id': 3, 'title': 'Эссе к среде', 'deadline': '2026-11-18T22:00:00Z'},
+        ]
+        # Порядок передан с мягкой задачей на 1 месте — алгоритм всё равно защитит конкурирующие дедлайны.
+        schedule = planning.reorder(order_args([1, 2, 3]), plans, [1, 2, 3], week, NOW, tasks=tasks)
+        self.assertTrue(schedule['feasible'])
+        self.assertFalse([c for c in schedule['deadline_conflicts'] if c['infeasible']])
+        self.assertEqual([r['remaining_work_minutes'] for r in schedule['remaining']], [0, 0, 0])
+        alloc = schedule['daily_allocations']
+        t2_last = max(d['date'] for d in alloc if any(t['task_id'] == 2 for t in d['tasks']))
+        t3_last = max(d['date'] for d in alloc if any(t['task_id'] == 3 for t in d['tasks']))
+        self.assertLessEqual(t2_last, '2026-11-17')
+        self.assertLessEqual(t3_last, '2026-11-18')
 
-    def test_refresh_uses_saved_estimates_without_model(self):
-        previous = {'task_ids': [1], 'timeline': [{'id': 1, 'title': 'Работа', 'plan': estimate()[1]}],
-                    'schedule': self.draft, 'reasons': [{'task_id': 1, 'reason': 'Исходный приоритет'}]}
-        with patch.object(ameba_service, 'AsyncOpenAI', side_effect=AssertionError('LLM must not run')):
-            result = asyncio.run(ameba_service.refresh_plan({'previous_plan': previous, 'weekly_schedule': self.week,
-                                                            'timezone': 'UTC', 'tasks': [{'id': 1}]}))
-        self.assertEqual(result['reasons'], previous['reasons'])
-        self.assertEqual(result['task_ids'], [1])
-        self.assertGreater(result['schedule']['remaining'][0]['remaining_work_minutes'], 0)
-        self.assertTrue(result['schedule']['blocks'])
+    def test_scenario_3_very_large_project(self):
+        week = planning.with_rest(empty_week(), NOW, rest_args())
+        steps = [
+            {'title': 'Изучить теорию', 'min_minutes': 240, 'max_minutes': 300, 'wait_minutes': 0},
+            {'title': 'Написать код', 'min_minutes': 480, 'max_minutes': 600, 'wait_minutes': 0},
+            {'title': 'Оформить отчёт', 'min_minutes': 240, 'max_minutes': 300, 'wait_minutes': 0},
+        ]
+        plans = calc_plans([
+            make_plan(1, 960, 1200, policy='soft', effort='high', splittable=True, steps=steps),
+            make_plan(2, 90, 90, policy='finish_before', effort='low', splittable=False),
+        ])
+        tasks = [
+            {'id': 1, 'title': 'Курсовой проект'},
+            {'id': 2, 'title': 'Короткий отчёт', 'deadline': '2026-11-18T18:00:00Z'},
+        ]
+        schedule = planning.reorder(order_args([2, 1]), plans, [1, 2], week, NOW, tasks=tasks)
+        project_periods = [p for p in schedule['periods'] if any(t['task_id'] == 1 for t in p['tasks'])]
+        self.assertGreaterEqual(len(project_periods), 2)
+        self.assertEqual(len(schedule['task_ids']), 2)  # Не плодит отдельные подзадачи
+        self.assertTrue(all(d['allocated_minutes'] <= d['realistic_capacity_minutes'] for d in schedule['daily_allocations']))
+        self.assertTrue(any('теори' in t['goal'].lower() or 'код' in t['goal'].lower()
+                            for p in project_periods for t in p['tasks'] if t['task_id'] == 1))
 
-    def test_refresh_preserves_future_block_and_replans_missed_work(self):
-        class Clock(datetime):
-            @classmethod
-            def now(cls, tz=None):
-                return datetime.fromisoformat(NOW)
-        previous = {'task_ids': [1], 'timeline': [{'id': 1, 'title': 'Работа', 'plan': estimate(200)[1]}],
-                    'schedule': self.draft | {'blocks': [
-                        {'id': 'missed', 'kind': 'task', 'task_id': 1, 'start': -120, 'minutes': 60, 'focus_minutes': 10},
-                        {'id': 'keep', 'kind': 'task', 'task_id': 1, 'start': 120, 'minutes': 60, 'focus_minutes': 10}]}}
-        with patch.object(ameba_service, 'datetime', Clock):
-            result = asyncio.run(ameba_service.refresh_plan({'previous_plan': previous, 'weekly_schedule': self.week,
-                                                            'timezone': 'UTC', 'tasks': [{'id': 1}]}))
-        schedule = result['schedule']
-        placed = [b for b in schedule['blocks'] if b['kind'] == 'task']
-        kept = next(b for b in placed if b['id'] == 'keep')
-        self.assertEqual(datetime.fromisoformat(schedule['start_at']) + timedelta(minutes=kept['start']),
-                         datetime.fromisoformat(NOW) + timedelta(minutes=120))
-        self.assertEqual(sum(b['minutes'] - b['focus_minutes'] for b in placed), 200)
-        self.assertFalse(any(b['id'] == 'missed' for b in placed))
+    def test_scenario_4_missed_day_replanning(self):
+        week = planning.with_rest(empty_week(), NOW, rest_args())
+        plans = calc_plans([make_plan(1, 420, 480)])
+        tasks = [{'id': 1, 'title': 'Большая задача'}]
+        yesterday_now = '2026-11-15T08:00:00+00:00'
+        prev = planning.reorder(order_args([1]), plans, [1], week, yesterday_now, tasks=tasks)
+        # На следующий день пользователь ничего не подтвердил (completed_work_minutes=0) — работа не сваливается целиком на сегодня.
+        today_plan = planning.reorder(order_args([1]), plans, [1], week, NOW, previous=prev, tasks=tasks)
+        today_alloc = today_plan['daily_allocations'][0]
+        self.assertLessEqual(today_alloc['allocated_minutes'], today_alloc['plannable_minutes'])
+        self.assertEqual(today_plan['remaining'][0]['remaining_work_minutes'], 0)
 
-    def test_shared_hard_deadline_capacity(self):
-        plans = estimate(50, policy='finish_before')
-        plans[2] = plans[1] | {'task_id': 2}
-        result = planning.reorder(json.dumps({'task_ids': [1, 2], 'keep_previous_times': True}), plans, [1, 2], self.week, NOW,
-            tasks=[{'id': i, 'title': str(i), 'deadline': '2026-11-12T10:00:00Z'} for i in (1, 2)])
-        self.assertTrue(all(item['infeasible'] for item in result['deadline_conflicts']))
+    def test_scenario_5_fatigue_and_recovery(self):
+        week = planning.with_rest(empty_week(), NOW, rest_args(max_heavy_days_in_row=2))
+        plans = calc_plans([make_plan(1, 900, 1080, effort='high', splittable=True)])
+        tasks = [{'id': 1, 'title': 'Длинная подготовка'}]
+        schedule = planning.reorder(order_args([1]), plans, [1], week, NOW, tasks=tasks)
+        # После тяжёлых дней присутствуют облегчённые дни или периоды восстановления с соответствующими рекомендациями.
+        has_recovery_or_light = any(
+            p['kind'] in ('light', 'recovery', 'free') or d['allocated_minutes'] <= 150
+            for p in schedule['periods'] for d in p['days_summary']
+        )
+        self.assertTrue(has_recovery_or_light)
+        self.assertTrue(all(p['rest_note'] for p in schedule['periods']))
 
-    def test_user_session_limit_overrides_default(self):
-        self.week['load_limits'] = {'max_session_minutes': 130, 'break_minutes': 5, 'max_daily_minutes': 360}
-        schedule = planning.reorder(self.order, estimate(120), [1], self.week, NOW)
-        self.assertEqual([b['minutes'] for b in schedule['blocks'] if b['kind'] == 'task'], [130])
+    def test_scenario_6_infeasible_deadline_protects_rest(self):
+        week = planning.with_rest(empty_week(), NOW, rest_args())
+        plans = calc_plans([
+            make_plan(1, 1500, 1800, policy='expires', effort='high'),
+            make_plan(2, 90, 90, policy='finish_before', effort='low'),
+        ])
+        tasks = [
+            {'id': 1, 'title': 'Невозможный диплом за 2 дня', 'deadline': '2026-11-17T20:00:00Z'},
+            {'id': 2, 'title': 'Реалистичная задача', 'deadline': '2026-11-17T20:00:00Z'},
+        ]
+        schedule = planning.reorder(order_args([1, 2]), plans, [1, 2], week, NOW, tasks=tasks)
+        self.assertFalse(schedule['feasible'])
+        infeasible = [c for c in schedule['deadline_conflicts'] if c['infeasible']]
+        self.assertEqual([c['task_id'] for c in infeasible], [1])
+        self.assertGreater(infeasible[0]['deficit_minutes'], 0)
+        self.assertTrue(infeasible[0]['options'])
+        # Сон/отдых и достижимая задача 2 защищены.
+        self.assertTrue(all(d['allocated_minutes'] <= d['realistic_capacity_minutes'] for d in schedule['daily_allocations']))
+        t2_assigned = sum(t['minutes'] for d in schedule['daily_allocations'] for t in d['tasks'] if t['task_id'] == 2)
+        self.assertEqual(t2_assigned, 90)
 
-    def test_several_hard_deadlines_precede_large_low_urgency_task(self):
-        plans = estimate(1500)
-        plans[2] = estimate(50, 'finish_before')[1] | {'task_id': 2}
-        plans[3] = estimate(80, 'finish_before')[1] | {'task_id': 3}
-        schedule = planning.reorder(json.dumps({'task_ids': [1, 3, 2], 'keep_previous_times': True}), plans, [1, 2, 3], self.week, NOW,
-            tasks=[{'id': 1, 'title': 'Большая'}, {'id': 2, 'title': 'Первый срок', 'deadline': '2026-11-12T10:00:00Z'},
-                   {'id': 3, 'title': 'Второй срок', 'deadline': '2026-11-12T12:00:00Z'}])
-        self.assertFalse(schedule['deadline_conflicts'])
-        self.assertEqual([b['task_id'] for b in schedule['blocks'] if b['kind'] == 'task'][:2], [2, 3])
+    def test_scenario_7_personalization_adaptation(self):
+        # Одно наблюдение меняет прогноз минимально (консервативное сглаживание).
+        single = planning.derive_adaptation({'observations': [
+            {'outcome': 'done', 'planned_minutes': 60, 'actual_minutes': 120, 'category': 'Программирование', 'effort': 'high', 'busy_day': True, 'weekday': 0},
+        ]})
+        self.assertLess(single['global_factor'], 1.25)
 
-    def test_long_task_sessions_daily_budget_and_balance(self):
-        plans = estimate(900)
-        plans[2] = estimate(50)[1] | {'task_id': 2}
-        self.week['load_limits'] = {'max_session_minutes': 80, 'break_minutes': 20, 'max_daily_minutes': 180}
-        schedule = planning.reorder(json.dumps({'task_ids': [1, 2], 'keep_previous_times': True}), plans, [1, 2], self.week, NOW)
-        placed = [b for b in schedule['blocks'] if b['kind'] == 'task']
-        daily = {}
-        for block in placed:
-            self.assertLessEqual(block['minutes'], 80)
-            day = block['start'] // 1440
-            daily[day] = daily.get(day, 0) + block['minutes']
-        self.assertTrue(all(value <= 180 for value in daily.values()))
-        self.assertGreaterEqual(len(daily), 5)
-        self.assertLess(next(b['start'] for b in placed if b['task_id'] == 2), max(b['start'] for b in placed if b['task_id'] == 1))
-        planning.validate_load(placed, self.week, NOW)
+        # Серия подтверждённых наблюдений адаптирует оценки категории, ёмкость загруженных дней и резерв.
+        series = [
+            {'outcome': 'done', 'planned_minutes': 100, 'actual_minutes': 170, 'category': 'Программирование', 'effort': 'high', 'busy_day': True, 'weekday': 0},
+            {'outcome': 'done', 'planned_minutes': 120, 'actual_minutes': 190, 'category': 'Программирование', 'effort': 'high', 'busy_day': False, 'weekday': 5},
+            {'outcome': 'too_hard', 'planned_minutes': 90, 'actual_minutes': 140, 'category': 'Программирование', 'effort': 'high', 'busy_day': True, 'weekday': 0},
+            {'outcome': 'missed', 'planned_minutes': 90, 'actual_minutes': None, 'category': 'Программирование', 'effort': 'medium', 'busy_day': True, 'weekday': 1},
+            {'outcome': 'done', 'planned_minutes': 60, 'actual_minutes': 60, 'category': 'Чтение', 'effort': 'low', 'busy_day': False, 'weekday': 5},
+        ]
+        profile = {'observations': series}
+        adapt = planning.derive_adaptation(profile)
+        self.assertGreater(adapt['category_factors']['программирование'], 1.2)
+        self.assertLess(adapt['busy_day_factor'], 0.92)
+        self.assertGreater(adapt['reserve_ratio'], 0.24)
 
-    def test_replanning_good_plan_preserves_every_future_block(self):
-        plans = estimate(300)
-        first = planning.reorder(self.order, plans, [1], self.week, NOW)
-        second = planning.reorder(self.order, plans, [1], self.week, NOW, previous=first)
-        self.assertEqual(first['blocks'], second['blocks'])
+        plans = calc_plans(
+            [make_plan(1, 100, 100, effort='high'), make_plan(2, 100, 100, effort='low')],
+            profile=profile,
+            tasks=[{'id': 1, 'title': 'Код', 'category': 'Программирование'}, {'id': 2, 'title': 'Статья', 'category': 'Чтение'}],
+        )
+        self.assertGreater(plans[1]['work_max_minutes'], plans[2]['work_max_minutes'])
 
-    def test_calendar_change_moves_only_conflicting_block(self):
-        plans = estimate(300)
-        first = planning.reorder(self.order, plans, [1], self.week, NOW)
-        old_tasks = [b for b in first['blocks'] if b['kind'] == 'task']
-        blocked = old_tasks[0]
-        changed = deepcopy(self.week)
-        changed['calendar_events'] = [{'id': 'new-meeting', 'kind': 'busy', 'title': 'Занято', 'date': '2026-11-12', 'start': '09:00', 'end': '10:30'}]
-        second = planning.reorder(self.order, plans, [1], changed, NOW, previous=first)
-        ids = {b['id'] for b in second['blocks'] if b['kind'] == 'task'}
-        self.assertNotIn(blocked['id'], ids)
-        self.assertTrue(all(b['id'] in ids for b in old_tasks[1:]))
-        self.assertEqual(second['remaining'][0]['remaining_work_minutes'], 0)
+        # Явное предпочтение пользователя перекрывает статистический потолок.
+        explicit = planning.derive_adaptation({'preferences': {'preferred_daily_minutes': 240, 'reserve_ratio': 0.2}, 'observations': series})
+        self.assertEqual(explicit['comfortable_daily_minutes'], 240)
+        self.assertEqual(explicit['reserve_ratio'], 0.2)
 
-    def test_new_urgent_task_releases_soft_blocks_but_keeps_later_days(self):
-        plans = estimate(80)
-        plans[2] = estimate(50, 'finish_before')[1] | {'task_id': 2}
-        plans[3] = estimate(40)[1] | {'task_id': 3}
-        previous = self.draft | {'blocks': [
-            {'id': 'soft-blocker', 'kind': 'task', 'task_id': 1, 'start': 60, 'minutes': 90, 'focus_minutes': 10},
-            {'id': 'unaffected', 'kind': 'task', 'task_id': 3, 'start': 60 + 1440 * 2, 'minutes': 50, 'focus_minutes': 10}]}
-        schedule = planning.reorder(json.dumps({'task_ids': [1, 2, 3], 'keep_previous_times': True}), plans, [1, 2, 3], self.week, NOW,
-            previous=previous, tasks=[{'id': 1}, {'id': 2, 'title': 'Срочная', 'deadline': '2026-11-12T10:00:00Z'}, {'id': 3}])
-        self.assertFalse(schedule['deadline_conflicts'])
-        ids = {b['id'] for b in schedule['blocks'] if b['kind'] == 'task'}
-        self.assertIn('unaffected', ids)
-        self.assertNotIn('soft-blocker', ids)
+    def test_scenario_8_calendar_changes_and_special_events(self):
+        # 1. Событие на весь день с маркером дедлайна НЕ блокирует день.
+        # 2. Пересекающиеся события не удваиваются.
+        # 3. available_from и depends_on соблюдаются строго.
+        events = [
+            {'id': 'dl-marker', 'kind': 'busy', 'title': 'Дедлайн отчёта', 'date': '2026-11-16', 'start': '00:00', 'end': '24:00'},
+            {'id': 'm1', 'kind': 'busy', 'title': 'Пара 1', 'date': '2026-11-17', 'start': '10:00', 'end': '12:00'},
+            {'id': 'm2', 'kind': 'busy', 'title': 'Совпадающая встреча', 'date': '2026-11-17', 'start': '11:00', 'end': '13:00'},
+        ]
+        week = planning.with_rest(empty_week(events=events), NOW, rest_args())
+        days = planning.analyze_days(week, NOW, horizon_days=7)
+        self.assertEqual(days[0]['busy_minutes'], 0)
+        self.assertEqual(len(days[0]['markers']), 1)
+        self.assertEqual(days[1]['busy_minutes'], 180)  # 10:00-13:00 объединённо, а не 240
 
-    def test_impossible_large_task_does_not_destroy_achievable_deadline(self):
-        plans = estimate(5000, 'finish_before')
-        plans[2] = estimate(50, 'finish_before')[1] | {'task_id': 2}
-        result = planning.reorder(json.dumps({'task_ids': [1, 2], 'keep_previous_times': True}), plans, [1, 2], self.week, NOW,
-            tasks=[{'id': 1, 'title': 'Не помещается', 'deadline': '2026-11-12T12:00:00Z'},
-                   {'id': 2, 'title': 'Можно успеть', 'deadline': '2026-11-12T12:00:00Z'}])
-        self.assertEqual([c['task_id'] for c in result['deadline_conflicts']], [1])
-        self.assertTrue(any(b['task_id'] == 1 for b in result['blocks'] if b['kind'] == 'task'))
+        plans = calc_plans([
+            make_plan(1, 120, 120, available_from='2026-11-19T00:00:00+00:00'),
+            make_plan(2, 90, 90, depends_on=[1]),
+        ])
+        tasks = [{'id': 1, 'title': 'Открывается 19-го'}, {'id': 2, 'title': 'После 1'}]
+        schedule = planning.reorder(order_args([1, 2]), plans, [1, 2], week, NOW, tasks=tasks)
+        t1_dates = [d['date'] for d in schedule['daily_allocations'] if any(t['task_id'] == 1 for t in d['tasks'])]
+        t2_dates = [d['date'] for d in schedule['daily_allocations'] if any(t['task_id'] == 2 for t in d['tasks'])]
+        self.assertTrue(all(date >= '2026-11-19' for date in t1_dates))
+        self.assertGreaterEqual(min(t2_dates), max(t1_dates))
 
-    def test_day_extension_requires_exact_owner_confirmation(self):
-        week = planning.with_rest(self.week, NOW)
-        arguments = json.dumps({'date': '2026-11-12', 'slots': [
-            {'kind': 'work', 'title': 'Дополнительное время', 'start': '17:00', 'end': '18:00', 'task_id': None}], 'reason': 'Перед сроком'})
-        unchanged, result = planning.plan_day(arguments, week, [1], NOW)
-        self.assertEqual(unchanged, week)
-        self.assertEqual(result['status'], 'needs_confirmation')
-        approved, result = planning.plan_day(arguments, week, [1], NOW, confirmed=True)
-        self.assertTrue(any(s['start'] == '17:00' for s in planning.day_slots(approved, datetime.fromisoformat(NOW).date()) if s['kind'] == 'work'))
-        self.assertIn('2026-11-12', approved['approved_work_windows'])
-        unapproved = deepcopy(approved)
-        unapproved['approved_work_windows'] = {}
-        self.assertFalse(any(s['kind'] == 'work' for s in planning.day_slots(unapproved, datetime.fromisoformat(NOW).date())))
+        # Добавление обязательного события снижает доступную ёмкость дня.
+        extra = deepcopy(week)
+        extra['calendar_events'].append({'id': 'm3', 'kind': 'busy', 'title': 'Доп. семинар', 'date': '2026-11-17', 'start': '14:00', 'end': '18:00'})
+        days_after = planning.analyze_days(extra, NOW, horizon_days=7)
+        self.assertLess(days_after[1]['realistic_capacity_minutes'], days[1]['realistic_capacity_minutes'])
 
-    def test_work_slot_over_meeting_does_not_need_extension_consent(self):
-        week = planning.with_rest(self.week, NOW)
-        week['calendar_events'] = [{'id': 'meeting', 'kind': 'busy', 'title': 'Занятие', 'date': '2026-11-12', 'start': '10:00', 'end': '11:00'}]
-        _, result = planning.plan_day(json.dumps({'date': '2026-11-12', 'slots': [
-            {'kind': 'work', 'title': 'Работа', 'start': '09:00', 'end': '12:00', 'task_id': None}], 'reason': 'Обычный режим'}), week, [1], NOW)
-        self.assertNotEqual(result.get('status'), 'needs_confirmation')
-        self.assertEqual(result['work_minutes'], 120)
+    def test_scenario_9_plan_stability(self):
+        week = planning.with_rest(empty_week(), NOW, rest_args())
+        tasks = [{'id': 1, 'title': 'Первая'}, {'id': 2, 'title': 'Вторая'}, {'id': 3, 'title': 'Третья'}]
+        raw_plans = [make_plan(1, 180, 210), make_plan(2, 180, 210), make_plan(3, 180, 210)]
+        first = planning.reorder(order_args([1, 2, 3]), calc_plans(raw_plans), [1, 2, 3], week, NOW, tasks=tasks)
+        # Пользователь выполнил 45 мин по первой задаче.
+        updated_plans = calc_plans(raw_plans, completed={1: 45})
+        second = planning.reorder(order_args([1, 2, 3], keep=True), updated_plans, [1, 2, 3], week, NOW, previous=first, tasks=tasks)
+        self.assertEqual(second['replan_mode'], 'minor_adjustment')
+        first_t3_days = {d['date'] for d in first['daily_allocations'] if any(t['task_id'] == 3 for t in d['tasks'])}
+        second_t3_days = {d['date'] for d in second['daily_allocations'] if any(t['task_id'] == 3 for t in d['tasks'])}
+        self.assertEqual(first_t3_days, second_t3_days)
 
-    def test_calendar_validation_error_is_not_a_successful_empty_schedule(self):
-        with patch.object(planning, 'validate_blocks', side_effect=ValueError('synthetic invalid calendar')):
-            with self.assertRaisesRegex(ValueError, 'synthetic invalid calendar'):
-                planning.reorder(self.order, estimate(100), [1], self.week, NOW)
+    def test_scenario_10_flexibility_no_exact_hours(self):
+        week = planning.with_rest(empty_week(), NOW, rest_args())
+        plans = calc_plans([make_plan(1, 180, 240)])
+        schedule = planning.reorder(order_args([1]), plans, [1], week, NOW, tasks=[{'id': 1, 'title': 'ЛР'}])
+        self.assertEqual(schedule['version'], 2)
+        self.assertNotIn('blocks', schedule)
+        self.assertTrue(schedule['periods'])
+        for period in schedule['periods']:
+            self.assertIn('start_date', period)
+            self.assertIn('end_date', period)
+            self.assertIn('hours_label', period)
+            self.assertNotIn('start_time', period)
+        self.assertEqual(calendar.ameba_events(datetime(2026, 11, 16).date(), datetime(2026, 11, 23).date()), [])
 
-    def test_refresh_and_initial_placement_are_identical(self):
-        class Clock(datetime):
-            @classmethod
-            def now(cls, tz=None):
-                return datetime.fromisoformat(NOW)
-        plans = estimate(400)
-        previous = {'task_ids': [1], 'timeline': [{'id': 1, 'title': 'Работа', 'plan': plans[1]}]}
-        first = planning.reorder(self.order, plans, [1], self.week, NOW)
-        with patch.object(ameba_service, 'datetime', Clock):
-            refreshed = asyncio.run(ameba_service.refresh_plan({'previous_plan': previous, 'weekly_schedule': self.week,
-                                                                'tasks': [{'id': 1}], 'timezone': 'UTC'}))['schedule']
-        self.assertEqual([(b['task_id'], b['start'], b['minutes']) for b in first['blocks']],
-                         [(b['task_id'], b['start'], b['minutes']) for b in refreshed['blocks']])
+    def test_strict_openai_tool_schemas(self):
+        def check_strict(node):
+            if isinstance(node, dict):
+                if node.get('type') == 'object':
+                    self.assertFalse(node.get('additionalProperties', True))
+                    props = set(node.get('properties', {}))
+                    req = set(node.get('required', []))
+                    self.assertEqual(props, req)
+                for value in node.values():
+                    check_strict(value)
+            elif isinstance(node, list):
+                for item in node:
+                    check_strict(item)
 
-    def test_small_task_is_not_needlessly_stretched_over_days(self):
-        schedule = planning.reorder(self.order, estimate(120), [1], self.week, NOW)
-        self.assertEqual(schedule['remaining'][0]['remaining_work_minutes'], 0)
-        self.assertTrue(all(b['start'] < 1440 for b in schedule['blocks'] if b['kind'] == 'task'))
-
-    def test_short_user_sessions_allow_useful_work(self):
-        self.week['load_limits'] = {'max_session_minutes': 30, 'break_minutes': 5, 'max_daily_minutes': 90}
-        schedule = planning.reorder(self.order, estimate(100), [1], self.week, NOW)
-        self.assertEqual(schedule['remaining'][0]['remaining_work_minutes'], 0)
-        self.assertTrue(all(b['minutes'] <= 30 for b in schedule['blocks'] if b['kind'] == 'task'))
-
-    def test_control_opening_on_sixteenth_cannot_be_scheduled_on_thirteenth(self):
-        now = '2026-11-13T08:00:00+00:00'
-        opening = '2026-11-16T00:00:00+00:00'
-        plans = estimate(100)
-        plans[1]['available_from'] = opening
-        schedule = planning.reorder(self.order, plans, [1], self.week, now)
-        placed = [b for b in schedule['blocks'] if b['kind'] == 'task']
-        self.assertTrue(placed)
-        self.assertTrue(all(datetime.fromisoformat(schedule['start_at']) + timedelta(minutes=b['start']) >= datetime.fromisoformat(opening) for b in placed))
-
-    def test_refresh_drops_previous_block_before_opening(self):
-        class Clock(datetime):
-            @classmethod
-            def now(cls, tz=None):
-                return datetime.fromisoformat('2026-11-13T08:00:00+00:00')
-        opening = '2026-11-16T13:30:00+03:00'
-        plans = estimate(100)
-        plans[1]['available_from'] = opening
-        previous = {'task_ids': [1], 'timeline': [{'id': 1, 'plan': plans[1]}],
-                    'schedule': {'start_at': Clock.now().isoformat(), 'timezone': 'UTC', 'blocks': [
-                        {'id': 'too-early', 'kind': 'task', 'task_id': 1, 'start': 60, 'minutes': 60, 'focus_minutes': 10}]}}
-        with patch.object(ameba_service, 'datetime', Clock):
-            schedule = asyncio.run(ameba_service.refresh_plan({'previous_plan': previous, 'weekly_schedule': self.week, 'tasks': [{'id': 1}]}))['schedule']
-        placed = [b for b in schedule['blocks'] if b['kind'] == 'task']
-        self.assertTrue(placed)
-        self.assertFalse(any(b['id'] == 'too-early' for b in placed))
-        self.assertTrue(all(datetime.fromisoformat(schedule['start_at']) + timedelta(minutes=b['start']) >= datetime.fromisoformat(opening) for b in placed))
-
-    def test_deadline_before_opening_is_infeasible(self):
-        plans = estimate(50, 'finish_before')
-        plans[1]['available_from'] = '2026-11-16T00:00:00+00:00'
-        result = planning.reorder(self.order, plans, [1], self.week, '2026-11-13T08:00:00+00:00',
-                                  tasks=[{'id': 1, 'title': 'Закрытая контрольная', 'deadline': '2026-11-15T12:00:00Z'}])
-        self.assertFalse(any(b['kind'] == 'task' for b in result['blocks']))
-        self.assertTrue(result['deadline_conflicts'][0]['infeasible'])
+        for tool in (planning.TOOL, planning.REST_TOOL, planning.ORDER_TOOL, planning.READ_TOOL, ameba_service.CONTEXT_TOOL):
+            self.assertTrue(tool['strict'])
+            check_strict(tool['parameters'])
 
 
 class AgentLoop(unittest.IsolatedAsyncioTestCase):
@@ -322,20 +315,41 @@ class AgentLoop(unittest.IsolatedAsyncioTestCase):
                      name=name, arguments=json.dumps(arguments), call_id=str(i))], output_text='')
                      for i, (name, arguments) in enumerate(actions)]
         responses.append(SimpleNamespace(status='completed', output=[], output_text=json.dumps({
-            'task_ids': [1], 'explanation': 'Частичный план', 'reasons': [{'task_id': 1, 'reason': 'Приоритет',
-            'time_estimate': 'Оценка', 'effort': 'Средняя', 'impact': 'Результат'}]})))
-        with patch.object(ameba_service, 'datetime', Clock), patch.object(ameba_service, 'Progress', MagicMock()), patch.object(ameba_service, 'AsyncOpenAI', MagicMock()), patch.object(ameba_service, 'memory_tool', AsyncMock(return_value=[])), patch.object(ameba_service, 'stream_model_response', AsyncMock(side_effect=responses)):
-            return await ameba_service.rank.__wrapped__({'api_key': 'synthetic', 'config': {}, 'tasks': [{'id': 1, 'title': 'Большая'}],
-                                                        'now': NOW, 'weekly_schedule': default_week()})
+            'task_ids': [1], 'explanation': 'Гибкий план периодов', 'reasons': [{
+                'task_id': 1, 'reason': 'Приоритет', 'time_estimate': '3–4 ч',
+                'effort': 'Средняя', 'impact': 'Готовая работа', 'deadline_risk': None}]})))
+        with patch.object(ameba_service, 'datetime', Clock), \
+             patch.object(ameba_service, 'Progress', MagicMock()), \
+             patch.object(ameba_service, 'AsyncOpenAI', MagicMock()), \
+             patch.object(ameba_service, 'memory_tool', AsyncMock(return_value=[])), \
+             patch.object(ameba_service, 'stream_model_response', AsyncMock(side_effect=responses)):
+            return await ameba_service.rank.__wrapped__({
+                'api_key': 'synthetic', 'config': {}, 'tasks': [{'id': 1, 'title': 'Лабораторная'}],
+                'now': NOW, 'weekly_schedule': empty_week(),
+            })
 
-    async def test_agent_accepts_partial_final_result(self):
-        plan = estimate()[1]
-        parameters = planning.Plan.model_validate({key: plan[key] for key in planning.Plan.model_fields}).model_dump()
+    async def test_agent_produces_flexible_periods_and_refresh_works_without_llm(self):
+        plan_input = make_plan(1, 200, 240)
         result = await self.run_agent([
-            ('read_user_memory', {}), ('read_current_plan', {}), ('plan_tasks', {'plans': [parameters]}),
-            ('plan_rest', {'patterns': [], 'assumption': 'Постоянный режим', 'load_limits': None}),
-            ('reorder_tasks', {'task_ids': [1], 'keep_previous_times': True})])
-        self.assertGreater(result['schedule']['remaining'][0]['remaining_work_minutes'], 0)
+            ('read_user_memory', {}),
+            ('read_current_plan', {}),
+            ('plan_tasks', {'plans': [plan_input]}),
+            ('plan_rest', json.loads(rest_args())),
+            ('reorder_tasks', json.loads(order_args([1]))),
+        ])
+        self.assertEqual(result['schedule']['version'], 2)
+        self.assertTrue(result['schedule']['periods'])
+
+        with patch.object(ameba_service, 'AsyncOpenAI', side_effect=AssertionError('LLM must not run')):
+            refreshed = await ameba_service.refresh_plan({
+                'previous_plan': result,
+                'weekly_schedule': empty_week(),
+                'timezone': 'UTC',
+                'tasks': [{'id': 1, 'title': 'Лабораторная', 'completed_work_minutes': 60}],
+                'now': NOW,
+            })
+        self.assertEqual(refreshed['timeline'][0]['plan']['work_max_minutes'], 180)
+        self.assertEqual(refreshed['schedule']['version'], 2)
 
     async def test_identical_failed_action_stops_after_three_attempts(self):
         with self.assertRaisesRegex(Exception, 'трижды'):
@@ -349,21 +363,28 @@ class Storage(unittest.TestCase):
         self.engine = create_engine(f'sqlite:///{self.directory.name}/test.db')
         init_db(self.engine)
         self.owner = current_user_id.set(1)
-        self.engine_patch = patch.object(calendar, 'get_engine', return_value=self.engine)
+        self.engine_patch = patch('common.database.get_engine', return_value=self.engine)
+        self.settings_engine_patch = patch('common.settings.get_engine', return_value=self.engine)
+        self.ameba_engine_patch = patch.object(ameba, 'get_engine', return_value=self.engine)
         self.engine_patch.start()
+        self.settings_engine_patch.start()
+        self.ameba_engine_patch.start()
 
     def tearDown(self):
+        self.ameba_engine_patch.stop()
+        self.settings_engine_patch.stop()
         self.engine_patch.stop()
         current_user_id.reset(self.owner)
         self.engine.dispose()
         self.directory.cleanup()
 
-    def test_failed_run_retains_previous_calendar(self):
-        old = {'run_id': 'old', 'schedule': {'start_at': NOW}, 'revision': 2}
+    def test_failed_run_retains_previous_plan(self):
+        old = {'run_id': 'old', 'schedule': {'version': 2, 'start_at': NOW, 'periods': []}, 'revision': 'r1'}
         with Session(self.engine) as session:
             session.add(IntegrationSetting(name='ameba_plan', config=json.dumps(old)))
             session.commit()
-        with patch.object(calendar, 'read_config', return_value={'revision': 2}), patch.object(scheduler, 'call', AsyncMock(side_effect=RuntimeError('synthetic'))):
+        with patch.object(calendar, 'read_config', return_value={'revision': 'r1'}), \
+             patch.object(scheduler, 'call', AsyncMock(side_effect=RuntimeError('synthetic'))):
             with self.assertRaises(RuntimeError):
                 asyncio.run(scheduler.run_ranking({}))
         self.assertEqual(calendar.read_ameba_plan()['schedule'], old['schedule'])
@@ -371,29 +392,81 @@ class Storage(unittest.TestCase):
 
     def test_plan_and_ranking_rollback_together_and_late_run_is_rejected(self):
         calendar.reset_ameba_plan('new')
-        result = {'schedule': {'start_at': NOW, 'blocks': []}}
+        result = {'schedule': {'version': 2, 'start_at': NOW, 'periods': []}}
         with Session(self.engine) as session:
             session.add(TaskRanking(result='new'))
-            calendar.save_ameba_plan('new', result, 2, session)
+            calendar.save_ameba_plan('new', result, 'r2', session)
             session.rollback()
         self.assertNotIn('schedule', calendar.read_ameba_plan())
         with Session(self.engine) as session:
             self.assertIsNone(session.get(TaskRanking, 1))
             with self.assertRaises(ValueError):
-                calendar.save_ameba_plan('late', result, 2, session)
+                calendar.save_ameba_plan('late', result, 'r2', session)
 
     def test_backend_rejects_timeline_error_without_replacing_saved_result(self):
-        previous = {'task_ids': [1], 'schedule': {'start_at': NOW, 'blocks': []}}
+        previous = {'task_ids': [1], 'schedule': {'version': 2, 'start_at': NOW, 'periods': []}}
         with Session(self.engine) as session:
             session.add(Task(id=1, title='Работа'))
             session.add(TaskRanking(snapshot='old', result=json.dumps(previous)))
             session.commit()
-        invalid = {'task_ids': [1], 'schedule': {'start_at': NOW, 'blocks': [], 'timeline_error': 'invalid'}}
-        with patch.object(ameba, 'get_engine', return_value=self.engine), patch.object(ameba, 'check_feature'), patch.object(ameba, 'read_config', return_value={'enabled': True}), patch.object(ameba, 'task_state', return_value=('new', [{'id': 1}], [])), patch.object(ameba, 'context_status', return_value='ready'), patch.object(ameba, 'request_ranking', AsyncMock(return_value=invalid)):
+        invalid = {'task_ids': [1], 'schedule': {'version': 2, 'start_at': NOW, 'periods': [], 'timeline_error': 'invalid'}}
+        with patch.object(ameba, 'check_feature'), \
+             patch.object(ameba, 'read_config', return_value={'enabled': True}), \
+             patch.object(ameba, 'task_state', return_value=('new', [{'id': 1}], [])), \
+             patch.object(ameba, 'context_status', return_value='ready'), \
+             patch.object(ameba, 'request_ranking', AsyncMock(return_value=invalid)):
             with self.assertRaisesRegex(Exception, 'Предыдущий результат сохранён'):
                 asyncio.run(ameba.rank_all())
         with Session(self.engine) as session:
             self.assertEqual(json.loads(session.get(TaskRanking, 1).result), previous)
+
+    def test_feedback_and_adjustments_persist_and_refresh(self):
+        task = Task(id=1, title='Лаба', category='Программирование', status='todo')
+        with Session(self.engine) as session:
+            session.add(task)
+            session.add(TaskContext(task_id=1, subject='cs', status='ready', task_snapshot=monocle_context.snapshot(task),
+                                    usage=json.dumps({'context_policy': 5, 'full_markdown': 'ok'})))
+            session.commit()
+
+        plan = calc_plans([make_plan(1, 180, 180)])[1]
+        saved_result = {
+            'task_ids': [1],
+            'timeline': [{'id': 1, 'title': 'Лаба', 'plan': plan}],
+            'reasons': [{'task_id': 1, 'reason': 'ok', 'time_estimate': '3 ч', 'effort': 'Средняя', 'impact': 'Зачёт', 'deadline_risk': None}],
+            'schedule': planning.reorder(order_args([1]), {1: plan}, [1], empty_week(), NOW, tasks=[{'id': 1, 'title': 'Лаба'}]),
+        }
+        with Session(self.engine) as session:
+            session.add(TaskRanking(snapshot='snap', result=json.dumps(saved_result)))
+            session.commit()
+
+        async def fake_call(service, endpoint, body, timeout=None):
+            return await ameba_service.refresh_plan(body)
+
+        with patch.object(ameba, 'check_feature'), \
+             patch.object(ameba, 'read_config', return_value={'enabled': True, 'model': 'm', 'base_url': 'u'}), \
+             patch.object(ameba, 'read_settings', return_value=({'enabled': True, 'model': 'm', 'base_url': 'u'}, {})), \
+             patch.object(scheduler, 'call', side_effect=fake_call), \
+             patch('agent_memory.read', return_value=[]):
+            status = asyncio.run(ameba.submit_feedback(1, 'partial', actual_minutes=60, period_id=saved_result['schedule']['periods'][0]['id']))
+            self.assertTrue(status['feedback_saved'])
+            self.assertEqual(status['observations_count'], 1)
+            with Session(self.engine) as session:
+                self.assertEqual(session.get(Task, 1).completed_work_minutes, 60)
+                self.assertEqual(session.get(Task, 1).status, 'in_progress')
+
+            today_iso = datetime.now(timezone.utc).date().isoformat()
+            adjusted = asyncio.run(ameba.adjust_plan(day_overrides={today_iso: 'free'}))
+            self.assertEqual(adjusted['manual_adjustments']['day_overrides'][today_iso], 'free')
+            first_day = next(d for d in adjusted['schedule']['daily_allocations'] if d['date'] == today_iso)
+            self.assertEqual(first_day['allocated_minutes'], 0)
+
+    def test_plan_expiry_uses_local_date_not_hour(self):
+        today_local = datetime.now(timezone.utc).date().isoformat()
+        yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
+        with patch.object(ameba, 'read_calendar', return_value={'timezone': 'UTC'}):
+            self.assertTrue(ameba.plan_expired({'schedule': {'version': 1, 'generated_date': today_local}}))
+            self.assertTrue(ameba.plan_expired({'schedule': {'version': 2, 'generated_date': yesterday}}))
+            self.assertFalse(ameba.plan_expired({'schedule': {'version': 2, 'generated_date': today_local}}))
 
     def test_migration_preserves_existing_task(self):
         with Session(self.engine) as session:
@@ -406,19 +479,6 @@ class Storage(unittest.TestCase):
         with Session(self.engine) as session:
             task = session.get(Task, 1)
             self.assertEqual((task.title, task.completed_work_minutes), ('Сохранить', 0))
-
-    def test_model_check_does_not_enter_scheduler(self):
-        with patch.object(ameba, 'read_settings', return_value=({'model': 'synthetic'}, {'api_key': 'synthetic'})), patch.object(ameba, 'call', AsyncMock(return_value={'ok': True})) as call, patch.object(scheduler, 'run_ranking', AsyncMock()) as rank:
-            self.assertTrue(asyncio.run(ameba.check_model())['ok'])
-            rank.assert_not_called()
-            self.assertEqual(call.call_args.args[:2], ('ameba', '/check'))
-
-    def test_time_alone_marks_plan_stale_without_changing_priority_inputs(self):
-        yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-        with patch.object(ameba, 'read_calendar', return_value={'timezone': 'UTC'}):
-            self.assertTrue(ameba.plan_expired({'schedule': {'start_at': yesterday, 'blocks': []}}))
-            current = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-            self.assertFalse(ameba.plan_expired({'schedule': {'start_at': current, 'blocks': []}}))
 
 
 if __name__ == '__main__':
