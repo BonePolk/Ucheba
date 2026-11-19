@@ -66,7 +66,7 @@ function RunFiles({ run, defaultOpen = false }) {
               key={name}
               href={`/api/integrations/arrodes/runs/${run.id}/files/${name.split('/').map(encodeURIComponent).join('/')}`}
               download
-              className="inline-flex items-center gap-1.5 text-[12px] text-[#CFA9F5] hover:underline py-0.5 truncate"
+              className="inline-flex items-center gap-1.5 text-[12px] max-md:text-[13px] text-[#CFA9F5] hover:underline py-0.5 max-md:py-2 truncate"
             >
               <Download className="h-3.5 w-3.5 shrink-0" />
               <span className="truncate">{name}</span>
@@ -261,7 +261,7 @@ export default function ArrodesWorkspace({ task: fixedTask = null, features = {}
 
         {!fixedTask && (
           <div className="flex flex-wrap items-end gap-2">
-            <Field label="Задача" className="flex-1 min-w-[240px]">
+            <Field label="Задача" className="w-full min-w-0 sm:flex-1 sm:min-w-[220px]">
               <Combobox
                 placeholder="Выберите задачу…"
                 searchPlaceholder="Поиск по задачам…"
@@ -349,7 +349,7 @@ export default function ArrodesWorkspace({ task: fixedTask = null, features = {}
                 />
               </Field>
 
-              <div className="flex items-center gap-1.5">
+              <div className="flex flex-wrap items-center gap-1.5">
                 <Button
                   variant="primary"
                   leftIcon={<Play className="h-3.5 w-3.5" />}
@@ -498,54 +498,90 @@ export default function ArrodesWorkspace({ task: fixedTask = null, features = {}
           {completedRuns.length > 1 && (
             <div className="flex flex-col gap-1.5">
               <div className="text-[12px] font-medium text-[#929292]">Запуски ({completedRuns.length})</div>
-              <TableContainer>
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Дата</TableHead>
-                      <TableHead>Статус</TableHead>
-                      <TableHead>Итог</TableHead>
-                      <TableHead className="text-right" />
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {completedRuns.map((run) => {
-                      const st = runStatusMeta[run.status] ?? { label: run.status, variant: 'default' };
-                      const isCurrent = activeResult.id === run.id;
-                      return (
-                        <TableRow
-                          key={run.id}
-                          className={`cursor-pointer ${isCurrent ? 'bg-[#1A1622]' : ''}`}
-                          onClick={() => setViewedRunId(run.id)}
+              <div className="md:hidden border border-[#303030] bg-[#111111] divide-y divide-[#222222]">
+                {completedRuns.map((run) => {
+                  const st = runStatusMeta[run.status] ?? { label: run.status, variant: 'default' };
+                  const isCurrent = activeResult.id === run.id;
+                  return (
+                    <div
+                      key={run.id}
+                      onClick={() => setViewedRunId(run.id)}
+                      className={`p-2.5 flex flex-col gap-1.5 cursor-pointer ${isCurrent ? 'bg-[#1A1622]' : ''}`}
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <Badge variant={st.variant}>{st.label}</Badge>
+                        <span className="text-[11px] text-[#929292] tabular-nums">{new Date(run.created_at).toLocaleString()}</span>
+                      </div>
+                      <div className="text-[12px] text-[#B8B8B8] line-clamp-2 break-words">
+                        {run.summary || run.error || '—'}
+                      </div>
+                      <div className="flex justify-end" onClick={(e) => e.stopPropagation()}>
+                        <Button
+                          size="xs"
+                          variant="outline"
+                          disabled={arrodesRunning || start.isPending}
+                          onClick={() => {
+                            setResumeRunId(run.id);
+                            setInstruction('');
+                          }}
                         >
-                          <TableCell className="text-[12px] tabular-nums whitespace-nowrap">
-                            {new Date(run.created_at).toLocaleString()}
-                          </TableCell>
-                          <TableCell>
-                            <Badge variant={st.variant}>{st.label}</Badge>
-                          </TableCell>
-                          <TableCell className="text-[12px] text-[#B8B8B8] max-w-[320px] truncate">
-                            {run.summary || run.error || '—'}
-                          </TableCell>
-                          <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
-                            <Button
-                              size="xs"
-                              variant="ghost"
-                              disabled={arrodesRunning || start.isPending}
-                              onClick={() => {
-                                setResumeRunId(run.id);
-                                setInstruction('');
-                              }}
-                            >
-                              Продолжить
-                            </Button>
-                          </TableCell>
-                        </TableRow>
-                      );
-                    })}
-                  </TableBody>
-                </Table>
-              </TableContainer>
+                          Продолжить
+                        </Button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="hidden md:block">
+                <TableContainer>
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Дата</TableHead>
+                        <TableHead>Статус</TableHead>
+                        <TableHead>Итог</TableHead>
+                        <TableHead className="text-right" />
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {completedRuns.map((run) => {
+                        const st = runStatusMeta[run.status] ?? { label: run.status, variant: 'default' };
+                        const isCurrent = activeResult.id === run.id;
+                        return (
+                          <TableRow
+                            key={run.id}
+                            className={`cursor-pointer ${isCurrent ? 'bg-[#1A1622]' : ''}`}
+                            onClick={() => setViewedRunId(run.id)}
+                          >
+                            <TableCell className="text-[12px] tabular-nums whitespace-nowrap">
+                              {new Date(run.created_at).toLocaleString()}
+                            </TableCell>
+                            <TableCell>
+                              <Badge variant={st.variant}>{st.label}</Badge>
+                            </TableCell>
+                            <TableCell className="text-[12px] text-[#B8B8B8] max-w-[320px] truncate">
+                              {run.summary || run.error || '—'}
+                            </TableCell>
+                            <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
+                              <Button
+                                size="xs"
+                                variant="ghost"
+                                disabled={arrodesRunning || start.isPending}
+                                onClick={() => {
+                                  setResumeRunId(run.id);
+                                  setInstruction('');
+                                }}
+                              >
+                                Продолжить
+                              </Button>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                </TableContainer>
+              </div>
             </div>
           )}
         </div>

@@ -107,7 +107,7 @@ export function AgentLog({ run, provider, maxHeightClass = 'max-h-[280px]' }) {
           )}
           {visible.map((event) => (
             <div key={event.id} data-event-id={String(event.id)} className="agent-log-row border-b border-[#161616] last:border-b-0">
-              <div className="font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-[#DCDCDC]">
+              <div className="font-mono text-[11px] max-md:text-[12px] leading-relaxed whitespace-pre-wrap text-[#DCDCDC]">
                 <span className="text-[#787878]">
                   {new Date(event.at).toLocaleTimeString()} · {publicAgentName(run.agent) ?? names[provider]}{event.task_id ? ` #${event.task_id}` : ''} ·{' '}
                 </span>
@@ -294,7 +294,7 @@ export default function AgentProgress({
           {runs.length > 1 ? (
             <SelectField
               size="sm"
-              className="w-[150px]"
+              className="w-[132px] sm:w-[150px]"
               ariaLabel="Журнал агента"
               value={current.provider}
               options={runs.map((entry) => ({

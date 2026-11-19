@@ -100,8 +100,8 @@ export default function Inbox() {
                       </div>
                     </div>
 
-                    <div className="flex flex-wrap items-center gap-1.5 shrink-0">
-                      <Button size="sm" variant="primary" leftIcon={<Check className="h-3 w-3" />} disabled={decision.isPending} onClick={() => accept(item)}>
+                    <div className="flex flex-wrap items-center gap-1.5 shrink-0 max-sm:w-full max-sm:pt-1">
+                      <Button size="sm" variant="primary" leftIcon={<Check className="h-3 w-3" />} disabled={decision.isPending} onClick={() => accept(item)} className="max-sm:flex-1">
                         Принять
                       </Button>
                       {item.action !== 'cancel' && (
@@ -128,7 +128,7 @@ export default function Inbox() {
                   )}
 
                   {item.action !== 'create' && (
-                    <Field label="Задача" className="max-w-md">
+                    <Field label="Задача" className="w-full max-w-md">
                       <Combobox
                         clearable
                         placeholder="Выберите задачу…"

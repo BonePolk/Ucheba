@@ -34,7 +34,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Input } from '@/components/ui/input';
+import { Field, Input } from '@/components/ui/input';
 import { Combobox, SelectField } from '@/components/ui/select';
 import { Badge, EmptyState, Notice, PageHeader, PageLoader, StatusIndicator } from '@/components/ui/surface';
 import { Table, TableBody, TableCell, TableContainer, TableHead, TableHeader, TableRow, tableRowClass } from '@/components/ui/table';
@@ -248,7 +248,7 @@ export default function TaskBoard({ features = {} }) {
                 <X className="h-3 w-3" />
               </button>
             ) : null}
-            className="flex-1 min-w-[160px] max-w-[300px]"
+            className="flex-1 min-w-[160px] sm:max-w-[300px]"
           />
 
           {compact ? (
@@ -317,40 +317,63 @@ export default function TaskBoard({ features = {} }) {
 
         {compact && (
           <CollapseSection open={filtersOpen}>
-            <div className="border border-[#303030] bg-[#111111] p-2.5 grid grid-cols-1 sm:grid-cols-2 gap-2">
-              <SelectField
-                ariaLabel="Статус"
-                placeholder="Все статусы"
-                clearable
-                clearLabel="Все статусы"
-                value={filters.status}
-                options={statuses}
-                onChange={(value) => changeFilter('status', value)}
-              />
-              <SelectField
-                ariaLabel="Приоритет"
-                placeholder="Все приоритеты"
-                clearable
-                clearLabel="Все приоритеты"
-                value={filters.priority}
-                options={[{ value: 'overdue', label: 'Просрочено' }, ...priorities]}
-                onChange={(value) => changeFilter('priority', value)}
-              />
-              <Combobox
-                ariaLabel="Категория"
-                placeholder="Все категории"
-                searchPlaceholder="Категория…"
-                clearable
-                value={filters.category}
-                options={categories.data ?? []}
-                onChange={(value) => changeFilter('category', value)}
-              />
-              <SelectField
-                ariaLabel="Сортировка"
-                value={currentSort}
-                options={sorting.filter((item) => features.ameba !== false || item.value !== 'ameba:asc')}
-                onChange={(value) => { if (value) setSort(value); }}
-              />
+            <div className="border border-[#303030] bg-[#111111] p-2.5 grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <Field label="Статус">
+                <SelectField
+                  ariaLabel="Статус"
+                  placeholder="Все статусы"
+                  clearable
+                  clearLabel="Все статусы"
+                  value={filters.status}
+                  options={statuses}
+                  onChange={(value) => changeFilter('status', value)}
+                />
+              </Field>
+              <Field label="Приоритет">
+                <SelectField
+                  ariaLabel="Приоритет"
+                  placeholder="Все приоритеты"
+                  clearable
+                  clearLabel="Все приоритеты"
+                  value={filters.priority}
+                  options={[{ value: 'overdue', label: 'Просрочено' }, ...priorities]}
+                  onChange={(value) => changeFilter('priority', value)}
+                />
+              </Field>
+              <Field label="Категория">
+                <Combobox
+                  ariaLabel="Категория"
+                  placeholder="Все категории"
+                  searchPlaceholder="Категория…"
+                  clearable
+                  value={filters.category}
+                  options={categories.data ?? []}
+                  onChange={(value) => changeFilter('category', value)}
+                />
+              </Field>
+              <Field label="Сортировка">
+                <SelectField
+                  ariaLabel="Сортировка"
+                  value={currentSort}
+                  options={sorting.filter((item) => features.ameba !== false || item.value !== 'ameba:asc')}
+                  onChange={(value) => { if (value) setSort(value); }}
+                />
+              </Field>
+              {hasActiveSearchOrFilters && (
+                <div className="sm:col-span-2 pt-0.5">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="w-full"
+                    onClick={() => {
+                      setFilters({ status: null, priority: null, category: null });
+                      setSearch('');
+                    }}
+                  >
+                    Сбросить фильтры
+                  </Button>
+                </div>
+              )}
             </div>
           </CollapseSection>
         )}
@@ -413,6 +436,7 @@ export default function TaskBoard({ features = {} }) {
                 completing={completing === task.id}
                 busy={update.isPending}
                 removing={remove.isPending}
+                arrodesEnabled={features.arrodes !== false}
                 position={features.ameba !== false ? positions.get(task.id) : null}
                 assessment={features.ameba !== false ? rankingReasons.get(task.id) : null}
                 overdue={isOverdue(task, now)}

@@ -23,10 +23,10 @@ export default function AgentQueue({ queue, error, compact = false }) {
   if (compact) {
     const first = active[0];
     return (
-      <div className="inline-flex items-center gap-1.5 border border-[#303030] bg-[#111111] px-2 h-7 text-[12px]">
+      <div className="inline-flex items-center gap-1.5 border border-[#303030] bg-[#111111] px-2 h-7 text-[12px] max-w-full min-w-0">
         <span className="h-1.5 w-1.5 bg-[#9E6FD0] animate-pulse shrink-0" aria-hidden="true" />
         {first ? (
-          <span className="truncate max-w-[240px]">
+          <span className="truncate max-w-[170px] sm:max-w-[240px]">
             <strong className="font-medium text-[#CFA9F5]">{providerLabel(first)}</strong>
             {': '}
             {first.task_id ? (

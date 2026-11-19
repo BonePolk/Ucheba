@@ -109,7 +109,7 @@ export default function ContextFiles({ taskId, disabled }) {
               onChange={setSaved}
               disabled={busy || library.isPending}
               options={libraryOptions}
-              className="flex-1 min-w-[180px]"
+              className="w-full min-w-0 sm:flex-1 sm:min-w-[180px]"
             />
             <Button
               size="sm"
@@ -135,7 +135,7 @@ export default function ContextFiles({ taskId, disabled }) {
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0 }}
                 transition={reduced ? { duration: 0.01 } : FAST_TRANSITION}
-                className="flex items-center justify-between gap-2 px-2.5 py-1.5 text-[12px]"
+                className="flex items-center justify-between gap-2 px-2.5 py-1.5 max-md:py-2.5 text-[12px]"
               >
                 <a
                   href={`/api${path}/${file.id}`}

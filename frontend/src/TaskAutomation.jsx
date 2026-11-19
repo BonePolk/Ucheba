@@ -253,7 +253,7 @@ export default function TaskAutomation({ task, features = {} }) {
       <div className="flex flex-col gap-2">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap items-center gap-2 text-[12px]">
-            <a href="/" className="inline-flex items-center gap-1 text-[#929292] hover:text-[#EAEAEA]">
+            <a href="/" className="inline-flex items-center gap-1 text-[#929292] hover:text-[#EAEAEA] max-md:py-1.5 max-md:pr-2 max-md:text-[13px]">
               <ArrowLeft className="h-3.5 w-3.5" />
               <span>Задачи</span>
             </a>
@@ -346,7 +346,7 @@ export default function TaskAutomation({ task, features = {} }) {
           <SelectField
             size="sm"
             variant="ghost"
-            className="w-[132px]"
+            className="w-[132px] max-md:border-[#303030] max-md:bg-[#141414]"
             ariaLabel="Статус задачи"
             value={task.status}
             options={statuses}
@@ -360,7 +360,7 @@ export default function TaskAutomation({ task, features = {} }) {
           <SelectField
             size="sm"
             variant="ghost"
-            className="w-[108px]"
+            className="w-[108px] max-md:border-[#303030] max-md:bg-[#141414]"
             ariaLabel="Приоритет задачи"
             value={task.priority}
             options={priorities}
@@ -376,7 +376,7 @@ export default function TaskAutomation({ task, features = {} }) {
           </span>
         </div>
 
-        <div className="flex flex-wrap items-center gap-1.5 ml-auto">
+        <div className="flex flex-wrap items-center gap-1.5 md:ml-auto max-md:w-full max-md:pt-1.5 max-md:border-t max-md:border-[#1E1E1E]">
           <Clock className="h-3.5 w-3.5 text-[#929292]" aria-hidden="true" />
           <strong className="tabular-nums text-[#EAEAEA]">{task.completed_work_minutes || 0} мин</strong>
           {assessment?.plan?.hours_label && (
@@ -418,7 +418,7 @@ export default function TaskAutomation({ task, features = {} }) {
           <Input
             type="number"
             min={0}
-            className="w-[100px] h-[26px]"
+            className="w-[100px] max-md:w-[112px] h-[26px]"
             value={customMinutes}
             onChange={(event) => setCustomMinutes(event.currentTarget.value)}
           />
@@ -528,7 +528,7 @@ export default function TaskAutomation({ task, features = {} }) {
                   {scheduledPeriods.map((p) => {
                     const entry = p.tasks.find((t) => t.task_id === task.id);
                     return (
-                      <a key={p.id} href="/ameba" className="px-2 py-0.5 border border-[#303030] bg-[#171717] hover:border-[#7F49B4]">
+                      <a key={p.id} href="/ameba" className="px-2 py-0.5 max-md:px-2.5 max-md:py-1.5 border border-[#303030] bg-[#171717] hover:border-[#7F49B4]">
                         {p.start_date === p.end_date ? p.start_date : `${p.start_date}..${p.end_date}`} · {entry?.hours_label}
                       </a>
                     );

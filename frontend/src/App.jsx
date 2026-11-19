@@ -295,7 +295,7 @@ export default function App() {
         leaving={logout.isPending}
         inboxCount={inbox.data?.length ?? 0}
       />
-      <main className="flex-1 min-w-0 px-3 sm:px-5 py-3 sm:py-4 pb-20 md:pb-6">
+      <main className="flex-1 min-w-0 px-3 sm:px-5 py-3 sm:py-4 pb-[calc(5rem+env(safe-area-inset-bottom))] md:pb-6">
         <div className="w-full max-w-[1680px]">
           {logout.error && <Notice tone="error" className="mb-3">{logout.error.message}</Notice>}
           <PageError key={routeKey}>

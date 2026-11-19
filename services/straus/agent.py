@@ -299,14 +299,14 @@ async def run(body):
         adapter = McpToolAdapter(active_tools, tools_handler.call, progress)
         tools_handler.adapter = adapter
 
-        async with open_codex(
+        async with scratch_env(writable=False) as (work_dir, shell_policy), serve_mcp(adapter) as mcp_config, open_codex(
             'Straus',
             auth_mode=auth_mode,
             api_key=api_key,
             base_url=base_url,
             allow_shell=False,
             web_search='disabled',
-        ) as (client, thread_provider), scratch_env(writable=False) as (work_dir, shell_policy), serve_mcp(adapter) as mcp_config:
+        ) as (client, thread_provider):
             thread = await client.thread_start(
                 cwd=str(work_dir),
                 sandbox=sandbox,

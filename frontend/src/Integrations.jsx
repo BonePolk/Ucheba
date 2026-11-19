@@ -143,7 +143,7 @@ function IntegrationForms({ data, features }) {
 
       <div className="grid grid-cols-1 md:grid-cols-[190px_minmax(0,1fr)] border border-[#303030] bg-[#111111]">
         {/* Left Agents / Integrations Selector */}
-        <aside className="border-b md:border-b-0 md:border-r border-[#242424] bg-[#0D0D0D] p-2 flex md:flex-col gap-1 overflow-x-auto">
+        <aside className="border-b md:border-b-0 md:border-r border-[#242424] bg-[#0D0D0D] p-2 flex md:flex-col gap-1 overflow-x-auto no-scrollbar">
           {items.map((item) => {
             const active = item.id === activeId;
             return (
@@ -152,7 +152,7 @@ function IntegrationForms({ data, features }) {
                 type="button"
                 onClick={() => setSelectedId(item.id)}
                 className={cn(
-                  'relative flex items-center justify-between gap-2 px-2.5 py-2 text-left shrink-0 md:shrink transition-colors cursor-pointer',
+                  'relative flex items-center justify-between gap-2 px-2.5 py-2 max-md:py-2.5 max-md:px-3 text-left shrink-0 md:shrink transition-colors cursor-pointer',
                   active ? 'text-[#EAEAEA]' : 'text-[#929292] hover:text-[#EAEAEA] hover:bg-[#161616]',
                 )}
               >
@@ -160,7 +160,7 @@ function IntegrationForms({ data, features }) {
                   <motion.span
                     layoutId="integrations-active"
                     transition={reduced ? { duration: 0.01 } : SPRING_SNAPPY}
-                    className="absolute inset-0 bg-[#7F49B4]/16 border-l-2 border-l-[#7F49B4] pointer-events-none"
+                    className="absolute inset-0 bg-[#7F49B4]/16 border-l-2 border-l-[#7F49B4] max-md:border-l-0 max-md:border-b-2 max-md:border-b-[#7F49B4] pointer-events-none"
                   />
                 )}
                 <span className="relative z-10 text-[13px] font-medium truncate">{item.label}</span>
@@ -171,7 +171,7 @@ function IntegrationForms({ data, features }) {
         </aside>
 
         {/* Right Detail Configuration Pane */}
-        <div className="p-4 min-w-0">
+        <div className="p-4 max-md:p-3 min-w-0">
           <StageSwap stageKey={activeId}>
             {activeId === 'ai_provider' && (
               <AiConnections key="ai_provider" data={data.ai_provider} oauthState={oauthState} />
@@ -257,7 +257,7 @@ function IntegrationForms({ data, features }) {
 
                 {step === 'code' && (
                   <div className="flex flex-wrap items-end gap-2 border border-[#303030] bg-[#0D0D0D] p-2.5">
-                    <Field label="Код Telegram" className="flex-1 min-w-[180px]">
+                    <Field label="Код Telegram" className="w-full min-w-0 sm:flex-1 sm:min-w-[180px]">
                       <PasswordField value={code} onChange={(event) => setCode(event.currentTarget.value)} />
                     </Field>
                     <Button variant="primary" disabled={mutation.isPending || !code} onClick={() => run('telegram/login', { code })}>
@@ -268,7 +268,7 @@ function IntegrationForms({ data, features }) {
 
                 {step === 'password' && (
                   <div className="flex flex-wrap items-end gap-2 border border-[#303030] bg-[#0D0D0D] p-2.5">
-                    <Field label="Пароль 2FA" className="flex-1 min-w-[180px]">
+                    <Field label="Пароль 2FA" className="w-full min-w-0 sm:flex-1 sm:min-w-[180px]">
                       <PasswordField value={password} onChange={(event) => setPassword(event.currentTarget.value)} />
                     </Field>
                     <Button variant="primary" disabled={mutation.isPending || !password} onClick={() => run('telegram/login', { password })}>

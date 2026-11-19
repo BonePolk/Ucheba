@@ -5,6 +5,7 @@ import { Check, ChevronDown, Search, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 const CLEAR_SENTINEL = '__ucheba_clear__';
+const isCoarsePointer = () => typeof window !== 'undefined' && Boolean(window.matchMedia?.('(pointer: coarse)').matches);
 
 function normalizeOptions(options = []) {
   return options.map((item) => (typeof item === 'string' ? { value: item, label: item } : item));
@@ -25,7 +26,7 @@ export const SelectTrigger = forwardRef(function SelectTrigger(
         variant === 'ghost'
           ? 'bg-transparent border-transparent hover:bg-[#1C1C1C] hover:border-[#303030]'
           : 'bg-[#111111] border-[#303030] hover:border-[#454545]',
-        size === 'sm' ? 'h-[25px] text-[12px] px-2 max-md:min-h-[34px]' : 'h-[30px] text-[13px] max-md:min-h-[38px]',
+        size === 'sm' ? 'h-[25px] text-[12px] px-2 max-md:min-h-[36px] max-md:text-[13px]' : 'h-[30px] text-[13px] max-md:min-h-[40px] max-md:text-[14px]',
         className,
       )}
       {...props}
@@ -68,7 +69,7 @@ export const SelectItem = forwardRef(function SelectItem(
     <SelectPrimitive.Item
       ref={ref}
       className={cn(
-        'relative flex w-full cursor-pointer select-none items-center rounded-none py-1.5 pl-6 pr-2.5 text-[12px] text-[#EAEAEA] outline-none data-[highlighted]:bg-[#262626] data-[disabled]:pointer-events-none data-[disabled]:opacity-40',
+        'relative flex w-full cursor-pointer select-none items-center rounded-none py-1.5 max-md:py-2.5 pl-6 pr-2.5 text-[12px] max-md:text-[14px] text-[#EAEAEA] outline-none data-[highlighted]:bg-[#262626] data-[disabled]:pointer-events-none data-[disabled]:opacity-40',
         className,
       )}
       {...props}
@@ -174,8 +175,8 @@ export function Combobox({
             disabled={disabled}
             aria-label={ariaLabel}
             className={cn(
-              'flex h-[30px] max-md:min-h-[38px] w-full min-w-0 items-center justify-between gap-2 rounded-none bg-[#111111] border border-[#303030] px-2.5 text-[13px] text-left hover:border-[#454545] focus-visible:border-[#7F49B4] disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer',
-              clearable && value ? 'pr-12' : '',
+              'flex h-[30px] max-md:min-h-[40px] w-full min-w-0 items-center justify-between gap-2 rounded-none bg-[#111111] border border-[#303030] px-2.5 text-[13px] max-md:text-[14px] text-left hover:border-[#454545] focus-visible:border-[#7F49B4] disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer',
+              clearable && value ? 'pr-12 max-md:pr-14' : '',
             )}
           >
             <span className={cn('truncate', !(selected || value) && 'text-[#6E6E6E]')}>
@@ -192,7 +193,7 @@ export function Combobox({
               event.stopPropagation();
               onChange(null);
             }}
-            className="absolute right-7 h-5 w-5 grid place-items-center text-[#888888] hover:text-[#EAEAEA] cursor-pointer"
+            className="absolute right-7 h-5 w-5 max-md:h-8 max-md:w-8 grid place-items-center text-[#888888] hover:text-[#EAEAEA] cursor-pointer"
           >
             <X className="h-3 w-3" />
           </button>
@@ -208,7 +209,7 @@ export function Combobox({
             <Search className="h-3.5 w-3.5 text-[#888888] shrink-0" />
             <input
               type="text"
-              autoFocus
+              autoFocus={!isCoarsePointer()}
               value={query}
               onChange={(event) => setQuery(event.currentTarget.value)}
               onKeyDown={(event) => {
@@ -219,7 +220,7 @@ export function Combobox({
                 }
               }}
               placeholder={searchPlaceholder}
-              className="w-full bg-transparent text-[12px] text-[#EAEAEA] placeholder:text-[#666666] focus:outline-none"
+              className="w-full bg-transparent text-[12px] max-md:text-[16px] text-[#EAEAEA] placeholder:text-[#666666] focus:outline-none"
             />
           </div>
           <div className="max-h-56 overflow-y-auto">
@@ -234,7 +235,7 @@ export function Combobox({
                     setOpen(false);
                   }}
                   className={cn(
-                    'flex w-full items-center gap-2 px-2 py-1.5 text-left text-[12px] hover:bg-[#262626] cursor-pointer',
+                    'flex w-full items-center gap-2 px-2 py-1.5 max-md:py-2.5 text-left text-[12px] max-md:text-[14px] hover:bg-[#262626] cursor-pointer',
                     active && 'bg-[#7F49B4]/20 text-[#E6D1FA]',
                   )}
                 >
@@ -253,7 +254,7 @@ export function Combobox({
                   onChange(query.trim());
                   setOpen(false);
                 }}
-                className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-[12px] text-[#CFA9F5] hover:bg-[#262626] cursor-pointer"
+                className="flex w-full items-center gap-2 px-2 py-1.5 max-md:py-2.5 text-left text-[12px] max-md:text-[14px] text-[#CFA9F5] hover:bg-[#262626] cursor-pointer"
               >
                 Выбрать «{query.trim()}»
               </button>
@@ -302,7 +303,7 @@ export function MultiCombobox({
           type="button"
           disabled={disabled}
           className={cn(
-            'flex min-h-[30px] w-full items-center justify-between gap-2 rounded-none bg-[#111111] border border-[#303030] px-2.5 py-1 text-[12px] text-left hover:border-[#454545] disabled:opacity-50 cursor-pointer',
+            'flex min-h-[30px] max-md:min-h-[40px] w-full items-center justify-between gap-2 rounded-none bg-[#111111] border border-[#303030] px-2.5 py-1 text-[12px] max-md:text-[14px] text-left hover:border-[#454545] disabled:opacity-50 cursor-pointer',
             className,
           )}
         >
@@ -322,11 +323,11 @@ export function MultiCombobox({
             <Search className="h-3.5 w-3.5 text-[#888888] shrink-0" />
             <input
               type="text"
-              autoFocus
+              autoFocus={!isCoarsePointer()}
               value={query}
               onChange={(event) => setQuery(event.currentTarget.value)}
               placeholder={searchPlaceholder}
-              className="w-full bg-transparent text-[12px] text-[#EAEAEA] placeholder:text-[#666666] focus:outline-none"
+              className="w-full bg-transparent text-[12px] max-md:text-[16px] text-[#EAEAEA] placeholder:text-[#666666] focus:outline-none"
             />
           </div>
           <div className="max-h-56 overflow-y-auto">
@@ -338,7 +339,7 @@ export function MultiCombobox({
                   type="button"
                   onClick={() => toggleItem(item.value)}
                   className={cn(
-                    'flex w-full items-center gap-2 px-2 py-1.5 text-left text-[12px] hover:bg-[#262626] cursor-pointer',
+                    'flex w-full items-center gap-2 px-2 py-1.5 max-md:py-2.5 text-left text-[12px] max-md:text-[14px] hover:bg-[#262626] cursor-pointer',
                     checked && 'bg-[#7F49B4]/15',
                   )}
                 >

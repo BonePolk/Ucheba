@@ -20,11 +20,11 @@ export const buttonVariants = cva(
         'danger-ghost': 'bg-transparent border-transparent text-[#D46A6A] hover:bg-[#291515]',
       },
       size: {
-        default: 'h-7 px-2.5 text-[13px] gap-1.5 max-md:min-h-[36px]',
-        sm: 'h-[25px] px-2 text-[12px] gap-1 max-md:min-h-[32px]',
-        xs: 'h-[22px] px-1.5 text-[11px] gap-1',
-        icon: 'h-7 w-7 p-0 max-md:h-9 max-md:w-9',
-        'icon-sm': 'h-6 w-6 p-0 max-md:h-8 max-md:w-8',
+        default: 'h-7 px-2.5 text-[13px] gap-1.5 max-md:min-h-[40px] max-md:px-3',
+        sm: 'h-[25px] px-2 text-[12px] gap-1 max-md:min-h-[36px] max-md:px-2.5 max-md:text-[13px]',
+        xs: 'h-[22px] px-1.5 text-[11px] gap-1 max-md:min-h-[32px] max-md:px-2 max-md:text-[12px]',
+        icon: 'h-7 w-7 p-0 max-md:h-10 max-md:w-10',
+        'icon-sm': 'h-6 w-6 p-0 max-md:h-9 max-md:w-9',
       },
     },
     defaultVariants: {

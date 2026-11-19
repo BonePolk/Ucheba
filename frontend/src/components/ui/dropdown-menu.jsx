@@ -33,7 +33,7 @@ export const DropdownMenuItem = forwardRef(function DropdownMenuItem(
     <DropdownMenuPrimitive.Item
       ref={ref}
       className={cn(
-        'relative flex cursor-pointer select-none items-center gap-2 rounded-none px-2.5 py-1.5 max-md:py-2.5 text-[12px] outline-none transition-colors data-[disabled]:pointer-events-none data-[disabled]:opacity-40',
+        'relative flex cursor-pointer select-none items-center gap-2 rounded-none px-2.5 py-1.5 max-md:py-2.5 text-[12px] max-md:text-[14px] outline-none transition-colors data-[disabled]:pointer-events-none data-[disabled]:opacity-40',
         danger
           ? 'text-[#D46A6A] data-[highlighted]:bg-[#291515] data-[highlighted]:text-[#E88484]'
           : 'text-[#EAEAEA] data-[highlighted]:bg-[#262626]',

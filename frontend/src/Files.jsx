@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Archive,
+  ArrowLeft,
   ChevronLeft,
   ChevronRight,
   Download,
@@ -93,7 +94,7 @@ function FolderTree({ node, current, onSelect }) {
             <button
               type="button"
               onClick={() => onSelect(child.path)}
-              className={`flex items-center gap-2 w-full h-7 px-2 text-left text-[12px] cursor-pointer transition-colors ${selected ? 'bg-[#7F49B4]/18 text-[#EAEAEA]' : 'text-[#929292] hover:text-[#EAEAEA] hover:bg-[#191919]'}`}
+              className={`flex items-center gap-2 w-full h-7 max-md:h-10 px-2 text-left text-[12px] max-md:text-[13px] cursor-pointer transition-colors ${selected ? 'bg-[#7F49B4]/18 text-[#EAEAEA]' : 'text-[#929292] hover:text-[#EAEAEA] hover:bg-[#191919]'}`}
             >
               <FileIcon file={child} size={14} />
               <span className="truncate">{child.name}</span>
@@ -357,8 +358,12 @@ export default function Files() {
                 <div className="text-[11px] font-medium uppercase tracking-wider text-[#929292] px-1.5 pb-1">Библиотека</div>
                 <button
                   type="button"
-                  onClick={() => { setFolder(''); setSearch(''); }}
-                  className={`flex items-center justify-between gap-2 w-full h-7 px-2 text-left text-[12px] cursor-pointer ${!folder ? 'bg-[#7F49B4]/18 text-[#EAEAEA]' : 'text-[#929292] hover:text-[#EAEAEA] hover:bg-[#191919]'}`}
+                  onClick={() => {
+                    setFolder('');
+                    setSearch('');
+                    if (compact) setFoldersOpen(false);
+                  }}
+                  className={`flex items-center justify-between gap-2 w-full h-7 max-md:h-10 px-2 text-left text-[12px] max-md:text-[13px] cursor-pointer ${!folder ? 'bg-[#7F49B4]/18 text-[#EAEAEA]' : 'text-[#929292] hover:text-[#EAEAEA] hover:bg-[#191919]'}`}
                 >
                   <span className="flex items-center gap-2 truncate">
                     <Folder className="h-3.5 w-3.5 text-[#CFA9F5] shrink-0" />
@@ -372,6 +377,7 @@ export default function Files() {
                   onSelect={(path) => {
                     setFolder(path);
                     setSearch('');
+                    if (compact) setFoldersOpen(false);
                   }}
                 />
               </>
@@ -454,7 +460,7 @@ export default function Files() {
                     { value: 'recent', label: 'Сначала новые' },
                     { value: 'size', label: 'По размеру' },
                   ]}
-                  className="w-[140px]"
+                  className="flex-1 min-w-[130px] sm:flex-none sm:w-[140px]"
                 />
                 <SegmentedControl
                   ariaLabel="Вид файлов"
@@ -482,7 +488,7 @@ export default function Files() {
                     return (
                       <div
                         key={file.path}
-                        className={`flex items-center gap-2 px-2.5 py-1.5 transition-colors ${selected ? 'bg-[#7F49B4]/16' : 'hover:bg-[#161616]'}`}
+                        className={`flex items-center gap-2 px-2.5 py-1.5 max-md:py-2.5 max-md:min-h-[44px] transition-colors ${selected ? 'bg-[#7F49B4]/16' : 'hover:bg-[#161616]'}`}
                         onDragOver={(event) => { if (file.folder) event.preventDefault(); }}
                         onDrop={(event) => { if (file.folder) dropFiles(event, file.path); }}
                       >
@@ -568,6 +574,20 @@ export default function Files() {
         >
           {editor && (
             <>
+              {compact && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="w-fit"
+                  disabled={busy}
+                  leftIcon={<ArrowLeft className="h-3.5 w-3.5" />}
+                  onClick={() => {
+                    if (!dirty || window.confirm('Закрыть без сохранения изменений?')) setEditor(null);
+                  }}
+                >
+                  К файлам
+                </Button>
+              )}
               <div className="flex items-start justify-between gap-2 border-b border-[#222222] pb-2">
               <div className="flex items-start gap-2 min-w-0">
                 <FileIcon file={editor} size={16} />

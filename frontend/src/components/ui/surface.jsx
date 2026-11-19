@@ -73,7 +73,7 @@ export function Notice({ tone = 'info', title, onClose, action, className, child
       animate={{ opacity: 1, y: 0 }}
       transition={reduced ? { duration: 0.01 } : FAST_TRANSITION}
       className={cn(
-        'flex items-start gap-2.5 border border-l-2 px-3 py-2 text-[12px] text-[#EAEAEA] rounded-none',
+        'flex flex-wrap sm:flex-nowrap items-start gap-2.5 border border-l-2 px-3 py-2 text-[12px] text-[#EAEAEA] rounded-none',
         style.border,
         style.bg,
         className,
@@ -90,7 +90,7 @@ export function Notice({ tone = 'info', title, onClose, action, className, child
           type="button"
           onClick={onClose}
           aria-label="Закрыть сообщение"
-          className="h-5 w-5 grid place-items-center text-[#929292] hover:text-[#EAEAEA] cursor-pointer shrink-0"
+          className="h-5 w-5 max-md:h-8 max-md:w-8 grid place-items-center text-[#929292] hover:text-[#EAEAEA] cursor-pointer shrink-0"
         >
           <X className="h-3.5 w-3.5" />
         </button>
@@ -125,7 +125,7 @@ export function PageHeader({ title, count, subtitle, badge, actions, className }
         </div>
         {subtitle && <p className="text-[12px] text-[#929292] m-0">{subtitle}</p>}
       </div>
-      {actions && <div className="flex flex-wrap items-center gap-1.5 shrink-0">{actions}</div>}
+      {actions && <div className="flex flex-wrap items-center gap-1.5 max-w-full min-w-0">{actions}</div>}
     </header>
   );
 }
@@ -137,7 +137,7 @@ export function SectionHeader({ title, meta, actions, className }) {
         <h2 className="text-[14px] font-semibold text-[#EAEAEA] m-0">{title}</h2>
         {meta && <span className="text-[12px] text-[#929292]">{meta}</span>}
       </div>
-      {actions && <div className="flex items-center gap-1.5 shrink-0">{actions}</div>}
+      {actions && <div className="flex flex-wrap items-center gap-1.5 max-w-full min-w-0">{actions}</div>}
     </div>
   );
 }

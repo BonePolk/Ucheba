@@ -1,21 +1,33 @@
 import { AlertTriangle, ChevronDown, ChevronRight } from 'lucide-react';
+import * as PopoverPrimitive from '@radix-ui/react-popover';
 import { useState } from 'react';
 import { Badge } from '@/components/ui/surface';
-import { HintTooltip } from '@/components/ui/tooltip';
 import { CollapseSection } from '@/lib/motion';
 
 export function DeadlineRisk({ reason }) {
   if (!reason) return null;
   return (
-    <HintTooltip label={`Риск срока: ${reason}`}>
-      <span
-        tabIndex={0}
-        aria-label={`Риск срока: ${reason}`}
-        className="inline-flex items-center align-middle ml-1 text-[#D4A24C] cursor-help"
-      >
-        <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
-      </span>
-    </HintTooltip>
+    <PopoverPrimitive.Root>
+      <PopoverPrimitive.Trigger asChild>
+        <button
+          type="button"
+          title={`Риск срока: ${reason}`}
+          aria-label={`Риск срока: ${reason}`}
+          onClick={(event) => event.stopPropagation()}
+          className="inline-flex items-center justify-center align-middle ml-1 text-[#D4A24C] cursor-pointer max-md:p-1 max-md:-m-1"
+        >
+          <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
+        </button>
+      </PopoverPrimitive.Trigger>
+      <PopoverPrimitive.Portal>
+        <PopoverPrimitive.Content
+          sideOffset={4}
+          className="z-50 max-w-[280px] rounded-none bg-[#191919] border border-[#4A391D] px-2.5 py-2 text-[12px] leading-snug text-[#EAEAEA] whitespace-pre-wrap break-words"
+        >
+          Риск срока: {reason}
+        </PopoverPrimitive.Content>
+      </PopoverPrimitive.Portal>
+    </PopoverPrimitive.Root>
   );
 }
 

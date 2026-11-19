@@ -57,7 +57,7 @@ export default function Admin() {
         <SectionHeader title="Функции" meta={`Пользователей: ${state.data.user_count}`} />
         <div className="border border-[#303030] bg-[#111111] divide-y divide-[#1E1E1E]">
           {featureEntries.map(([name, enabled]) => (
-            <div key={name} className="flex items-center justify-between gap-3 px-3 py-2">
+            <div key={name} className="flex items-center justify-between gap-3 px-3 py-2 max-md:py-3">
               <span className="text-[13px] text-[#EAEAEA]">{labels[name] ?? name}</span>
               <Switch
                 aria-label={labels[name] ?? name}
@@ -77,43 +77,71 @@ export default function Admin() {
         {!issues.isPending && !issues.data?.length ? (
           <EmptyState title="Новых сообщений о проблемах нет" />
         ) : (
-          <TableContainer>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Агент / Инструмент</TableHead>
-                  <TableHead>Категория</TableHead>
-                  <TableHead>Описание</TableHead>
-                  <TableHead>Контекст</TableHead>
-                  <TableHead className="text-right">Действие</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {(issues.data ?? []).map((issue) => (
-                  <TableRow key={issue.id}>
-                    <TableCell className="whitespace-nowrap">
+          <>
+            <div className="md:hidden border border-[#303030] bg-[#111111] divide-y divide-[#222222]">
+              {(issues.data ?? []).map((issue) => (
+                <div key={issue.id} className="p-3 flex flex-col gap-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-[13px] min-w-0">
                       <span className="font-medium text-[#EAEAEA]">{agentName(issue.agent)}</span>
                       <span className="text-[#929292]"> · {issue.tool_name}</span>
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant="warning">{categoryLabels[issue.category] ?? issue.category}</Badge>
-                    </TableCell>
-                    <TableCell className="text-[12px] text-[#DCDCDC] max-w-[320px] break-words">
-                      {issue.description || '—'}
-                    </TableCell>
-                    <TableCell className="text-[11px] text-[#929292] tabular-nums whitespace-nowrap">
+                    </div>
+                    <Badge variant="warning">{categoryLabels[issue.category] ?? issue.category}</Badge>
+                  </div>
+                  <div className="text-[12px] text-[#DCDCDC] break-words">
+                    {issue.description || '—'}
+                  </div>
+                  <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-[#1E1E1E]">
+                    <span className="text-[11px] text-[#929292] tabular-nums">
                       №{issue.owner_id} · ×{issue.occurrences} · {new Date(issue.updated_at).toLocaleString()}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <Button size="xs" variant="outline" disabled={resolve.isPending} onClick={() => resolve.mutate(issue.id)}>
-                        Закрыть
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </TableContainer>
+                    </span>
+                    <Button size="xs" variant="outline" disabled={resolve.isPending} onClick={() => resolve.mutate(issue.id)}>
+                      Закрыть
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="hidden md:block">
+              <TableContainer>
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Агент / Инструмент</TableHead>
+                      <TableHead>Категория</TableHead>
+                      <TableHead>Описание</TableHead>
+                      <TableHead>Контекст</TableHead>
+                      <TableHead className="text-right">Действие</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {(issues.data ?? []).map((issue) => (
+                      <TableRow key={issue.id}>
+                        <TableCell className="whitespace-nowrap">
+                          <span className="font-medium text-[#EAEAEA]">{agentName(issue.agent)}</span>
+                          <span className="text-[#929292]"> · {issue.tool_name}</span>
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant="warning">{categoryLabels[issue.category] ?? issue.category}</Badge>
+                        </TableCell>
+                        <TableCell className="text-[12px] text-[#DCDCDC] max-w-[320px] break-words">
+                          {issue.description || '—'}
+                        </TableCell>
+                        <TableCell className="text-[11px] text-[#929292] tabular-nums whitespace-nowrap">
+                          №{issue.owner_id} · ×{issue.occurrences} · {new Date(issue.updated_at).toLocaleString()}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <Button size="xs" variant="outline" disabled={resolve.isPending} onClick={() => resolve.mutate(issue.id)}>
+                            Закрыть
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+            </div>
+          </>
         )}
         {resolve.error && <Notice tone="error">{resolve.error.message}</Notice>}
       </section>

@@ -1,4 +1,5 @@
-import { ExternalLink, MoreHorizontal, Pencil, Trash2 } from 'lucide-react';
+import { useState } from 'react';
+import { ArrowUpRight, Bot, CalendarPlus, ExternalLink, MoreHorizontal, Pencil, Trash2 } from 'lucide-react';
 import dayjs from 'dayjs';
 import { priorities, statuses } from './TaskForm';
 import { DeadlineRisk } from './RankingAssessment';
@@ -13,8 +14,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { SelectField } from '@/components/ui/select';
 import { Badge } from '@/components/ui/surface';
-import { HintTooltip } from '@/components/ui/tooltip';
-import { LAYOUT_TRANSITION, motion, useReducedMotion } from '@/lib/motion';
+import { CollapseSection, LAYOUT_TRANSITION, motion, useReducedMotion } from '@/lib/motion';
 
 const priorityVariant = { high: 'danger', medium: 'warning', low: 'default' };
 
@@ -24,6 +24,7 @@ export default function TaskCard({
   completing,
   busy,
   removing,
+  arrodesEnabled = false,
   position,
   assessment,
   onUpdate,
@@ -32,6 +33,7 @@ export default function TaskCard({
   overdue,
 }) {
   const reduced = useReducedMotion();
+  const [reasonOpen, setReasonOpen] = useState(false);
   let context = {};
   try {
     context = JSON.parse(task.ai_details || '{}');
@@ -55,11 +57,22 @@ export default function TaskCard({
       <div className="flex items-start justify-between gap-2">
         <div className="flex flex-wrap items-center gap-1.5 min-w-0">
           {position != null && (
-            <HintTooltip label={assessment?.reason}>
-              <Badge variant="accent" className="tabular-nums cursor-help">
+            assessment?.reason ? (
+              <button
+                type="button"
+                onClick={() => setReasonOpen((v) => !v)}
+                aria-expanded={reasonOpen}
+                className="inline-flex cursor-pointer"
+              >
+                <Badge variant="accent" className="tabular-nums">
+                  #{String(position).padStart(2, '0')}
+                </Badge>
+              </button>
+            ) : (
+              <Badge variant="accent" className="tabular-nums">
                 #{String(position).padStart(2, '0')}
               </Badge>
-            </HintTooltip>
+            )
           )}
           <Badge variant={priorityVariant[task.priority] ?? 'default'}>
             {priorities.find((item) => item.value === task.priority)?.label}
@@ -79,8 +92,19 @@ export default function TaskCard({
           </DropdownMenuTrigger>
           <DropdownMenuContent>
             <DropdownMenuItem asChild>
-              <a href={`/?task=${task.id}`}>Открыть</a>
+              <a href={`/?task=${task.id}`}>
+                <ArrowUpRight className="h-3.5 w-3.5" />
+                Открыть
+              </a>
             </DropdownMenuItem>
+            {!archived && arrodesEnabled && (
+              <DropdownMenuItem asChild>
+                <a href={`/?task=${task.id}&tab=arrodes`}>
+                  <Bot className="h-3.5 w-3.5" />
+                  Поручить Arrodes
+                </a>
+              </DropdownMenuItem>
+            )}
             {!archived && (
               <DropdownMenuItem onClick={onEdit}>
                 <Pencil className="h-3.5 w-3.5" />
@@ -89,7 +113,10 @@ export default function TaskCard({
             )}
             {!archived && (
               <DropdownMenuItem asChild>
-                <a href={`/calendar?add_task=${task.id}`}>В календарь</a>
+                <a href={`/calendar?add_task=${task.id}`}>
+                  <CalendarPlus className="h-3.5 w-3.5" />
+                  В календарь
+                </a>
               </DropdownMenuItem>
             )}
             {archived && (
@@ -106,19 +133,28 @@ export default function TaskCard({
         </DropdownMenu>
       </div>
 
-      <div className="flex items-start gap-2.5 min-w-0">
-        <Checkbox
-          className="mt-0.5"
-          aria-label={`Выполнено: ${task.title}`}
-          checked={done}
-          disabled={busy || archived}
-          onCheckedChange={(checked) => onUpdate({ status: checked ? 'done' : 'todo' })}
-        />
+      {assessment?.reason && (
+        <CollapseSection open={reasonOpen}>
+          <div className="border-l-2 border-[#7F49B4] pl-2 py-0.5 text-[12px] text-[#CFCFCF] break-words">
+            {assessment.reason}
+          </div>
+        </CollapseSection>
+      )}
+
+      <div className="flex items-start gap-3 min-w-0">
+        <div className="pt-0.5 shrink-0">
+          <Checkbox
+            aria-label={`Выполнено: ${task.title}`}
+            checked={done}
+            disabled={busy || archived}
+            onCheckedChange={(checked) => onUpdate({ status: checked ? 'done' : 'todo' })}
+          />
+        </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-start gap-1 min-w-0">
             <a
               href={`/?task=${task.id}`}
-              className={`text-[14px] font-medium leading-snug break-words hover:text-[#CFA9F5] ${done ? 'line-through text-[#929292]' : 'text-[#EAEAEA]'}`}
+              className={`block py-0.5 text-[14px] font-medium leading-snug break-words hover:text-[#CFA9F5] ${done ? 'line-through text-[#929292]' : 'text-[#EAEAEA]'}`}
             >
               {task.title}
             </a>
@@ -157,13 +193,13 @@ export default function TaskCard({
       )}
 
       <div className="flex items-center justify-between gap-2 pt-1.5 border-t border-[#202020]">
-        <span className={`text-[12px] tabular-nums ${overdue ? 'text-[#D46A6A] font-medium' : 'text-[#929292]'}`}>
+        <span className={`min-w-0 truncate text-[12px] tabular-nums ${overdue ? 'text-[#D46A6A] font-medium' : 'text-[#929292]'}`}>
           {task.deadline ? dayjs.utc(task.deadline).local().format('DD MMM · HH:mm') : 'Без срока'}
         </span>
         {!archived ? (
           <SelectField
             size="sm"
-            className="w-[140px]"
+            className="w-[140px] shrink-0"
             ariaLabel={`Статус: ${task.title}`}
             value={done ? 'done' : task.status}
             options={statuses}

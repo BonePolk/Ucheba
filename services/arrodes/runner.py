@@ -195,7 +195,7 @@ async def check(body=None):
                 await thread.run('Ответь только OK.')
             return {'ok': True}
 
-        async with open_codex(
+        async with scratch_env(writable=False) as (work_dir, shell_policy), open_codex(
             'Arrodes',
             auth_mode='api_key',
             api_key=api_key,
@@ -203,7 +203,7 @@ async def check(body=None):
             allow_shell=False,
             web_search='disabled',
             cwd=home(),
-        ) as (current, thread_provider), scratch_env(writable=False) as (work_dir, shell_policy):
+        ) as (current, thread_provider):
             thread = await current.thread_start(
                 cwd=str(work_dir),
                 sandbox=sandbox,
@@ -336,7 +336,7 @@ async def execute(run_id, payload, progress, auth=None, options=None):
                 and (auth_mode != 'api_key' or previous.get('base_url') == base_url)
             )
 
-            async with open_codex(
+            async with scratch_env(writable=True) as (_, shell_policy), serve_mcp(adapter) as mcp_config, open_codex(
                 'Arrodes',
                 auth_mode=auth_mode,
                 api_key=api_key,
@@ -344,7 +344,7 @@ async def execute(run_id, payload, progress, auth=None, options=None):
                 allow_shell=allow_shell,
                 web_search=web_search_mode,
                 cwd=path,
-            ) as (current, thread_provider), scratch_env(writable=True) as (_, shell_policy), serve_mcp(adapter) as mcp_config:
+            ) as (current, thread_provider):
                 options = dict(
                     cwd=str(path),
                     sandbox=sandbox,

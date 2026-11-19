@@ -309,7 +309,7 @@ export default function AgentTimeline({
               }}
             >
               {/* Left period date/load rail */}
-              <div className="flex flex-row md:flex-col items-center md:items-start justify-between md:justify-start gap-1.5 min-w-0">
+              <div className="flex flex-row flex-wrap md:flex-col items-center md:items-start justify-between md:justify-start gap-1.5 min-w-0">
                 <div className="flex flex-wrap items-center gap-1.5">
                   <span className="text-[13px] font-semibold text-[#EAEAEA]">
                     {formatDateRange(period.start_date, period.end_date)}
@@ -333,7 +333,7 @@ export default function AgentTimeline({
                   <div className="text-[13px] font-semibold text-[#EAEAEA] min-w-0 break-words">
                     {period.title}
                   </div>
-                  <div className="flex items-center gap-1 shrink-0">
+                  <div className="flex flex-wrap items-center gap-1 shrink-0">
                     {hasDetails && (
                       <Button
                         size="xs"
@@ -426,13 +426,13 @@ export default function AgentTimeline({
                               </div>
                               {task.goal && (
                                 <HintTooltip label={task.goal}>
-                                  <div className="text-[11px] text-[#929292] mt-0.5 line-clamp-1">{task.goal}</div>
+                                  <div className="text-[11px] text-[#929292] mt-0.5 line-clamp-2 sm:line-clamp-1">{task.goal}</div>
                                 </HintTooltip>
                               )}
                             </div>
 
                             {(onFeedback || onAdjust) && (
-                              <div className="flex items-center gap-1 shrink-0">
+                              <div className="flex items-center gap-1 shrink-0 max-sm:w-full max-sm:justify-between max-sm:pt-1">
                                 {onFeedback && (
                                   <DropdownMenu>
                                     <DropdownMenuTrigger asChild>
@@ -498,7 +498,7 @@ export default function AgentTimeline({
                                   placeholder={activeOutcome?.optionalMinutes ? 'необяз.' : 'Минуты'}
                                   value={customMinutes}
                                   onChange={(event) => setCustomMinutes(event.currentTarget.value)}
-                                  className="w-[92px] h-[25px] text-[12px]"
+                                  className="w-[92px] max-md:w-[104px] h-[25px] text-[12px]"
                                 />
                                 <Button size="xs" variant="outline" onClick={() => submitDraft(30)}>30 мин</Button>
                                 <Button size="xs" variant="outline" onClick={() => submitDraft(60)}>1 ч</Button>
@@ -520,7 +520,7 @@ export default function AgentTimeline({
                                   placeholder="Минуты"
                                   value={estimateInput}
                                   onChange={(event) => setEstimateInput(event.currentTarget.value)}
-                                  className="w-[90px] h-[25px] text-[12px]"
+                                  className="w-[90px] max-md:w-[104px] h-[25px] text-[12px]"
                                 />
                                 <Button
                                   size="xs"

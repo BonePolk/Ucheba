@@ -128,7 +128,7 @@ export function AmebaSummaryBar({ ranking, queue, rank, livePlan, onRefresh }) {
         ) : null}
       </div>
 
-      <div className="flex items-center gap-1.5 shrink-0">
+      <div className="flex items-center gap-1.5 shrink-0 max-sm:w-full">
         {rank?.data?.unchanged && (
           <span className="text-[11px] text-[#929292] hidden xl:inline">План актуален</span>
         )}
@@ -139,10 +139,11 @@ export function AmebaSummaryBar({ ranking, queue, rank, livePlan, onRefresh }) {
           loading={rank?.isPending && !queue?.data?.ameba_running}
           disabled={isRunning || queue?.data?.browser_busy}
           onClick={onRefresh}
+          className="max-sm:flex-1"
         >
           {actionLabel}
         </Button>
-        <Button size="sm" variant="accent-subtle" asChild>
+        <Button size="sm" variant="accent-subtle" asChild className="max-sm:flex-1">
           <a href="/ameba">
             План
             <ArrowRight className="h-3 w-3" />
@@ -195,8 +196,6 @@ function LoadAnalysisTab({ daily = [], previewDays = [], onAdjust, busy }) {
       ? sourceDays.slice(7, 14)
       : sourceDays;
 
-  const activeDay = selectedDate ? visibleDays.find((d) => d.date === selectedDate) ?? null : null;
-
   const totalBusy = visibleDays.reduce((sum, d) => sum + (d.busy_minutes || 0), 0);
   const totalStudy = visibleDays.reduce((sum, d) => sum + (d.allocated_minutes || 0), 0);
   const totalPlannable = visibleDays.reduce((sum, d) => sum + (d.plannable_minutes || 0), 0);
@@ -247,139 +246,149 @@ function LoadAnalysisTab({ daily = [], previewDays = [], onAdjust, busy }) {
           const freeStudyM = Math.max(0, plannableM - studyM);
           const restM = Math.max(0, 1440 - busyM - studyM - freeStudyM - reserveM);
           const load = LOAD_LABELS[day.load_level] || LOAD_LABELS.medium;
-          const selected = activeDay?.date === day.date;
+          const selected = selectedDate === day.date;
 
           return (
-            <div
-              key={day.date}
-              className={`grid grid-cols-1 lg:grid-cols-[155px_minmax(0,1fr)_120px_170px_135px] items-center gap-2.5 px-3 py-2 cursor-pointer transition-colors ${selected ? 'bg-[#17141D]' : 'hover:bg-[#151515]'}`}
-              onClick={() => setSelectedDate((prev) => (prev === day.date ? null : day.date))}
-            >
-              <div className="flex items-center justify-between lg:justify-start gap-2">
-                <span className="text-[12px] font-semibold text-[#EAEAEA] tabular-nums">
-                  {formatShortDate(day.date)} · {wd}
-                </span>
-                <Badge variant={load.variant}>{load.label}</Badge>
+            <div key={day.date} className={selected ? 'bg-[#17141D]' : ''}>
+              <div
+                className={`grid grid-cols-1 lg:grid-cols-[155px_minmax(0,1fr)_120px_170px_135px] items-center gap-2.5 px-3 py-2 cursor-pointer transition-colors ${selected ? '' : 'hover:bg-[#151515]'}`}
+                onClick={() => setSelectedDate((prev) => (prev === day.date ? null : day.date))}
+              >
+                <div className="flex items-center justify-between lg:justify-start gap-2">
+                  <span className="text-[12px] font-semibold text-[#EAEAEA] tabular-nums">
+                    {formatShortDate(day.date)} · {wd}
+                  </span>
+                  <Badge variant={load.variant}>{load.label}</Badge>
+                </div>
+
+                <div className="h-3.5 max-md:h-4 w-full bg-[#0A0A0A] border border-[#262626] flex overflow-hidden">
+                  {busyM > 0 && (
+                    <HintTooltip label={`Постоянные дела: ${durationLabel(busyM)}`}>
+                      <motion.div
+                        initial={false}
+                        animate={{ width: `${(busyM / 1440) * 100}%` }}
+                        transition={barTransition}
+                        style={{ background: calendarColors.busy }}
+                      />
+                    </HintTooltip>
+                  )}
+                  {studyM > 0 && (
+                    <HintTooltip label={`Учёба (Ameba): ${durationLabel(studyM)}`}>
+                      <motion.div
+                        initial={false}
+                        animate={{ width: `${(studyM / 1440) * 100}%` }}
+                        transition={barTransition}
+                        style={{ background: day.load_level === 'overload' ? '#c93b3b' : calendarColors.task }}
+                      />
+                    </HintTooltip>
+                  )}
+                  {freeStudyM > 0 && (
+                    <HintTooltip label={`Свободный запас: ${durationLabel(freeStudyM)}`}>
+                      <motion.div
+                        initial={false}
+                        animate={{ width: `${(freeStudyM / 1440) * 100}%` }}
+                        transition={barTransition}
+                        style={{ background: calendarColors.break }}
+                      />
+                    </HintTooltip>
+                  )}
+                  {reserveM > 0 && (
+                    <HintTooltip label={`Защищённый резерв: ${durationLabel(reserveM)}`}>
+                      <motion.div
+                        initial={false}
+                        animate={{ width: `${(reserveM / 1440) * 100}%` }}
+                        transition={barTransition}
+                        style={{ background: '#454545' }}
+                      />
+                    </HintTooltip>
+                  )}
+                  {restM > 0 && (
+                    <HintTooltip label={`Сон и отдых: ${durationLabel(restM)}`}>
+                      <motion.div
+                        initial={false}
+                        animate={{ width: `${(restM / 1440) * 100}%` }}
+                        transition={barTransition}
+                        style={{ background: '#181818' }}
+                      />
+                    </HintTooltip>
+                  )}
+                </div>
+
+                <div className="flex items-center justify-between gap-2 lg:contents">
+                  <div className="text-[11px] text-[#B8B8B8] tabular-nums whitespace-nowrap">
+                    <span className="lg:hidden text-[#7D7D7D]">План / доступно: </span>
+                    {durationLabel(studyM)} / {durationLabel(plannableM)}
+                  </div>
+
+                  <div className="hidden lg:block text-[11px] text-[#929292] truncate">
+                    {day.tasks?.length ? day.tasks.map((t) => `${t.title} (${t.hours_label})`).join(', ') : '—'}
+                  </div>
+
+                  <div onClick={(event) => event.stopPropagation()}>
+                    {onAdjust && (
+                      <SelectField
+                        size="sm"
+                        variant="ghost"
+                        className="max-lg:border-[#303030] max-lg:bg-[#0D0D0D] max-lg:w-[140px]"
+                        ariaLabel={`Режим дня ${day.date}`}
+                        value={day.mode || 'auto'}
+                        options={DAY_MODES}
+                        disabled={busy}
+                        onChange={(mode) => onAdjust({ day_overrides: { [day.date]: mode } })}
+                      />
+                    )}
+                  </div>
+                </div>
+
+                {day.tasks?.length > 0 && (
+                  <div className="lg:hidden text-[11px] text-[#929292] truncate">
+                    {day.tasks.map((t) => `${t.title} (${t.hours_label})`).join(', ')}
+                  </div>
+                )}
               </div>
 
-              <div className="h-3.5 w-full bg-[#0A0A0A] border border-[#262626] flex overflow-hidden">
-                {busyM > 0 && (
-                  <HintTooltip label={`Постоянные дела: ${durationLabel(busyM)}`}>
-                    <motion.div
-                      initial={false}
-                      animate={{ width: `${(busyM / 1440) * 100}%` }}
-                      transition={barTransition}
-                      style={{ background: calendarColors.busy }}
-                    />
-                  </HintTooltip>
+              <CollapseSection open={selected}>
+                {selected && (
+                  <div className="border-t border-[#222222] bg-[#0D0D0D] px-3 py-2.5 flex flex-col gap-2 text-[12px]">
+                    <div className="flex items-center justify-between gap-2 border-b border-[#1E1E1E] pb-1.5">
+                      <span className="font-semibold text-[#EAEAEA]">
+                        {formatShortDate(day.date)} · {wd} · работа {durationLabel(day.allocated_minutes)}
+                      </span>
+                      <IconButton size="icon-sm" variant="ghost" aria-label="Закрыть детали дня" onClick={() => setSelectedDate(null)}>
+                        <X className="h-3.5 w-3.5" />
+                      </IconButton>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div className="flex flex-col gap-1">
+                        {day.tasks?.length ? (
+                          day.tasks.map((item) => (
+                            <div key={item.task_id} className="flex items-center justify-between gap-2 border-l-2 border-[#7F49B4] pl-2 py-0.5">
+                              <a href={`/?task=${item.task_id}`} className="truncate hover:underline">{item.title}</a>
+                              <span className="text-[#B8B8B8] tabular-nums shrink-0">{item.hours_label}</span>
+                            </div>
+                          ))
+                        ) : (
+                          <div className="text-[#929292]">Нет назначенных задач</div>
+                        )}
+                      </div>
+                      <div className="flex flex-col gap-1">
+                        <div className="text-[#929292]">
+                          События ({day.commitments?.length ?? 0}) · своб. {durationLabel(day.physical_free_minutes)}
+                        </div>
+                        {day.commitments?.map((c, idx) => (
+                          <div key={`${c.id}-${idx}`} className="text-[#929292] tabular-nums">
+                            {c.all_day ? 'Весь день' : `${c.start}–${c.end}`} · <span className="text-[#DCDCDC]">{c.title}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
                 )}
-                {studyM > 0 && (
-                  <HintTooltip label={`Учёба (Ameba): ${durationLabel(studyM)}`}>
-                    <motion.div
-                      initial={false}
-                      animate={{ width: `${(studyM / 1440) * 100}%` }}
-                      transition={barTransition}
-                      style={{ background: day.load_level === 'overload' ? '#c93b3b' : calendarColors.task }}
-                    />
-                  </HintTooltip>
-                )}
-                {freeStudyM > 0 && (
-                  <HintTooltip label={`Свободный запас: ${durationLabel(freeStudyM)}`}>
-                    <motion.div
-                      initial={false}
-                      animate={{ width: `${(freeStudyM / 1440) * 100}%` }}
-                      transition={barTransition}
-                      style={{ background: calendarColors.break }}
-                    />
-                  </HintTooltip>
-                )}
-                {reserveM > 0 && (
-                  <HintTooltip label={`Защищённый резерв: ${durationLabel(reserveM)}`}>
-                    <motion.div
-                      initial={false}
-                      animate={{ width: `${(reserveM / 1440) * 100}%` }}
-                      transition={barTransition}
-                      style={{ background: '#454545' }}
-                    />
-                  </HintTooltip>
-                )}
-                {restM > 0 && (
-                  <HintTooltip label={`Сон и отдых: ${durationLabel(restM)}`}>
-                    <motion.div
-                      initial={false}
-                      animate={{ width: `${(restM / 1440) * 100}%` }}
-                      transition={barTransition}
-                      style={{ background: '#181818' }}
-                    />
-                  </HintTooltip>
-                )}
-              </div>
-
-              <div className="text-[11px] text-[#B8B8B8] tabular-nums whitespace-nowrap">
-                <span className="lg:hidden text-[#7D7D7D]">План / доступно: </span>
-                {durationLabel(studyM)} / {durationLabel(plannableM)}
-              </div>
-
-              <div className="text-[11px] text-[#929292] truncate">
-                {day.tasks?.length ? day.tasks.map((t) => `${t.title} (${t.hours_label})`).join(', ') : '—'}
-              </div>
-
-              <div onClick={(event) => event.stopPropagation()}>
-                {onAdjust && (
-                  <SelectField
-                    size="sm"
-                    variant="ghost"
-                    ariaLabel={`Режим дня ${day.date}`}
-                    value={day.mode || 'auto'}
-                    options={DAY_MODES}
-                    disabled={busy}
-                    onChange={(mode) => onAdjust({ day_overrides: { [day.date]: mode } })}
-                  />
-                )}
-              </div>
+              </CollapseSection>
             </div>
           );
         })}
       </div>
-
-      <CollapseSection open={Boolean(activeDay)}>
-        {activeDay && (
-          <div className="border border-[#303030] bg-[#111111] p-3 flex flex-col gap-2 text-[12px]">
-            <div className="flex items-center justify-between gap-2 border-b border-[#222222] pb-1.5">
-              <span className="font-semibold text-[#EAEAEA]">
-                {formatShortDate(activeDay.date)} · {WEEKDAYS_RU[parseIsoDate(activeDay.date).getUTCDay()]} · работа {durationLabel(activeDay.allocated_minutes)}
-              </span>
-              <IconButton size="icon-sm" variant="ghost" aria-label="Закрыть детали дня" onClick={() => setSelectedDate(null)}>
-                <X className="h-3.5 w-3.5" />
-              </IconButton>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <div className="flex flex-col gap-1">
-                {activeDay.tasks?.length ? (
-                  activeDay.tasks.map((item) => (
-                    <div key={item.task_id} className="flex items-center justify-between gap-2 border-l-2 border-[#7F49B4] pl-2 py-0.5">
-                      <a href={`/?task=${item.task_id}`} className="truncate hover:underline">{item.title}</a>
-                      <span className="text-[#B8B8B8] tabular-nums shrink-0">{item.hours_label}</span>
-                    </div>
-                  ))
-                ) : (
-                  <div className="text-[#929292]">Нет назначенных задач</div>
-                )}
-              </div>
-              <div className="flex flex-col gap-1">
-                <div className="text-[#929292]">
-                  События ({activeDay.commitments?.length ?? 0}) · своб. {durationLabel(activeDay.physical_free_minutes)}
-                </div>
-                {activeDay.commitments?.map((c, idx) => (
-                  <div key={`${c.id}-${idx}`} className="text-[#929292] tabular-nums">
-                    {c.all_day ? 'Весь день' : `${c.start}–${c.end}`} · <span className="text-[#DCDCDC]">{c.title}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
-      </CollapseSection>
     </div>
   );
 }
@@ -436,7 +445,7 @@ function PriorityTasksTab({ reasons = [], timeline = [], taskIds = [], manualOve
 
               <div className="shrink-0">
                 {editingThis ? (
-                  <div className="inline-flex items-center gap-1">
+                  <div className="inline-flex flex-wrap items-center gap-1">
                     <Input
                       type="number"
                       min={0}
@@ -444,7 +453,7 @@ function PriorityTasksTab({ reasons = [], timeline = [], taskIds = [], manualOve
                       placeholder="Минуты"
                       value={estimateMinutes}
                       onChange={(event) => setEstimateMinutes(event.currentTarget.value)}
-                      className="w-[82px] h-[26px] text-[12px]"
+                      className="w-[88px] max-md:w-[100px] h-[26px] text-[12px]"
                     />
                     <Button
                       size="xs"
@@ -538,6 +547,7 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
   const queryClient = useQueryClient();
   const [tab, setTab] = useState('periods');
   const [logOpen, setLogOpen] = useState(false);
+  const [mobileRisksOpen, setMobileRisksOpen] = useState(false);
   const [wishText, setWishText] = useState('');
   const [submittedWish, setSubmittedWish] = useState('');
   const [wishSuccess, setWishSuccess] = useState(false);
@@ -803,7 +813,7 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
             variant="primary"
             disabled={!wishText.trim() || clearPlan.isPending || queue.data?.browser_busy}
             onClick={submitWish}
-            className="shrink-0"
+            className="shrink-0 max-sm:w-full"
           >
             Учесть в плане
           </Button>
@@ -920,75 +930,9 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
       )}
 
       {/* Tabs + Conditional Risks Sidebar */}
-      <div className={hasSidebar ? 'grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_300px] gap-4 items-start' : 'grid grid-cols-1'}>
-        <Tabs value={tab} onValueChange={setTab} className="min-w-0">
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#303030]">
-            <TabsList className="border-b-0">
-              <TabsTrigger value="periods">План по дням</TabsTrigger>
-              <TabsTrigger value="tasks">
-                Приоритет задач{data?.ranked_count != null ? ` (${data.ranked_count})` : ''}
-              </TabsTrigger>
-              <TabsTrigger value="load">Нагрузка по дням</TabsTrigger>
-              <TabsTrigger value="memory">Память ({memoryCount})</TabsTrigger>
-            </TabsList>
-          </div>
-
-          <TabsContent value="periods">
-            <TabTransition transitionKey="periods">
-              <AgentTimeline
-                tasks={activeTimeline}
-                schedule={activeSchedule ?? data?.calendar_schedule}
-                calendarOnly={!activeSchedule}
-                finished={!livePlan.data?.running && !queue.data?.ameba_running}
-                busy={feedback.isPending || adjustPlan.isPending || rank.isPending}
-                onFeedback={(payload) => feedback.mutate(payload)}
-                onAdjust={(payload) => adjustPlan.mutate(payload)}
-                taskPins={manual.task_pins ?? {}}
-                estimateOverrides={manual.estimate_overrides ?? {}}
-                onRefresh={() => rank.mutate()}
-                hideConflicts={hasSidebar}
-              />
-            </TabTransition>
-          </TabsContent>
-
-          <TabsContent value="tasks">
-            <TabTransition transitionKey="tasks">
-              <PriorityTasksTab
-                reasons={data?.reasons ?? []}
-                timeline={activeTimeline}
-                taskIds={data?.task_ids ?? []}
-                manualOverrides={manual.estimate_overrides ?? {}}
-                onAdjust={(payload) => adjustPlan.mutate(payload)}
-                busy={adjustPlan.isPending || isRunning}
-              />
-            </TabTransition>
-          </TabsContent>
-
-          <TabsContent value="load">
-            <TabTransition transitionKey="load">
-              <LoadAnalysisTab
-                daily={activeSchedule?.daily_allocations ?? []}
-                previewDays={data?.calendar_schedule?.days_summary ?? []}
-                onAdjust={(payload) => adjustPlan.mutate(payload)}
-                busy={adjustPlan.isPending || isRunning}
-              />
-            </TabTransition>
-          </TabsContent>
-
-          <TabsContent value="memory">
-            <TabTransition transitionKey="memory">
-              <div className="flex flex-col gap-3">
-                <p className="text-[12px] text-[#929292] m-0">
-                  Устойчивые факты и предпочтения, которые учитывает Ameba и другие агенты. Разовые пожелания сохраняются сюда.
-                </p>
-                <AgentMemory />
-              </div>
-            </TabTransition>
-          </TabsContent>
-        </Tabs>
-
-        {hasSidebar && (
-          <aside className="flex flex-col gap-3">
+      {(() => {
+        const risksContent = hasSidebar ? (
+          <>
             {unfitted.length > 0 && (
               <div className="border border-[#303030] bg-[#111111] p-3 flex flex-col gap-2">
                 <SectionHeader title="Не поместилось" meta={`${unfitted.length}`} />
@@ -1022,9 +966,112 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
                 </div>
               </div>
             )}
-          </aside>
-        )}
-      </div>
+          </>
+        ) : null;
+
+        const riskParts = [
+          unfitted.length > 0 ? `Не поместилось: ${unfitted.length}` : null,
+          conflicts.length > 0 ? `Риски сроков: ${conflicts.length}` : null,
+        ].filter(Boolean);
+
+        return (
+          <div className={hasSidebar ? 'grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_300px] gap-4 items-start' : 'grid grid-cols-1'}>
+            {hasSidebar && (
+              <div className="xl:hidden flex flex-col gap-2">
+                <button
+                  type="button"
+                  aria-expanded={mobileRisksOpen}
+                  onClick={() => setMobileRisksOpen((prev) => !prev)}
+                  className="w-full border border-[#4A391D] border-l-2 border-l-[#D4A24C] bg-[#1B160D] px-3 py-2 flex items-center justify-between gap-2 text-left text-[12px] text-[#EAEAEA] cursor-pointer"
+                >
+                  <span className="inline-flex items-center gap-2 min-w-0 font-medium">
+                    <AlertTriangle className="h-3.5 w-3.5 text-[#D4A24C] shrink-0" aria-hidden="true" />
+                    <span className="truncate">{riskParts.join(' · ')}</span>
+                  </span>
+                  {mobileRisksOpen ? <ChevronDown className="h-4 w-4 text-[#929292] shrink-0" /> : <ChevronRight className="h-4 w-4 text-[#929292] shrink-0" />}
+                </button>
+                <CollapseSection open={mobileRisksOpen}>
+                  <div className="flex flex-col gap-3">
+                    {risksContent}
+                  </div>
+                </CollapseSection>
+              </div>
+            )}
+
+            <Tabs value={tab} onValueChange={setTab} className="min-w-0">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#303030]">
+                <TabsList className="border-b-0">
+                  <TabsTrigger value="periods">План по дням</TabsTrigger>
+                  <TabsTrigger value="tasks">
+                    Приоритет задач{data?.ranked_count != null ? ` (${data.ranked_count})` : ''}
+                  </TabsTrigger>
+                  <TabsTrigger value="load">Нагрузка по дням</TabsTrigger>
+                  <TabsTrigger value="memory">Память ({memoryCount})</TabsTrigger>
+                </TabsList>
+              </div>
+
+              <TabsContent value="periods">
+                <TabTransition transitionKey="periods">
+                  <AgentTimeline
+                    tasks={activeTimeline}
+                    schedule={activeSchedule ?? data?.calendar_schedule}
+                    calendarOnly={!activeSchedule}
+                    finished={!livePlan.data?.running && !queue.data?.ameba_running}
+                    busy={feedback.isPending || adjustPlan.isPending || rank.isPending}
+                    onFeedback={(payload) => feedback.mutate(payload)}
+                    onAdjust={(payload) => adjustPlan.mutate(payload)}
+                    taskPins={manual.task_pins ?? {}}
+                    estimateOverrides={manual.estimate_overrides ?? {}}
+                    onRefresh={() => rank.mutate()}
+                    hideConflicts={hasSidebar}
+                  />
+                </TabTransition>
+              </TabsContent>
+
+              <TabsContent value="tasks">
+                <TabTransition transitionKey="tasks">
+                  <PriorityTasksTab
+                    reasons={data?.reasons ?? []}
+                    timeline={activeTimeline}
+                    taskIds={data?.task_ids ?? []}
+                    manualOverrides={manual.estimate_overrides ?? {}}
+                    onAdjust={(payload) => adjustPlan.mutate(payload)}
+                    busy={adjustPlan.isPending || isRunning}
+                  />
+                </TabTransition>
+              </TabsContent>
+
+              <TabsContent value="load">
+                <TabTransition transitionKey="load">
+                  <LoadAnalysisTab
+                    daily={activeSchedule?.daily_allocations ?? []}
+                    previewDays={data?.calendar_schedule?.days_summary ?? []}
+                    onAdjust={(payload) => adjustPlan.mutate(payload)}
+                    busy={adjustPlan.isPending || isRunning}
+                  />
+                </TabTransition>
+              </TabsContent>
+
+              <TabsContent value="memory">
+                <TabTransition transitionKey="memory">
+                  <div className="flex flex-col gap-3">
+                    <p className="text-[12px] text-[#929292] m-0">
+                      Устойчивые факты и предпочтения, которые учитывает Ameba и другие агенты. Разовые пожелания сохраняются сюда.
+                    </p>
+                    <AgentMemory />
+                  </div>
+                </TabTransition>
+              </TabsContent>
+            </Tabs>
+
+            {hasSidebar && (
+              <aside className="hidden xl:flex flex-col gap-3">
+                {risksContent}
+              </aside>
+            )}
+          </div>
+        );
+      })()}
     </div>
   );
 }

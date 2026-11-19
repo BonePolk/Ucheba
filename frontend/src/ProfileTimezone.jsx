@@ -29,7 +29,7 @@ export default function ProfileTimezone() {
     <section className="border border-[#303030] bg-[#111111] p-3.5 flex flex-col gap-2.5">
       <SectionHeader title="Часовой пояс" />
       <div className="flex flex-wrap items-end gap-2">
-        <Field label="Пояс для расписания и сроков" className="flex-1 min-w-[200px]">
+        <Field label="Пояс для расписания и сроков" className="w-full min-w-0 sm:flex-1 sm:min-w-[200px]">
           <Combobox
             placeholder="Europe/Moscow"
             searchPlaceholder="Поиск часового пояса…"
@@ -42,6 +42,7 @@ export default function ProfileTimezone() {
         </Field>
         <Button
           variant="primary"
+          className="max-sm:w-full"
           disabled={draft === null || !draft.trim() || current.isError}
           loading={save.isPending}
           onClick={() => save.mutate()}

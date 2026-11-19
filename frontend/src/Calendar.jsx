@@ -81,6 +81,7 @@ function layout(events) {
 export default function Calendar({ features = {} }) {
   const client = useQueryClient();
   const compact = useMediaQuery('(max-width: 767px)', typeof window !== 'undefined' ? window.innerWidth < 768 : false);
+  const wideDesktop = useMediaQuery('(min-width: 1280px)', typeof window !== 'undefined' ? window.innerWidth >= 1280 : true);
   const [date, setDate] = useState(() => dateKey(new Date()));
   const [selectedDay, setSelectedDay] = useState(() => dateKey(new Date()));
   const [view, setView] = useState('week');
@@ -191,7 +192,7 @@ export default function Calendar({ features = {} }) {
       id: eventId(),
       date: day,
       start: clock(minute),
-      end: clock(Math.min(1440, minute + 60)),
+      end: clock(Math.min(1439, minute + 60)),
       title: '',
       summary: '',
       kind: 'busy',
@@ -209,12 +210,12 @@ export default function Calendar({ features = {} }) {
     const duration = minutes(event.end) - minutes(event.start);
     setEditor(
       original
-        ? { ...original, date: day === event.date ? original.date : day, start: startTime, end: clock(Math.min(1440, minutes(startTime) + duration)) }
+        ? { ...original, date: day === event.date ? original.date : day, start: startTime, end: clock(Math.min(1439, minutes(startTime) + duration)) }
         : {
           id: eventId(),
           date: day,
           start: startTime,
-          end: clock(Math.min(1440, minutes(startTime) + duration)),
+          end: clock(Math.min(1439, minutes(startTime) + duration)),
           title: event.title,
           summary: event.summary ?? '',
           task_id: event.task_id ?? null,
@@ -285,8 +286,60 @@ export default function Calendar({ features = {} }) {
   }
 
   const periodTitle = `${asDate(view === 'month' ? monthStart(date) : start).toLocaleDateString('ru-RU', view === 'month' ? { month: 'long', year: 'numeric' } : { day: 'numeric', month: 'long' })}${view === 'week' ? ` — ${asDate(end).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' })}` : ''}`;
+  const selectedDayTitle = asDate(selectedDay).toLocaleDateString('ru-RU', { weekday: 'short', day: 'numeric', month: 'long' });
   const selectedDayEvents = permanentEvents.filter((event) => event.date === selectedDay).sort((a, b) => a.start.localeCompare(b.start));
+  const selectedDayVisibleEvents = visibleEvents.filter((event) => event.date === selectedDay).sort((a, b) => a.start.localeCompare(b.start));
   const selectedDayAmeba = amebaDailyMap.get(selectedDay);
+
+  const selectedDayContent = (
+    <>
+      <div className="flex flex-col gap-1.5">
+        <div className="text-[11px] font-medium uppercase tracking-wider text-[#929292]">События</div>
+        {selectedDayEvents.length === 0 ? (
+          <div className="text-[12px] text-[#787878]">Нет событий</div>
+        ) : (
+          selectedDayEvents.map((ev) => (
+            <button
+              key={ev.id}
+              type="button"
+              onClick={() => edit(ev)}
+              className="text-left border border-[#262626] border-l-2 bg-[#0D0D0D] hover:bg-[#191919] px-2.5 py-1.5 max-md:py-2 cursor-pointer"
+              style={{ borderLeftColor: colors[ev.kind] }}
+            >
+              <div className="flex items-center justify-between gap-2 text-[11px] text-[#929292] tabular-nums">
+                <span>{ev.start}–{ev.end}</span>
+                <span>{names[ev.kind] ?? ev.kind}</span>
+              </div>
+              <div className="text-[12px] font-medium text-[#EAEAEA] break-words">{ev.title}</div>
+            </button>
+          ))
+        )}
+      </div>
+
+      {features.ameba !== false && showAmeba && (
+        <div className="border-t border-[#222222] pt-2.5 flex flex-col gap-1.5">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] font-medium uppercase tracking-wider text-[#CFA9F5]">Ameba</span>
+            <a href="/ameba" className="text-[11px] text-[#B98CE8] hover:underline">План →</a>
+          </div>
+          {selectedDayAmeba?.tasks?.length ? (
+            selectedDayAmeba.tasks.map((t) => (
+              <a
+                key={t.task_id}
+                href={`/?task=${t.task_id}`}
+                className="border border-dashed border-[#7F49B4]/60 bg-[#7F49B4]/10 px-2.5 py-1.5 flex items-center justify-between gap-2 text-[12px] hover:bg-[#7F49B4]/20"
+              >
+                <span className="truncate text-[#EAEAEA]">{t.title}</span>
+                <span className="text-[11px] text-[#CFA9F5] tabular-nums shrink-0">{t.hours_label}</span>
+              </a>
+            ))
+          ) : (
+            <div className="text-[12px] text-[#787878]">Нет задач</div>
+          )}
+        </div>
+      )}
+    </>
+  );
 
   return (
     <div className="flex flex-col gap-3">
@@ -329,18 +382,20 @@ export default function Calendar({ features = {} }) {
                 onClick={() => setShowAmeba(!showAmeba)}
                 aria-pressed={showAmeba}
               >
-                Слой Ameba
+                {compact ? 'Ameba' : 'Слой Ameba'}
               </Button>
             )}
 
-            <Button
-              variant={dayPanelOpen ? 'accent-subtle' : 'default'}
-              leftIcon={<PanelRight className="h-3.5 w-3.5" />}
-              onClick={() => setDayPanelOpen(!dayPanelOpen)}
-              aria-expanded={dayPanelOpen}
-            >
-              День
-            </Button>
+            {!compact && (
+              <Button
+                variant={dayPanelOpen ? 'accent-subtle' : 'default'}
+                leftIcon={<PanelRight className="h-3.5 w-3.5" />}
+                onClick={() => setDayPanelOpen(!dayPanelOpen)}
+                aria-expanded={dayPanelOpen}
+              >
+                День
+              </Button>
+            )}
 
             {features.straus !== false && (
               <Button
@@ -348,7 +403,7 @@ export default function Calendar({ features = {} }) {
                 leftIcon={<Bot className="h-3.5 w-3.5" />}
                 onClick={() => setStrausOpen(true)}
               >
-                {busy ? 'Straus работает…' : 'Поручить Straus'}
+                {compact ? (busy ? 'Straus…' : 'Straus') : (busy ? 'Straus работает…' : 'Поручить Straus')}
               </Button>
             )}
 
@@ -383,17 +438,163 @@ export default function Calendar({ features = {} }) {
       )}
 
       {/* Calendar grid + optional selected day panel */}
-      <div className={`grid gap-3 items-start ${dayPanelOpen ? 'grid-cols-1 xl:grid-cols-[minmax(0,1fr)_270px]' : 'grid-cols-1'}`}>
+      <div className={`grid gap-3 items-start ${dayPanelOpen && wideDesktop ? 'grid-cols-1 xl:grid-cols-[minmax(0,1fr)_270px]' : 'grid-cols-1'}`}>
         <div className="min-w-0 flex flex-col gap-2">
-          {compact ? (
+          {compact && view === 'month' ? (
+            <div className="flex flex-col gap-2.5">
+              <div className="border border-[#303030] bg-[#111111] p-1.5">
+                <div className="grid grid-cols-7 gap-1 pb-1 text-center text-[11px] font-medium text-[#929292]">
+                  {['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'].map((label) => (
+                    <div key={label}>{label}</div>
+                  ))}
+                </div>
+                <div className="grid grid-cols-7 gap-1">
+                  {days.map((day) => {
+                    const dayItems = visibleEvents.filter((event) => event.date === day && event.kind !== 'work');
+                    const dayAmeba = amebaDailyMap.get(day);
+                    const isToday = day === calendar.data?.today;
+                    const isSelected = day === selectedDay;
+                    const inMonth = day.slice(0, 7) === date.slice(0, 7);
+                    const kinds = [...new Set(dayItems.map((event) => event.kind))].slice(0, 3);
+                    return (
+                      <button
+                        key={day}
+                        type="button"
+                        onClick={() => setSelectedDay(day)}
+                        className={`min-h-[46px] p-1 flex flex-col items-center justify-between border cursor-pointer transition-colors ${
+                          isSelected
+                            ? 'border-[#7F49B4] bg-[#1B1523]'
+                            : isToday
+                              ? 'border-[#3E2C52] bg-[#7F49B4]/18'
+                              : 'border-[#202020] bg-[#0D0D0D] hover:bg-[#161616]'
+                        } ${!inMonth ? 'opacity-45' : ''}`}
+                      >
+                        <span className={`text-[13px] tabular-nums leading-none ${isToday ? 'font-bold text-[#DFC4F8]' : 'font-medium text-[#EAEAEA]'}`}>
+                          {asDate(day).getDate()}
+                        </span>
+                        <span className="flex items-center justify-center gap-0.5 min-h-[6px]">
+                          {kinds.map((kind) => (
+                            <span key={kind} className="h-1.5 w-1.5" style={{ background: colors[kind] }} />
+                          ))}
+                          {dayAmeba?.allocated_minutes > 0 && (
+                            <span className="h-1.5 w-1.5 bg-[#B98CE8]" />
+                          )}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <section className="border border-[#303030] bg-[#111111] p-2.5 flex flex-col gap-2">
+                <div className="flex items-center justify-between gap-2 border-b border-[#222222] pb-2">
+                  <div className="text-[13px] font-semibold text-[#EAEAEA]">{selectedDayTitle}</div>
+                  <Button size="xs" variant="primary" disabled={!config} onClick={() => create(selectedDay)}>
+                    + Событие
+                  </Button>
+                </div>
+
+                {selectedDayAmeba?.allocated_minutes > 0 && (
+                  <a href="/ameba" className="border border-dashed border-[#7F49B4] bg-[#7F49B4]/12 px-2.5 py-1.5 text-[12px] text-[#DFC4F8] flex items-center justify-between gap-2">
+                    <span className="truncate">Ameba · {selectedDayAmeba.tasks?.map((t) => t.title).join(', ')}</span>
+                    <span className="tabular-nums shrink-0">{Math.round((selectedDayAmeba.allocated_minutes / 60) * 10) / 10} ч</span>
+                  </a>
+                )}
+
+                {selectedDayVisibleEvents.length === 0 ? (
+                  <div className="text-[12px] text-[#787878] py-1">Нет событий</div>
+                ) : (
+                  <div className="flex flex-col gap-1.5">
+                    {selectedDayVisibleEvents.map((event) => {
+                      const isTemp = event.source === 'ameba';
+                      return (
+                        <button
+                          type="button"
+                          key={`${event.id}:${event.source ?? 'cal'}`}
+                          onClick={() => { if (!isTemp) edit(event); }}
+                          className={`text-left px-2.5 py-2 border-l-2 text-[#EAEAEA] text-[12px] ${isTemp ? 'border border-dashed border-[#7F49B4] cursor-default' : 'cursor-pointer'}`}
+                          style={{ borderLeftColor: colors[event.kind], background: calendarBlockColor(event.kind, isTemp) }}
+                        >
+                          <div className="text-[11px] opacity-80 tabular-nums">{event.start}–{event.end}</div>
+                          <div className="font-medium break-words">{event.title}</div>
+                          {event.summary && <div className="text-[11px] opacity-80">{event.summary}</div>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
+            </div>
+          ) : compact ? (
             <div className="flex flex-col gap-2">
+              <div className="grid grid-cols-7 gap-1 border border-[#303030] bg-[#111111] p-1">
+                {days.map((day) => {
+                  const hasItems = visibleEvents.some((event) => event.date === day) || (amebaDailyMap.get(day)?.allocated_minutes ?? 0) > 0;
+                  const isToday = day === calendar.data?.today;
+                  const isSelected = day === selectedDay;
+                  return (
+                    <button
+                      key={day}
+                      type="button"
+                      onClick={() => {
+                        setSelectedDay(day);
+                        document.getElementById(`cal-day-${day}`)?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                      }}
+                      className={`py-1.5 px-0.5 flex flex-col items-center gap-0.5 border cursor-pointer transition-colors ${
+                        isSelected
+                          ? 'border-[#7F49B4] bg-[#1B1523]'
+                          : isToday
+                            ? 'border-[#3E2C52] bg-[#7F49B4]/16'
+                            : 'border-transparent bg-[#0D0D0D] hover:bg-[#161616]'
+                      }`}
+                    >
+                      <span className="text-[10px] text-[#929292] leading-none">
+                        {asDate(day).toLocaleDateString('ru-RU', { weekday: 'short' })}
+                      </span>
+                      <span className={`text-[13px] tabular-nums leading-tight ${isToday ? 'font-bold text-[#DFC4F8]' : 'font-medium text-[#EAEAEA]'}`}>
+                        {asDate(day).getDate()}
+                      </span>
+                      <span className={`h-1 w-1 ${hasItems ? 'bg-[#9E6FD0]' : 'bg-transparent'}`} />
+                    </button>
+                  );
+                })}
+              </div>
+
               {days.map((day) => {
                 const dayEvents = visibleEvents.filter((event) => event.date === day).sort((a, b) => a.start.localeCompare(b.start));
                 const dayAmeba = amebaDailyMap.get(day);
+                const isEmpty = dayEvents.length === 0 && !(dayAmeba?.allocated_minutes > 0);
+                if (isEmpty) {
+                  return (
+                    <section
+                      key={day}
+                      id={`cal-day-${day}`}
+                      className={`scroll-mt-16 border border-[#303030] bg-[#111111] px-2.5 py-2 flex items-center justify-between gap-2 ${day === calendar.data?.today ? 'border-l-2 border-l-[#7F49B4]' : ''}`}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => { setSelectedDay(day); setDayPanelOpen(true); }}
+                        className="flex items-center gap-2 text-left cursor-pointer min-w-0"
+                      >
+                        <span className={`text-[14px] font-bold tabular-nums ${day === calendar.data?.today ? 'text-[#DFC4F8]' : 'text-[#EAEAEA]'}`}>
+                          {asDate(day).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })}
+                        </span>
+                        <span className="text-[12px] text-[#929292]">
+                          {asDate(day).toLocaleDateString('ru-RU', { weekday: 'short' })}
+                        </span>
+                      </button>
+                      <span className="text-[12px] text-[#787878]">Свободно</span>
+                      <IconButton size="icon-sm" variant="outline" aria-label={`Добавить событие на ${day}`} onClick={() => create(day)}>
+                        <Plus className="h-3.5 w-3.5" />
+                      </IconButton>
+                    </section>
+                  );
+                }
                 return (
                   <section
                     key={day}
-                    className={`border border-[#303030] bg-[#111111] p-2.5 flex gap-3 ${day === calendar.data?.today ? 'border-l-2 border-l-[#7F49B4]' : ''}`}
+                    id={`cal-day-${day}`}
+                    className={`scroll-mt-16 border border-[#303030] bg-[#111111] p-2.5 flex gap-3 ${day === calendar.data?.today ? 'border-l-2 border-l-[#7F49B4]' : ''}`}
                   >
                     <button
                       type="button"
@@ -410,7 +611,7 @@ export default function Calendar({ features = {} }) {
 
                     <div className="flex-1 min-w-0 flex flex-col gap-1.5">
                       {dayAmeba?.allocated_minutes > 0 && (
-                        <a href="/ameba" className="border border-dashed border-[#7F49B4] bg-[#7F49B4]/12 px-2 py-1 text-[11px] text-[#DFC4F8] flex items-center justify-between gap-2">
+                        <a href="/ameba" className="border border-dashed border-[#7F49B4] bg-[#7F49B4]/12 px-2 py-1.5 text-[11px] text-[#DFC4F8] flex items-center justify-between gap-2">
                           <span>Ameba · {dayAmeba.tasks?.map((t) => t.title).join(', ')}</span>
                           <span className="tabular-nums shrink-0">{Math.round((dayAmeba.allocated_minutes / 60) * 10) / 10} ч</span>
                         </a>
@@ -422,7 +623,7 @@ export default function Calendar({ features = {} }) {
                             type="button"
                             key={`${event.id}:${event.source ?? 'cal'}`}
                             onClick={() => { if (!isTemp) edit(event); }}
-                            className={`text-left px-2.5 py-1.5 border-l-2 text-[#EAEAEA] text-[12px] ${isTemp ? 'border border-dashed border-[#7F49B4] cursor-default' : 'cursor-pointer'}`}
+                            className={`text-left px-2.5 py-2 border-l-2 text-[#EAEAEA] text-[12px] ${isTemp ? 'border border-dashed border-[#7F49B4] cursor-default' : 'cursor-pointer'}`}
                             style={{ borderLeftColor: colors[event.kind], background: calendarBlockColor(event.kind, isTemp) }}
                           >
                             <div className="text-[11px] opacity-80 tabular-nums">{event.start}–{event.end}</div>
@@ -434,7 +635,7 @@ export default function Calendar({ features = {} }) {
                       <button
                         type="button"
                         onClick={() => create(day)}
-                        className="text-left border border-dashed border-[#303030] px-2.5 py-1.5 text-[12px] text-[#929292] hover:text-[#EAEAEA] hover:bg-[#191919] cursor-pointer"
+                        className="text-left border border-dashed border-[#303030] px-2.5 py-2 text-[12px] text-[#929292] hover:text-[#EAEAEA] hover:bg-[#191919] cursor-pointer"
                       >
                         + Событие
                       </button>
@@ -579,61 +780,31 @@ export default function Calendar({ features = {} }) {
         </div>
 
         {/* Selected Day Side Panel */}
-        <SlidePanel open={dayPanelOpen} className="border border-[#303030] bg-[#111111] p-3 flex flex-col gap-3">
+        <SlidePanel open={dayPanelOpen && wideDesktop} className="border border-[#303030] bg-[#111111] p-3 flex flex-col gap-3">
           <div className="flex items-center justify-between gap-2 border-b border-[#222222] pb-2">
             <div className="text-[13px] font-semibold text-[#EAEAEA]">
-              {asDate(selectedDay).toLocaleDateString('ru-RU', { weekday: 'short', day: 'numeric', month: 'long' })}
+              {selectedDayTitle}
             </div>
             <Button size="xs" variant="primary" onClick={() => create(selectedDay)}>+ Событие</Button>
           </div>
-
-          <div className="flex flex-col gap-1.5">
-            <div className="text-[11px] font-medium uppercase tracking-wider text-[#929292]">События</div>
-            {selectedDayEvents.length === 0 ? (
-              <div className="text-[12px] text-[#787878]">Нет событий</div>
-            ) : (
-              selectedDayEvents.map((ev) => (
-                <button
-                  key={ev.id}
-                  type="button"
-                  onClick={() => edit(ev)}
-                  className="text-left border border-[#262626] border-l-2 bg-[#0D0D0D] hover:bg-[#191919] px-2.5 py-1.5 cursor-pointer"
-                  style={{ borderLeftColor: colors[ev.kind] }}
-                >
-                  <div className="flex items-center justify-between gap-2 text-[11px] text-[#929292] tabular-nums">
-                    <span>{ev.start}–{ev.end}</span>
-                    <span>{names[ev.kind] ?? ev.kind}</span>
-                  </div>
-                  <div className="text-[12px] font-medium text-[#EAEAEA] break-words">{ev.title}</div>
-                </button>
-              ))
-            )}
-          </div>
-
-          {features.ameba !== false && showAmeba && (
-            <div className="border-t border-[#222222] pt-2.5 flex flex-col gap-1.5">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-[11px] font-medium uppercase tracking-wider text-[#CFA9F5]">Ameba</span>
-                <a href="/ameba" className="text-[11px] text-[#B98CE8] hover:underline">План →</a>
-              </div>
-              {selectedDayAmeba?.tasks?.length ? (
-                selectedDayAmeba.tasks.map((t) => (
-                  <a
-                    key={t.task_id}
-                    href={`/?task=${t.task_id}`}
-                    className="border border-dashed border-[#7F49B4]/60 bg-[#7F49B4]/10 px-2.5 py-1.5 flex items-center justify-between gap-2 text-[12px] hover:bg-[#7F49B4]/20"
-                  >
-                    <span className="truncate text-[#EAEAEA]">{t.title}</span>
-                    <span className="text-[11px] text-[#CFA9F5] tabular-nums shrink-0">{t.hours_label}</span>
-                  </a>
-                ))
-              ) : (
-                <div className="text-[12px] text-[#787878]">Нет задач</div>
-              )}
-            </div>
-          )}
+          {selectedDayContent}
         </SlidePanel>
       </div>
+
+      {/* Selected Day Bottom Drawer on Tablet / Mobile */}
+      <Drawer
+        opened={dayPanelOpen && !wideDesktop}
+        onClose={() => setDayPanelOpen(false)}
+        side="bottom"
+        title={selectedDayTitle}
+      >
+        <div className="flex flex-col gap-3">
+          <Button size="sm" variant="primary" className="w-full" disabled={!config} onClick={() => create(selectedDay)}>
+            + Событие
+          </Button>
+          {selectedDayContent}
+        </div>
+      </Drawer>
 
       {/* Straus Slide-Over Drawer */}
       {config && features.straus !== false && (
@@ -747,15 +918,15 @@ export default function Calendar({ features = {} }) {
                 Открыть полную задачу →
               </a>
             )}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-              <Field label="Дата начала">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+              <Field label="Дата начала" className="col-span-2 sm:col-span-1">
                 <Input type="date" value={editor.date} onChange={(event) => setEditor({ ...editor, date: event.currentTarget.value })} />
               </Field>
               <Field label="Начало">
-                <Input placeholder="09:00" value={editor.start} onChange={(event) => setEditor({ ...editor, start: event.currentTarget.value })} />
+                <Input type="time" value={editor.start} onChange={(event) => setEditor({ ...editor, start: event.currentTarget.value })} />
               </Field>
               <Field label="Конец">
-                <Input placeholder="10:00" value={editor.end} onChange={(event) => setEditor({ ...editor, end: event.currentTarget.value })} />
+                <Input type="time" value={editor.end} onChange={(event) => setEditor({ ...editor, end: event.currentTarget.value })} />
               </Field>
             </div>
             <Field label="Повторение">
@@ -818,7 +989,7 @@ export default function Calendar({ features = {} }) {
               </Field>
             )}
             {(error || save.error) && <Notice tone="error">{error || save.error.message}</Notice>}
-            <div className="flex items-center justify-between gap-2 pt-2 border-t border-[#222222]">
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[#222222]">
               <div>
                 {config?.events.some((event) => event.id === editor.id) && (
                   <Button

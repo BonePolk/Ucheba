@@ -36,7 +36,7 @@ export const Checkbox = forwardRef(function Checkbox(
 
   if (!label) return control;
   return (
-    <label htmlFor={controlId} className="inline-flex items-center gap-2 cursor-pointer select-none text-[13px] text-[#EAEAEA]">
+    <label htmlFor={controlId} className="inline-flex items-center gap-2 max-md:py-1 cursor-pointer select-none text-[13px] text-[#EAEAEA]">
       {control}
       <span>{label}</span>
     </label>
@@ -60,18 +60,18 @@ export const Switch = forwardRef(function Switch(
         onChange?.({ currentTarget: { checked: next }, target: { checked: next } });
       }}
       className={cn(
-        'peer inline-flex h-[18px] w-[32px] shrink-0 items-center rounded-none border border-[#3A3A3A] bg-[#191919] cursor-pointer transition-colors data-[state=checked]:bg-[#7F49B4] data-[state=checked]:border-[#7F49B4] disabled:opacity-45 disabled:cursor-not-allowed',
+        'peer inline-flex h-[18px] w-[32px] max-md:h-[24px] max-md:w-[42px] shrink-0 items-center rounded-none border border-[#3A3A3A] bg-[#191919] cursor-pointer transition-colors data-[state=checked]:bg-[#7F49B4] data-[state=checked]:border-[#7F49B4] disabled:opacity-45 disabled:cursor-not-allowed',
         className,
       )}
       {...props}
     >
-      <SwitchPrimitive.Thumb className="pointer-events-none block h-[12px] w-[12px] rounded-none bg-[#EAEAEA] transition-transform duration-150 translate-x-[2px] data-[state=checked]:translate-x-[16px]" />
+      <SwitchPrimitive.Thumb className="pointer-events-none block h-[12px] w-[12px] max-md:h-[18px] max-md:w-[18px] rounded-none bg-[#EAEAEA] transition-transform duration-150 translate-x-[2px] data-[state=checked]:translate-x-[16px] max-md:data-[state=checked]:translate-x-[20px]" />
     </SwitchPrimitive.Root>
   );
 
   if (!label) return control;
   return (
-    <label htmlFor={controlId} className="inline-flex items-start gap-2.5 cursor-pointer select-none min-w-0">
+    <label htmlFor={controlId} className="inline-flex items-start gap-2.5 max-md:py-1 cursor-pointer select-none min-w-0">
       <span className="pt-0.5">{control}</span>
       <span className="flex flex-col gap-0.5 min-w-0">
         <span className="text-[13px] text-[#EAEAEA] leading-snug">{label}</span>

@@ -29,7 +29,7 @@ export const Input = forwardRef(function Input(
   if (leftIcon || rightSlot) {
     return (
       <div className={cn(
-        'flex items-center h-[30px] max-md:min-h-[38px] bg-[#111111] border transition-colors focus-within:border-[#7F49B4]',
+        'flex items-center h-[30px] max-md:min-h-[40px] bg-[#111111] border transition-colors focus-within:border-[#7F49B4]',
         error ? 'border-[#D46A6A]' : 'border-[#303030]',
         props.disabled && 'opacity-50',
         className,
@@ -51,7 +51,7 @@ export const Input = forwardRef(function Input(
       ref={ref}
       type={type}
       className={cn(
-        'h-[30px] max-md:min-h-[38px] w-full min-w-0 rounded-none bg-[#111111] border px-2.5 text-[13px] max-md:text-[16px] text-[#EAEAEA] placeholder:text-[#666666] transition-colors focus:border-[#7F49B4] focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed',
+        'h-[30px] max-md:min-h-[40px] w-full min-w-0 rounded-none bg-[#111111] border px-2.5 text-[13px] max-md:text-[16px] text-[#EAEAEA] placeholder:text-[#666666] transition-colors focus:border-[#7F49B4] focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed',
         error ? 'border-[#D46A6A]' : 'border-[#303030]',
         className,
       )}
@@ -79,7 +79,7 @@ export const PasswordField = forwardRef(function PasswordField(
           tabIndex={-1}
           aria-label={visible ? 'Скрыть значение' : 'Показать значение'}
           onClick={() => setVisible((prev) => !prev)}
-          className="h-6 w-6 grid place-items-center text-[#787878] hover:text-[#EAEAEA] cursor-pointer"
+          className="h-6 w-6 max-md:h-9 max-md:w-9 grid place-items-center text-[#787878] hover:text-[#EAEAEA] cursor-pointer"
         >
           {visible ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
         </button>

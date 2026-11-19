@@ -26,6 +26,10 @@ WORKER_BIN = '/usr/local/bin/codex-worker'
 MCP_STDIO_SCRIPT = '/app/common/mcp_stdio.py'
 CONTAINER_SANDBOX = os.environ.get('ARRODES_SANDBOX', '').strip().lower() == 'container'
 API_PROVIDER_ID = 'ucheba_api'
+CLIENT_CLOSE_TIMEOUT = 15
+MCP_SHUTDOWN_TIMEOUT = 5
+TURN_START_TIMEOUT = 60
+TURN_IDLE_TIMEOUT = 600
 
 
 def user_home() -> Path:
@@ -138,6 +142,8 @@ def build_codex_config(
             '-c', f'model_providers.{API_PROVIDER_ID}.wire_api="responses"',
             '-c', f'model_providers.{API_PROVIDER_ID}.env_key="UCHEBA_API_KEY"',
             '-c', f'model_providers.{API_PROVIDER_ID}.requires_openai_auth=false',
+            '-c', f'model_providers.{API_PROVIDER_ID}.stream_idle_timeout_ms=180000',
+            '-c', f'model_providers.{API_PROVIDER_ID}.stream_max_retries=2',
         ])
         env = {'UCHEBA_API_KEY': api_key}
         thread_provider = API_PROVIDER_ID
@@ -146,6 +152,18 @@ def build_codex_config(
         thread_provider = None
     args.extend(['app-server', '--listen', 'stdio://'])
     return CodexConfig(cwd=str(cwd or user_home()), env=env, launch_args_override=tuple(args)), thread_provider
+
+
+async def _close_client(label: str, client) -> None:
+    if client is None:
+        return
+    try:
+        async with asyncio.timeout(CLIENT_CLOSE_TIMEOUT):
+            await client.close()
+    except TimeoutError:
+        logging.getLogger('uvicorn.error').warning('%s: codex client close timed out', label)
+    except Exception:
+        pass
 
 
 @asynccontextmanager
@@ -177,10 +195,7 @@ async def open_codex(
                 raise HTTPException(400, f'Подключите OpenAI OAuth в профиле для {label}')
         yield client, thread_provider
     finally:
-        try:
-            await client.close()
-        except Exception:
-            pass
+        await _close_client(label, client)
 
 
 @asynccontextmanager
@@ -224,6 +239,7 @@ class McpToolAdapter:
         self.progress = progress
         self.turn = None
         self.lock = asyncio.Lock()
+        self.active_calls = 0
         self.terminal_result = None
         self.fatal_error = None
 
@@ -254,6 +270,7 @@ class McpToolAdapter:
         if name not in self.schemas:
             raise ValueError('Неизвестный инструмент')
         args = message['params'].get('arguments', {})
+        self.active_calls += 1
         try:
             async with self.lock:
                 output, extra_content = await self.handler(name, args)
@@ -271,6 +288,8 @@ class McpToolAdapter:
             if self.progress is not None and self.fatal_error is None:
                 self.progress.add(detail)
             return {'content': [{'type': 'text', 'text': detail}], 'isError': True}
+        finally:
+            self.active_calls -= 1
 
 
 @asynccontextmanager
@@ -278,10 +297,12 @@ async def serve_mcp(adapter: McpToolAdapter):
     owner = user_id()
     run_id = browser_run_id.get()
     handlers = set()
+    writers = set()
 
     async def handle(reader, writer):
         task = asyncio.current_task()
         handlers.add(task)
+        writers.add(writer)
         token = current_user_id.set(owner)
         browser_token = browser_run_id.set(run_id)
         try:
@@ -303,11 +324,18 @@ async def serve_mcp(adapter: McpToolAdapter):
                 writer.write((json.dumps({'jsonrpc': '2.0', 'id': message['id'], **result}, ensure_ascii=False) + '\n').encode())
                 await writer.drain()
         finally:
-            writer.close()
-            await writer.wait_closed()
-            browser_run_id.reset(browser_token)
-            current_user_id.reset(token)
-            handlers.discard(task)
+            try:
+                writer.close()
+                async with asyncio.timeout(2):
+                    await writer.wait_closed()
+            except Exception:
+                if writer.transport is not None:
+                    writer.transport.abort()
+            finally:
+                writers.discard(writer)
+                browser_run_id.reset(browser_token)
+                current_user_id.reset(token)
+                handlers.discard(task)
 
     with tempfile.TemporaryDirectory(prefix='codex-mcp-') as directory:
         os.chmod(directory, 0o711)
@@ -316,22 +344,32 @@ async def serve_mcp(adapter: McpToolAdapter):
         os.chown(path, 10000 + owner, 10000 + owner)
         os.chmod(path, 0o600)
         try:
-            async with server:
-                yield {
-                    'mcp_servers': {
-                        'ucheba': {
-                            'command': '/usr/local/bin/python',
-                            'args': [MCP_STDIO_SCRIPT, path],
-                            'tool_timeout_sec': 2147483647,
-                            'required': True,
-                            'default_tools_approval_mode': 'approve',
-                        }
+            yield {
+                'mcp_servers': {
+                    'ucheba': {
+                        'command': '/usr/local/bin/python',
+                        'args': [MCP_STDIO_SCRIPT, path],
+                        'tool_timeout_sec': 2147483647,
+                        'required': True,
+                        'default_tools_approval_mode': 'approve',
                     }
                 }
+            }
         finally:
+            server.close()
             for task in list(handlers):
                 task.cancel()
-            await asyncio.gather(*handlers, return_exceptions=True)
+            for writer in list(writers):
+                writer.close()
+            try:
+                async with asyncio.timeout(MCP_SHUTDOWN_TIMEOUT):
+                    await asyncio.gather(*handlers, return_exceptions=True)
+                    await server.wait_closed()
+            except TimeoutError:
+                for writer in list(writers):
+                    if writer.transport is not None:
+                        writer.transport.abort()
+                logging.getLogger('uvicorn.error').warning('Codex MCP server shutdown timed out')
 
 
 @dataclass
@@ -392,6 +430,23 @@ def format_turn_error(label: str, turn_obj) -> str:
     return f'{label}: агент не завершил работу'
 
 
+async def _stop_turn(label: str, turn, client, task) -> None:
+    try:
+        async with asyncio.timeout(15):
+            if turn is not None:
+                await turn.interrupt()
+            await asyncio.gather(task, return_exceptions=True)
+    except Exception as exc:
+        logging.getLogger('uvicorn.error').warning('%s interruption: %s', label, type(exc).__name__)
+        await _close_client(label, client)
+        task.cancel()
+        try:
+            async with asyncio.timeout(5):
+                await asyncio.gather(task, return_exceptions=True)
+        except TimeoutError:
+            pass
+
+
 async def run_codex_turn(
     thread,
     prompt_input,
@@ -403,6 +458,7 @@ async def run_codex_turn(
     output_schema: dict | None = None,
     summary: str | None = 'auto',
     client=None,
+    idle_timeout: int | float | None = TURN_IDLE_TIMEOUT,
 ) -> TurnOutcome:
     progress.begin_response()
     turn_kwargs = {}
@@ -423,22 +479,36 @@ async def run_codex_turn(
     turn_status = ''
     error_detail = None
     usage = {'input_tokens': 0, 'output_tokens': 0}
+    watch_task = None
 
     try:
-        turn = await thread.turn(prompt_input, **turn_kwargs)
+        try:
+            async with asyncio.timeout(TURN_START_TIMEOUT):
+                turn = await thread.turn(prompt_input, **turn_kwargs)
+        except TimeoutError:
+            await _close_client(label, client)
+            raise HTTPException(502, f'{label}: не удалось запустить шаг агента') from None
         if adapter is not None:
             adapter.turn = turn
 
+        loop = asyncio.get_running_loop()
+        idle_since = loop.time()
+        in_flight_items: set[str] = set()
+
         async def consume():
-            nonlocal summary_text, fallback_text, last_delta_id, completed, turn_status, error_detail, usage
+            nonlocal summary_text, fallback_text, last_delta_id, completed, turn_status, error_detail, usage, idle_since
             async for event in turn.stream():
+                idle_since = loop.time()
                 progress.update(last_activity_at=timestamp())
                 data = event.payload
                 if event.method in ('item/started', 'item/completed'):
                     item = data.item.root if hasattr(data.item, 'root') else data.item
                     phase = getattr(getattr(item, 'phase', None), 'value', None)
+                    item_id = getattr(item, 'id', None)
                     if event.method == 'item/started':
                         progress.update(model_waiting=item.type in ('reasoning', 'agentMessage'))
+                        if item.type not in ('reasoning', 'agentMessage') and item_id:
+                            in_flight_items.add(item_id)
                         if item.type in ('commandExecution', 'fileChange', 'webSearch'):
                             labels = {
                                 'commandExecution': 'Выполняет команду',
@@ -452,6 +522,8 @@ async def run_codex_turn(
                         if item.type == 'agentMessage' and phase == 'commentary':
                             commentary.add(item.id)
                     else:
+                        if item_id:
+                            in_flight_items.discard(item_id)
                         if item.type == 'agentMessage':
                             if phase == 'final_answer':
                                 summary_text = item.text
@@ -485,26 +557,40 @@ async def run_codex_turn(
                     if not completed:
                         error_detail = format_turn_error(label, data.turn)
 
-        task = asyncio.create_task(consume())
+        async def watchdog():
+            nonlocal idle_since
+            while True:
+                await asyncio.sleep(5)
+                busy = bool(
+                    in_flight_items
+                    or (adapter is not None and adapter.active_calls > 0)
+                    or progress.record.get('pending_question')
+                )
+                if busy:
+                    idle_since = loop.time()
+                elif loop.time() - idle_since >= idle_timeout:
+                    return
+
+        consume_task = asyncio.create_task(consume())
+        watch_task = asyncio.create_task(watchdog()) if idle_timeout else None
         try:
-            await asyncio.shield(task)
+            if watch_task is None:
+                await asyncio.shield(consume_task)
+            else:
+                done, _ = await asyncio.wait({consume_task, watch_task}, return_when=asyncio.FIRST_COMPLETED)
+                if watch_task in done and not consume_task.done():
+                    logging.getLogger('uvicorn.error').warning('%s: turn stream idle timeout after %ss', label, idle_timeout)
+                    progress.add(f'Модель не передавала новых данных {max(1, int(idle_timeout // 60))} мин — запуск остановлен')
+                    await _stop_turn(label, turn, client, consume_task)
+                    raise HTTPException(502, f'{label}: модель не передавала новых данных слишком долго')
+                await consume_task
         except asyncio.CancelledError:
-            try:
-                async with asyncio.timeout(15):
-                    if turn is not None:
-                        await turn.interrupt()
-                    await asyncio.gather(task, return_exceptions=True)
-            except Exception as exc:
-                logging.getLogger('uvicorn.error').warning('%s interruption: %s', label, type(exc).__name__)
-                if client is not None:
-                    try:
-                        await client.close()
-                    except Exception:
-                        pass
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
+            await _stop_turn(label, turn, client, consume_task)
             raise
     finally:
+        if watch_task is not None and not watch_task.done():
+            watch_task.cancel()
+            await asyncio.gather(watch_task, return_exceptions=True)
         if adapter is not None:
             adapter.turn = None
         progress.update(model_waiting=False)
@@ -527,14 +613,14 @@ async def check_connection(label: str, *, config: dict | None, api_key: str = ''
     auth_mode, key, base_url, model = normalize_auth(config, api_key, default_mode=default_mode, label=label)
     sandbox = Sandbox.full_access if CONTAINER_SANDBOX else Sandbox.read_only
     try:
-        async with open_codex(
+        async with scratch_env(writable=False) as (work_dir, shell_policy), open_codex(
             label,
             auth_mode=auth_mode,
             api_key=key,
             base_url=base_url,
             allow_shell=False,
             web_search='disabled',
-        ) as (client, thread_provider), scratch_env(writable=False) as (work_dir, shell_policy):
+        ) as (client, thread_provider):
             thread = await client.thread_start(
                 cwd=str(work_dir),
                 sandbox=sandbox,

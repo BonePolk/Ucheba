@@ -54,7 +54,7 @@ export default function MonocleBrowser({ active = false }) {
 
   return (
     <div className="border border-[#303030] bg-[#0D0D0D] p-2 flex flex-col gap-2 w-full">
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <Button size="xs" variant="subtle" onClick={() => setOpened(!opened)}>
           {opened ? 'Скрыть браузер' : 'Браузер агента'}
         </Button>
@@ -124,7 +124,7 @@ export default function MonocleBrowser({ active = false }) {
           {paused && (
             <div className="flex flex-col gap-2 border-t border-[#222222] pt-3">
               <div className="flex flex-wrap items-end gap-2">
-                <Field label="Ввести в выбранное поле" className="flex-1 min-w-[200px]">
+                <Field label="Ввести в выбранное поле" className="w-full min-w-0 sm:flex-1 sm:min-w-[200px]">
                   <PasswordField
                     value={typing}
                     onChange={(event) => setTyping(event.currentTarget.value)}

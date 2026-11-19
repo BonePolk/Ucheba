@@ -32,7 +32,7 @@ export const TabsList = forwardRef(function TabsList({ className, ...props }, re
     <TabsPrimitive.List
       ref={ref}
       className={cn(
-        'flex items-center gap-1 border-b border-[#303030] overflow-x-auto rounded-none',
+        'flex items-center gap-1 border-b border-[#303030] overflow-x-auto max-w-full no-scrollbar rounded-none',
         className,
       )}
       {...props}
@@ -49,7 +49,7 @@ export const TabsTrigger = forwardRef(function TabsTrigger({ className, value, c
       ref={ref}
       value={value}
       className={cn(
-        'relative inline-flex items-center gap-1.5 h-8 max-md:h-10 px-3 text-[13px] font-medium text-[#929292] whitespace-nowrap shrink-0 cursor-pointer transition-colors hover:text-[#EAEAEA] data-[state=active]:text-[#EAEAEA] focus-visible:outline-1 focus-visible:outline-[#9E6FD0]',
+        'relative inline-flex items-center gap-1.5 h-8 max-md:h-11 px-3 max-md:px-3.5 text-[13px] font-medium text-[#929292] whitespace-nowrap shrink-0 cursor-pointer transition-colors hover:text-[#EAEAEA] data-[state=active]:text-[#EAEAEA] focus-visible:outline-1 focus-visible:outline-[#9E6FD0]',
         ctx.value === undefined && 'border-b-2 border-transparent data-[state=active]:border-[#7F49B4]',
         className,
       )}
@@ -86,7 +86,7 @@ export function SegmentedControl({ value, onChange, options = [], ariaLabel, siz
       aria-label={ariaLabel}
       className={cn(
         'inline-flex items-center bg-[#111111] border border-[#303030] p-0.5 rounded-none shrink-0',
-        size === 'sm' ? 'h-[26px]' : 'h-7 max-md:h-9',
+        size === 'sm' ? 'h-[26px] max-md:h-9' : 'h-7 max-md:h-10',
         className,
       )}
     >
@@ -101,7 +101,7 @@ export function SegmentedControl({ value, onChange, options = [], ariaLabel, siz
             aria-selected={active}
             onClick={() => onChange(option.value)}
             className={cn(
-              'relative h-full px-2.5 text-[12px] font-medium whitespace-nowrap cursor-pointer transition-colors rounded-none',
+              'relative h-full px-2.5 max-md:px-3 text-[12px] max-md:text-[13px] font-medium whitespace-nowrap cursor-pointer transition-colors rounded-none',
               active ? 'text-[#EAEAEA]' : 'text-[#929292] hover:text-[#EAEAEA]',
             )}
           >

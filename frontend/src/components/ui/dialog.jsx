@@ -30,7 +30,7 @@ export function Modal({ opened, open, onClose, title, description, size = 'md', 
                 className="fixed inset-0 z-50 bg-black/75"
               />
             </DialogPrimitive.Overlay>
-            <div className="fixed inset-0 z-50 flex items-center justify-center p-3 pointer-events-none">
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-3 max-md:items-end max-md:p-0 pointer-events-none">
               <DialogPrimitive.Content
                 forceMount
                 asChild
@@ -43,12 +43,12 @@ export function Modal({ opened, open, onClose, title, description, size = 'md', 
                   exit={reduced ? { opacity: 0 } : { opacity: 0, y: 6, scale: 0.985 }}
                   transition={reduced ? INSTANT_TRANSITION : { duration: 0.16, ease: EASE_OUT }}
                   className={cn(
-                    'pointer-events-auto w-full rounded-none bg-[#111111] border border-[#303030] text-[#EAEAEA] flex flex-col max-h-[calc(100dvh-24px)] focus:outline-none',
+                    'pointer-events-auto w-full rounded-none bg-[#111111] border border-[#303030] text-[#EAEAEA] flex flex-col max-h-[calc(100dvh-24px)] max-md:max-w-none max-md:max-h-[92dvh] max-md:border-x-0 max-md:border-b-0 focus:outline-none',
                     sizeMap[size] ?? sizeMap.md,
                     className,
                   )}
                 >
-                  <div className="flex items-center justify-between gap-2 px-4 py-2.5 border-b border-[#222222] bg-[#141414] shrink-0">
+                  <div className="flex items-center justify-between gap-2 px-4 py-2.5 max-md:px-3.5 max-md:py-3 border-b border-[#222222] bg-[#141414] shrink-0">
                     <DialogPrimitive.Title className="text-[14px] font-semibold text-[#EAEAEA] m-0 truncate">
                       {title}
                     </DialogPrimitive.Title>
@@ -56,7 +56,7 @@ export function Modal({ opened, open, onClose, title, description, size = 'md', 
                       <button
                         type="button"
                         aria-label="Закрыть"
-                        className="h-6 w-6 grid place-items-center text-[#929292] hover:text-[#EAEAEA] hover:bg-[#222222] cursor-pointer shrink-0"
+                        className="h-6 w-6 max-md:h-9 max-md:w-9 grid place-items-center text-[#929292] hover:text-[#EAEAEA] hover:bg-[#222222] cursor-pointer shrink-0"
                       >
                         <X className="h-4 w-4" />
                       </button>
@@ -67,7 +67,7 @@ export function Modal({ opened, open, onClose, title, description, size = 'md', 
                       {description}
                     </DialogPrimitive.Description>
                   )}
-                  <div className="p-4 overflow-y-auto [overflow-wrap:anywhere] min-w-0">
+                  <div className="p-4 max-md:p-3.5 max-md:pb-[calc(1rem+env(safe-area-inset-bottom))] overflow-y-auto [overflow-wrap:anywhere] min-w-0">
                     {children}
                   </div>
                 </motion.div>
@@ -122,7 +122,7 @@ export function Drawer({ opened, open, onClose, title, side = 'right', widthClas
                   sideClasses[side] ?? sideClasses.right,
                 )}
               >
-                <div className="flex items-center justify-between gap-2 px-4 py-2.5 border-b border-[#222222] bg-[#141414] shrink-0">
+                <div className="flex items-center justify-between gap-2 px-4 py-2.5 max-md:px-3.5 max-md:py-3 border-b border-[#222222] bg-[#141414] shrink-0">
                   <DialogPrimitive.Title className="text-[14px] font-semibold text-[#EAEAEA] m-0 truncate">
                     {title}
                   </DialogPrimitive.Title>
@@ -130,13 +130,13 @@ export function Drawer({ opened, open, onClose, title, side = 'right', widthClas
                     <button
                       type="button"
                       aria-label="Закрыть"
-                      className="h-6 w-6 grid place-items-center text-[#929292] hover:text-[#EAEAEA] hover:bg-[#222222] cursor-pointer shrink-0"
+                      className="h-6 w-6 max-md:h-9 max-md:w-9 grid place-items-center text-[#929292] hover:text-[#EAEAEA] hover:bg-[#222222] cursor-pointer shrink-0"
                     >
                       <X className="h-4 w-4" />
                     </button>
                   </DialogPrimitive.Close>
                 </div>
-                <div className="p-4 overflow-y-auto flex-1 min-w-0">
+                <div className="p-4 max-md:p-3.5 pb-[calc(1rem+env(safe-area-inset-bottom))] overflow-y-auto flex-1 min-w-0">
                   {children}
                 </div>
               </motion.div>

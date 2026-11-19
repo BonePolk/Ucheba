@@ -57,6 +57,11 @@ export default function AppNavigation({
     { href: '/profile', label: 'Настройки', icon: Settings, active: path.startsWith('/profile') || path.startsWith('/admin') },
   ];
 
+  const overflowLinks = links.length > 5 ? links.slice(4) : [];
+  const bottomLinks = links.length > 5 ? links.slice(0, 4) : links;
+  const overflowActive = overflowLinks.some((link) => link.active);
+  const overflowBadgeCount = overflowLinks.reduce((sum, link) => sum + (link.badge ?? 0), 0);
+
   function renderNavItems(inDrawer = false) {
     return links.map((link) => {
       const Icon = link.icon;
@@ -68,7 +73,8 @@ export default function AppNavigation({
           aria-label={link.label}
           aria-current={link.active ? 'page' : undefined}
           className={cn(
-            'relative flex items-center gap-2.5 h-8 px-2.5 text-[13px] transition-colors duration-100 select-none',
+            'relative flex items-center transition-colors duration-100 select-none',
+            inDrawer ? 'h-11 px-3 text-[14px] gap-3' : 'h-8 px-2.5 text-[13px] gap-2.5',
             link.active
               ? 'text-[#EAEAEA] font-medium'
               : 'text-[#929292] hover:text-[#EAEAEA] hover:bg-[#161616]',
@@ -197,32 +203,34 @@ export default function AppNavigation({
       </motion.aside>
 
       {/* Mobile & Tablet top header */}
-      <header className="lg:hidden sticky top-0 z-30 flex items-center justify-between h-11 px-3 bg-[#0C0C0C] border-b border-[#242424]">
-        <div className="flex items-center gap-2 min-w-0">
-          <IconButton
-            size="icon-sm"
-            variant="default"
-            onClick={() => setMobileOpen(true)}
-            aria-label="Открыть меню навигации"
-          >
-            <Menu className="h-4 w-4" />
-          </IconButton>
-          <a href="/" className="flex items-center gap-2 min-w-0 text-[#EAEAEA] font-semibold text-[14px]">
-            <img src="/icon.png" width="20" height="20" alt="" className="shrink-0" />
-            <span className="truncate">Учёба</span>
-          </a>
-        </div>
-        <div className="flex items-center gap-1.5">
-          {inboxEnabled && inboxCount > 0 && (
-            <a href="/inbox" className="inline-flex items-center gap-1 px-2 h-7 bg-[#7F49B4]/18 border border-[#7F49B4]/40 text-[11px] text-[#CFA9F5]">
-              <Inbox className="h-3 w-3" />
-              <span className="tabular-nums">{inboxCount}</span>
+      <header className="lg:hidden sticky top-0 z-30 px-3 pt-[env(safe-area-inset-top)] bg-[#0C0C0C] border-b border-[#242424]">
+        <div className="flex items-center justify-between h-12 w-full">
+          <div className="flex items-center gap-2 min-w-0">
+            <IconButton
+              size="icon"
+              variant="default"
+              onClick={() => setMobileOpen(true)}
+              aria-label="Открыть меню навигации"
+            >
+              <Menu className="h-4 w-4" />
+            </IconButton>
+            <a href="/" className="flex items-center gap-2 min-w-0 text-[#EAEAEA] font-semibold text-[14px]">
+              <img src="/icon.png" width="20" height="20" alt="" className="shrink-0" />
+              <span className="truncate">Учёба</span>
             </a>
-          )}
-          <a href="/profile" className="inline-flex items-center gap-1.5 px-2 h-7 bg-[#191919] border border-[#303030] text-[12px] text-[#EAEAEA]">
-            <User className="h-3.5 w-3.5 text-[#929292]" />
-            <span className="max-w-[96px] truncate">{user.username}</span>
-          </a>
+          </div>
+          <div className="flex items-center gap-1.5">
+            {inboxEnabled && inboxCount > 0 && (
+              <a href="/inbox" className="inline-flex items-center gap-1 px-2.5 h-9 bg-[#7F49B4]/18 border border-[#7F49B4]/40 text-[12px] text-[#CFA9F5]">
+                <Inbox className="h-3.5 w-3.5" />
+                <span className="tabular-nums">{inboxCount}</span>
+              </a>
+            )}
+            <a href="/profile" className="inline-flex items-center gap-1.5 px-2.5 h-9 bg-[#191919] border border-[#303030] text-[12px] text-[#EAEAEA]">
+              <User className="h-3.5 w-3.5 text-[#929292]" />
+              <span className="max-w-[96px] truncate">{user.username}</span>
+            </a>
+          </div>
         </div>
       </header>
 
@@ -231,7 +239,7 @@ export default function AppNavigation({
         aria-label="Быстрая навигация"
         className="md:hidden fixed bottom-0 left-0 right-0 z-30 flex items-center bg-[#0C0C0C] border-t border-[#242424] pb-[env(safe-area-inset-bottom)]"
       >
-        {links.slice(0, 5).map((link) => {
+        {bottomLinks.map((link) => {
           const Icon = link.icon;
           return (
             <a
@@ -239,7 +247,7 @@ export default function AppNavigation({
               href={link.href}
               aria-current={link.active ? 'page' : undefined}
               className={cn(
-                'relative flex-1 min-w-0 flex flex-col items-center justify-center gap-0.5 py-1.5 text-[10px]',
+                'relative flex-1 min-w-0 min-h-[52px] flex flex-col items-center justify-center gap-0.5 py-1.5 text-[11px]',
                 link.active ? 'text-[#DFC4F8] bg-[#7F49B4]/16' : 'text-[#929292]',
               )}
             >
@@ -250,11 +258,47 @@ export default function AppNavigation({
                   className="absolute inset-x-0 top-0 h-[2px] bg-[#7F49B4] pointer-events-none"
                 />
               )}
-              <Icon className="relative z-10 h-4 w-4" strokeWidth={1.75} />
+              <span className="relative z-10 inline-flex">
+                <Icon className="h-[18px] w-[18px]" strokeWidth={1.75} />
+                {link.badge != null && (
+                  <span className="absolute -top-1 -right-2.5 min-w-[16px] h-4 px-1 bg-[#7F49B4] text-[#F5F0FA] text-[10px] leading-4 text-center tabular-nums">
+                    {link.badge}
+                  </span>
+                )}
+              </span>
               <span className="relative z-10 truncate max-w-full px-1">{link.label}</span>
             </a>
           );
         })}
+        {overflowLinks.length > 0 && (
+          <button
+            type="button"
+            onClick={() => setMobileOpen(true)}
+            aria-label="Ещё разделы"
+            aria-expanded={mobileOpen}
+            className={cn(
+              'relative flex-1 min-w-0 min-h-[52px] flex flex-col items-center justify-center gap-0.5 py-1.5 text-[11px] cursor-pointer',
+              overflowActive ? 'text-[#DFC4F8] bg-[#7F49B4]/16' : 'text-[#929292]',
+            )}
+          >
+            {overflowActive && (
+              <motion.span
+                layoutId="ucheba-bottom-active"
+                transition={indicatorTransition}
+                className="absolute inset-x-0 top-0 h-[2px] bg-[#7F49B4] pointer-events-none"
+              />
+            )}
+            <span className="relative z-10 inline-flex">
+              <Menu className="h-[18px] w-[18px]" strokeWidth={1.75} />
+              {overflowBadgeCount > 0 && (
+                <span className="absolute -top-1 -right-2.5 min-w-[16px] h-4 px-1 bg-[#7F49B4] text-[#F5F0FA] text-[10px] leading-4 text-center tabular-nums">
+                  {overflowBadgeCount}
+                </span>
+              )}
+            </span>
+            <span className="relative z-10 truncate max-w-full px-1">Ещё</span>
+          </button>
+        )}
       </nav>
 
       {/* Mobile & Tablet drawer */}
@@ -277,7 +321,7 @@ export default function AppNavigation({
               type="button"
               disabled={leaving}
               onClick={onLogout}
-              className="flex items-center gap-2 h-9 px-2.5 text-[13px] text-[#D46A6A] bg-[#291515] border border-[#4F2424] cursor-pointer"
+              className="flex items-center gap-2 h-11 px-3 text-[13px] text-[#D46A6A] bg-[#291515] border border-[#4F2424] cursor-pointer"
             >
               <LogOut className="h-4 w-4" />
               <span>{leaving ? 'Выходим…' : 'Выйти из аккаунта'}</span>

@@ -56,14 +56,14 @@ export default function Cabinets() {
     <div className="flex flex-col gap-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <SectionHeader title="Сохранённые входы" meta={sites.data ? `${sites.data.length}` : undefined} />
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap sm:flex-nowrap items-center gap-2 w-full sm:w-auto">
           <Input
             aria-label="Поиск кабинетов"
             placeholder="Найти кабинет, группу или адрес…"
             value={search}
             onChange={(event) => setSearch(event.currentTarget.value)}
             leftIcon={<Search className="h-3.5 w-3.5" />}
-            className="w-[220px]"
+            className="flex-1 min-w-[140px] sm:w-[220px] sm:flex-none"
           />
           <Button variant="primary" leftIcon={<Plus className="h-3.5 w-3.5" />} onClick={() => { setForm(empty); setEditing({}); }}>
             Добавить вход
@@ -148,7 +148,7 @@ export default function Cabinets() {
               <Input value={form.group} onChange={field('group')} maxLength={80} />
             </Field>
             <Field label="Цвет метки">
-              <div className="flex items-center gap-1.5 h-[30px] bg-[#111111] border border-[#303030] px-2">
+              <div className="flex items-center gap-1.5 h-[30px] max-md:min-h-[40px] bg-[#111111] border border-[#303030] px-2">
                 <input
                   type="color"
                   aria-label="Цвет"

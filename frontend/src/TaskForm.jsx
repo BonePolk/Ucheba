@@ -116,7 +116,7 @@ export default function TaskForm({
             id="task-form-title"
             placeholder="Что нужно сделать?"
             required
-            autoFocus
+            autoFocus={!isEdit}
             value={title}
             error={Boolean(titleError)}
             onChange={(event) => {
@@ -145,15 +145,14 @@ export default function TaskForm({
                 <button
                   type="button"
                   onClick={() => setQuickDeadline(0)}
-                  className="text-[10px] text-[#929292] hover:text-[#EAEAEA] cursor-pointer"
+                  className="px-2 py-0.5 max-md:px-2.5 max-md:py-1 border border-[#303030] bg-[#161616] text-[11px] max-md:text-[12px] text-[#B8B8B8] hover:text-[#EAEAEA] hover:border-[#454545] cursor-pointer"
                 >
                   Сегодня
                 </button>
-                <span className="text-[#454545]">·</span>
                 <button
                   type="button"
                   onClick={() => setQuickDeadline(1)}
-                  className="text-[10px] text-[#929292] hover:text-[#EAEAEA] cursor-pointer"
+                  className="px-2 py-0.5 max-md:px-2.5 max-md:py-1 border border-[#303030] bg-[#161616] text-[11px] max-md:text-[12px] text-[#B8B8B8] hover:text-[#EAEAEA] hover:border-[#454545] cursor-pointer"
                 >
                   Завтра
                 </button>
@@ -314,7 +313,7 @@ export default function TaskForm({
 
         {error && <Notice tone="error">{error.message}</Notice>}
 
-        <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#222222]">
+        <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#222222] max-sm:grid max-sm:grid-cols-2">
           <Button variant="default" onClick={onClose}>Отмена</Button>
           <Button type="submit" variant="primary" loading={pending}>Сохранить</Button>
         </div>

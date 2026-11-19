@@ -62,14 +62,14 @@ export default function AgentMemory() {
           title="Память"
           meta={memory.data ? `${memory.data.length}` : undefined}
         />
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 w-full sm:w-auto">
           <Input
             aria-label="Поиск фактов"
             placeholder="Поиск…"
             value={search}
             onChange={(event) => setSearch(event.currentTarget.value)}
             leftIcon={<Search className="h-3.5 w-3.5" />}
-            className="w-[200px]"
+            className="flex-1 min-w-0 sm:w-[200px] sm:flex-none"
           />
           <Button size="default" variant="primary" leftIcon={<Plus className="h-3.5 w-3.5" />} onClick={() => setAdding(!adding)}>
             Факт
@@ -149,7 +149,7 @@ export default function AgentMemory() {
                       <div className="min-w-0 flex-1">
                         <div
                           onClick={isLong ? () => setExpandedKeys((prev) => ({ ...prev, [fact.key]: !prev[fact.key] })) : undefined}
-                          className={`text-[13px] text-[#EAEAEA] whitespace-pre-wrap break-words ${isLong ? 'cursor-pointer' : ''} ${!isExpanded ? 'line-clamp-1' : ''}`}
+                          className={`text-[13px] text-[#EAEAEA] whitespace-pre-wrap break-words ${isLong ? 'cursor-pointer' : ''} ${!isExpanded ? 'line-clamp-2 sm:line-clamp-1' : ''}`}
                         >
                           {fact.text}
                         </div>

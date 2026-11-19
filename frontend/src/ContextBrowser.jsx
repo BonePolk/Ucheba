@@ -119,7 +119,7 @@ export default function ContextBrowser({ taskId, disabled, initialSiteId = null 
       <CollapseSection open={opened}>
         <div className="flex flex-col gap-2.5 border border-[#262626] bg-[#0D0D0D] p-3">
           <div className="flex flex-wrap items-end gap-2">
-            <Field label="Личный кабинет" className="flex-1 min-w-[220px]">
+            <Field label="Личный кабинет" className="w-full min-w-0 sm:flex-1 sm:min-w-[200px]">
               <SelectField
                 value={available ? siteId : null}
                 clearable
@@ -205,7 +205,7 @@ export default function ContextBrowser({ taskId, disabled, initialSiteId = null 
                     {screenImage(true)}
                   </Modal>
                   <div className="flex flex-wrap items-end gap-2">
-                    <Field label="Ввод в поле" className="flex-1 min-w-[200px]">
+                    <Field label="Ввод в поле" className="w-full min-w-0 sm:flex-1 sm:min-w-[200px]">
                       <PasswordField value={typing} onChange={(event) => setTyping(event.currentTarget.value)} autoComplete="off" />
                     </Field>
                     <Button
