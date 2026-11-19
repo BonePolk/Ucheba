@@ -81,7 +81,9 @@ async def sandbox_available():
         detail = ''
         if process.returncode != 0:
             text = error.decode(errors='replace').lower()
-            if 'no permissions to create' in text and 'namespace' in text:
+            if 'creating new namespace failed: permission denied' in text:
+                detail = 'Ядро хоста (AppArmor userns) запрещает непривилегированные namespaces. Задайте ARRODES_APPARMOR=runc в .env и пересоздайте arrodes (либо kernel.apparmor_restrict_unprivileged_userns=0 на хосте).'
+            elif ('no permissions to create' in text or 'creating new namespace failed' in text) and 'namespace' in text:
                 detail = 'Контейнер запрещает создание namespace для bubblewrap. Примените security_opt сервиса arrodes из Compose.'
             elif 'failed to make / slave' in text or ('bwrap:' in text and ('permission denied' in text or 'operation not permitted' in text)):
                 detail = 'Профиль безопасности контейнера (AppArmor/mount) блокирует bubblewrap. Пересоздайте arrodes с актуальным Compose.'
