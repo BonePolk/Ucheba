@@ -2,7 +2,7 @@ import { useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Download, FolderOpen, Paperclip, Trash2 } from 'lucide-react';
 import { request } from './api';
-import { fileContent, MAX_FILE_SIZE, safeFileName } from './fileUpload';
+import { uploadTaskFile } from './fileUpload';
 import { Button, IconButton } from '@/components/ui/button';
 import { FileTrigger } from '@/components/ui/controls';
 import { Combobox } from '@/components/ui/select';
@@ -27,11 +27,7 @@ export default function ContextFiles({ taskId, disabled }) {
   };
 
   const upload = useMutation({
-    mutationFn: async (file) => {
-      if (file.size === 0) throw new Error('Файл пустой (0 байт)');
-      if (file.size > MAX_FILE_SIZE) throw new Error('Максимальный размер файла — 25 МБ');
-      return request(path, { method: 'POST', body: JSON.stringify({ name: safeFileName(file.name), content: await fileContent(file) }) });
-    },
+    mutationFn: (file) => uploadTaskFile(taskId, file),
     onSuccess: refresh,
     onSettled: () => reset.current?.(),
   });

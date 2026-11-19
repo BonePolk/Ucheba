@@ -2,13 +2,17 @@ import asyncio
 import base64
 import binascii
 import json
+import os
+import tempfile
+import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 import httpx
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlmodel import Session, select
@@ -751,21 +755,29 @@ async def context_files(task_id: int):
     return await call('monocle', f'/tasks/{task_id}/files', method='GET')
 
 
-@router.post('/tasks/{task_id}/monocle/files')
-async def attach_context_file(task_id: int, body: ContextFile):
-    enabled = features()
-    if not (enabled['monocle'] or enabled['arrodes']):
-        check_feature('monocle')
-    context.get_context(task_id)
-    try:
-        content = base64.b64decode(body.content, validate=True)
-    except (ValueError, binascii.Error):
-        raise HTTPException(422, 'Не удалось прочитать загруженный файл') from None
-    if not content:
-        raise HTTPException(422, 'Файл пустой (0 байт)')
-    if len(content) > 25 * 1024 * 1024:
-        raise HTTPException(413, 'Максимальный размер файла — 25 МБ')
-    safe_name = _trim_filename(body.name)
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+UPLOAD_TTL_SECONDS = 600
+_staged_uploads: dict[tuple[int, str], dict] = {}
+
+
+def _drop_staged_upload(key: tuple[int, str]):
+    entry = _staged_uploads.pop(key, None)
+    if entry:
+        entry['path'].unlink(missing_ok=True)
+
+
+def _cleanup_staged_uploads(owner: int | None = None):
+    cutoff = time.monotonic() - UPLOAD_TTL_SECONDS
+    for key in [item_key for item_key, entry in _staged_uploads.items() if entry['updated_at'] < cutoff]:
+        _drop_staged_upload(key)
+    if owner is not None:
+        owned = sorted(((entry['updated_at'], item_key) for item_key, entry in _staged_uploads.items() if item_key[0] == owner), key=lambda item: item[0])
+        for _, key in owned[:-4]:
+            _drop_staged_upload(key)
+
+
+async def _store_task_file(task_id: int, name: str, content: bytes):
+    safe_name = _trim_filename(name)
     try:
         async with httpx.AsyncClient(timeout=120) as client:
             result = await client.post(f'http://monocle:8000/tasks/{task_id}/files', params={'name': safe_name},
@@ -780,6 +792,119 @@ async def attach_context_file(task_id: int, body: ContextFile):
         raise HTTPException(result.status_code, detail)
     context.invalidate(task_id)
     return result.json()
+
+
+class UploadChunk(BaseModel):
+    upload_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
+    index: int = Field(default=0, ge=0, le=200)
+    content: str = Field(default='', max_length=2 * 1024 * 1024)
+    done: bool = False
+    target: Literal['task', 'workspace']
+    task_id: int | None = Field(default=None, gt=0)
+    name: str = Field(default='', max_length=255)
+    path: str = Field(default='', max_length=500)
+    overwrite: bool = False
+
+
+@router.post('/uploads/chunk')
+async def upload_chunk(body: UploadChunk):
+    enabled = features()
+    if body.target == 'task':
+        if not (enabled['monocle'] or enabled['arrodes']):
+            check_feature('monocle')
+        if not body.task_id or not body.name.strip():
+            raise HTTPException(422, 'Укажите задачу и имя файла')
+        context.get_context(body.task_id)
+    else:
+        if not (enabled['monocle'] or enabled['straus'] or enabled['arrodes']):
+            check_feature('monocle')
+        if not body.path.strip():
+            raise HTTPException(422, 'Укажите путь к файлу')
+    owner = user_id()
+    _cleanup_staged_uploads(owner if body.upload_id is None else None)
+    if body.upload_id is None:
+        if body.index != 0:
+            raise HTTPException(422, 'Неверный порядок фрагментов загрузки')
+        upload_id = uuid.uuid4().hex
+        key = (owner, upload_id)
+        fd, temp_path = tempfile.mkstemp(prefix='ucheba-upload-')
+        os.close(fd)
+        entry = {'path': Path(temp_path), 'size': 0, 'next_index': 0, 'completed': False, 'updated_at': time.monotonic()}
+        _staged_uploads[key] = entry
+    else:
+        upload_id = body.upload_id
+        key = (owner, upload_id)
+        entry = _staged_uploads.get(key)
+        if not entry:
+            raise HTTPException(410, 'Сессия загрузки истекла, повторите отправку файла')
+    if not entry['completed']:
+        if body.index != entry['next_index']:
+            _drop_staged_upload(key)
+            raise HTTPException(422, 'Нарушен порядок фрагментов файла')
+        try:
+            chunk = base64.b64decode(body.content, validate=True)
+        except (ValueError, binascii.Error):
+            _drop_staged_upload(key)
+            raise HTTPException(422, 'Не удалось прочитать фрагмент файла') from None
+        if entry['size'] + len(chunk) > MAX_UPLOAD_BYTES:
+            _drop_staged_upload(key)
+            raise HTTPException(413, 'Максимальный размер файла — 25 МБ')
+        with entry['path'].open('ab') as handle:
+            handle.write(chunk)
+        entry['size'] += len(chunk)
+        entry['next_index'] += 1
+        entry['updated_at'] = time.monotonic()
+    if not body.done:
+        return {'upload_id': upload_id, 'received': entry['size']}
+    if entry['size'] <= 0:
+        _drop_staged_upload(key)
+        raise HTTPException(422, 'Файл пустой (0 байт)')
+    entry['completed'] = True
+    entry['updated_at'] = time.monotonic()
+    content = entry['path'].read_bytes()
+    if body.target == 'task':
+        try:
+            return await _store_task_file(body.task_id, body.name, content)
+        finally:
+            _drop_staged_upload(key)
+    try:
+        result = await call('monocle', '/workspace/upload',
+            {'path': body.path, 'content': base64.b64encode(content).decode(), 'overwrite': body.overwrite}, timeout=120)
+    except HTTPException as exc:
+        if exc.status_code == 409 and not body.overwrite:
+            return JSONResponse(status_code=409, content={'detail': str(exc.detail), 'upload_id': upload_id})
+        _drop_staged_upload(key)
+        raise
+    except Exception:
+        _drop_staged_upload(key)
+        raise
+    _drop_staged_upload(key)
+    return result
+
+
+@router.delete('/uploads/{upload_id}')
+def cancel_staged_upload(upload_id: str):
+    if len(upload_id) != 32 or any(char not in '0123456789abcdef' for char in upload_id):
+        raise HTTPException(422, 'Некорректная сессия загрузки')
+    _drop_staged_upload((user_id(), upload_id))
+    return {'ok': True}
+
+
+@router.post('/tasks/{task_id}/monocle/files')
+async def attach_context_file(task_id: int, body: ContextFile):
+    enabled = features()
+    if not (enabled['monocle'] or enabled['arrodes']):
+        check_feature('monocle')
+    context.get_context(task_id)
+    try:
+        content = base64.b64decode(body.content, validate=True)
+    except (ValueError, binascii.Error):
+        raise HTTPException(422, 'Не удалось прочитать загруженный файл') from None
+    if not content:
+        raise HTTPException(422, 'Файл пустой (0 байт)')
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, 'Максимальный размер файла — 25 МБ')
+    return await _store_task_file(task_id, body.name, content)
 
 
 @router.delete('/tasks/{task_id}/monocle/files/{file_id}')

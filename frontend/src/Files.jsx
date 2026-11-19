@@ -19,7 +19,7 @@ import {
   X,
 } from 'lucide-react';
 import { request } from './api';
-import { fileContent, safeFileName, uploadTaskFiles } from './fileUpload';
+import { cancelStagedUpload, safeFileName, uploadTaskFiles, uploadWorkspaceFile } from './fileUpload';
 import { useMediaQuery } from '@/lib/utils';
 import { CollapseSection, SlidePanel } from '@/lib/motion';
 import { Button, IconButton } from '@/components/ui/button';
@@ -239,19 +239,13 @@ export default function Files() {
       for (const file of list) {
         const fileName = safeFileName(file.name, 200);
         const path = target ? `${target}/${fileName}` : fileName;
-        const content = await fileContent(file);
         try {
-          await request('/integrations/monocle/workspace/upload', {
-            method: 'POST',
-            body: JSON.stringify({ path, content }),
-          });
+          await uploadWorkspaceFile(path, file);
         } catch (err) {
           if (err?.status === 409 && window.confirm(`Файл «${fileName}» уже существует. Заменить его?`)) {
-            await request('/integrations/monocle/workspace/upload', {
-              method: 'POST',
-              body: JSON.stringify({ path, content, overwrite: true }),
-            });
+            await uploadWorkspaceFile(path, file, { overwrite: true, uploadId: err.uploadId });
           } else {
+            await cancelStagedUpload(err?.uploadId);
             throw err;
           }
         }

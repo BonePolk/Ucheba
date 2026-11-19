@@ -19,7 +19,7 @@ export async function request(path, options = {}) {
       }
     }
     const fallbackByStatus = {
-      413: 'Файл слишком большой (макс. 25 МБ)',
+      413: 'Прокси-сервер отклонил размер запроса (HTTP 413)',
       502: 'Сервис временно недоступен',
       503: 'Сервис временно недоступен',
       504: 'Превышено время ожидания сервера',
@@ -29,6 +29,7 @@ export async function request(path, options = {}) {
       : fallbackByStatus[response.status] ?? `Ошибка запроса (HTTP ${response.status})`;
     const failure = new Error(message);
     failure.status = response.status;
+    if (error?.upload_id) failure.uploadId = error.upload_id;
     throw failure;
   }
   return response.status === 204 ? null : response.json();
