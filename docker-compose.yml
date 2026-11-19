@@ -100,6 +100,7 @@ services:
     healthcheck: *health
     environment:
       INTERNAL_SECRET: ${INTEGRATION_ENCRYPTION_KEY:-}
+      ARRODES_SANDBOX: ${ARRODES_SANDBOX:-}
     volumes:
       - codex-home:/home/codex/.codex
       - codex-work:/work

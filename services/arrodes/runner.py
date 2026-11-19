@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import logging
+import tempfile
 from common.browser_client import browser_request, browser_run_id
 from common.agent_history import with_history
 from common.agent_memory import MEMORY_INSTRUCTION
@@ -19,6 +20,7 @@ from openai_codex import ApprovalMode, AsyncCodex, CodexConfig, ExternalMessage,
 
 HOME = Path('/home/codex')
 WORK = Path('/work')
+CONTAINER_SANDBOX = os.environ.get('ARRODES_SANDBOX', '').strip().lower() == 'container'
 @dataclass
 class Connection:
     run_lock: object = field(default_factory=asyncio.Lock)
@@ -53,9 +55,9 @@ def prepare_user():
     (root / '.codex').mkdir(exist_ok=True, mode=0o700)
     os.chown(root / '.codex', uid, uid)
     if user_id() != 1:
-        work().mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chown(work(), uid, uid)
-        work().chmod(0o700)
+        work().mkdir(parents=True, exist_ok=True, mode=0o711)
+        os.chown(work(), 0, 0)
+        work().chmod(0o711)
 
 
 async def get_client():
@@ -73,8 +75,9 @@ async def get_client():
 
 async def sandbox_available():
     prepare_user()
+    args = ('--version',) if CONTAINER_SANDBOX else ('sandbox', '--', '/bin/true')
     process = await asyncio.create_subprocess_exec('/usr/local/bin/arrodes-worker', str(user_id()),
-        'sandbox', '--', '/bin/true', cwd=str(home()),
+        *args, cwd=str(home()),
         stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
     try:
         _, error = await asyncio.wait_for(process.communicate(), 10)
@@ -82,13 +85,13 @@ async def sandbox_available():
         if process.returncode != 0:
             text = error.decode(errors='replace').lower()
             if 'creating new namespace failed: permission denied' in text:
-                detail = 'Ядро хоста (AppArmor userns) запрещает непривилегированные namespaces. Задайте ARRODES_APPARMOR=runc в .env и пересоздайте arrodes (либо kernel.apparmor_restrict_unprivileged_userns=0 на хосте).'
+                detail = 'Ядро хоста блокирует вложенный bubblewrap (AppArmor userns). Задайте ARRODES_SANDBOX=container в .env и пересоберите arrodes (либо kernel.apparmor_restrict_unprivileged_userns=0 на хосте).'
             elif ('no permissions to create' in text or 'creating new namespace failed' in text) and 'namespace' in text:
-                detail = 'Контейнер запрещает создание namespace для bubblewrap. Примените security_opt сервиса arrodes из Compose.'
+                detail = 'Контейнер запрещает создание namespace для bubblewrap. Задайте ARRODES_SANDBOX=container в .env или примените security_opt из Compose.'
             elif 'failed to make / slave' in text or ('bwrap:' in text and ('permission denied' in text or 'operation not permitted' in text)):
-                detail = 'Профиль безопасности контейнера (AppArmor/mount) блокирует bubblewrap. Пересоздайте arrodes с актуальным Compose.'
+                detail = 'Окружение контейнера блокирует bubblewrap. Задайте ARRODES_SANDBOX=container в .env и пересоберите arrodes.'
             else:
-                detail = 'Не удалось запустить Linux sandbox; код завершения ' + str(process.returncode)
+                detail = 'Не удалось запустить рабочее окружение Arrodes; код завершения ' + str(process.returncode)
         state().sandbox_error = detail
         return process.returncode == 0
     except TimeoutError:
@@ -105,7 +108,8 @@ async def status():
     account = await current.account()
     return {'authorized': account.account is not None, 'device': state().login_info,
             'busy': state().run_lock.locked(), 'sandbox_available': await sandbox_available(),
-            'sandbox_error': state().sandbox_error}
+            'sandbox_error': state().sandbox_error,
+            'sandbox_mode': 'container' if CONTAINER_SANDBOX else 'bwrap'}
 
 
 async def models():
@@ -151,7 +155,8 @@ async def check(model=None):
     if not await sandbox_available():
         raise HTTPException(503, 'Linux sandbox недоступен. ' + state().sandbox_error)
     current = await get_client()
-    thread = await current.thread_start(cwd=str(home()), sandbox=Sandbox.read_only,
+    sandbox = Sandbox.full_access if CONTAINER_SANDBOX else Sandbox.read_only
+    thread = await current.thread_start(cwd=str(home()), sandbox=sandbox,
                                         ephemeral=True, approval_mode=ApprovalMode.deny_all, model=model or None)
     async with asyncio.timeout(90):
         await thread.run('Ответь только OK.')
@@ -190,11 +195,18 @@ async def execute(run_id, payload, progress):
         workspace = previous.get('workspace', run_id)
         path = work() / workspace
         progress.add('Готовит отдельную рабочую директорию', description='Выделяет место для файлов и результатов этой задачи.')
+        uid = 10000 + user_id()
         path.mkdir(mode=0o700, exist_ok=bool(previous))
-        os.chown(path, 10000 + user_id(), 10000 + user_id())
-        current = await get_client()
-        progress.add('Подключается к Arrodes и создаёт рабочую сессию', description='Передаёт поручение и разрешения рабочему агенту.')
-        instructions = """Ты Arrodes, универсальный исполнитель Ucheba. Выполняй поручение, а не объясняй, как его выполнить.
+        current = None
+        try:
+            os.chown(path, uid, uid)
+            path.chmod(0o700)
+            result_file = path / 'result.md'
+            if previous and result_file.exists() and not result_file.is_symlink():
+                os.chown(result_file, uid, uid)
+            current = await get_client()
+            progress.add('Подключается к Arrodes и создаёт рабочую сессию', description='Передаёт поручение и разрешения рабочему агенту.')
+            instructions = """Ты Arrodes, универсальный исполнитель Ucheba. Выполняй поручение, а не объясняй, как его выполнить.
 Пиши и запускай код, создавай документы и проверяй результаты доступными средствами.
 Начни с полного условия, контекста и вложений; при необходимости найди другие задачи через list_tasks/read_task.
 Ты не планировщик: не управляй календарём, приоритетами и статусами задач.
@@ -205,6 +217,7 @@ async def execute(run_id, payload, progress):
 Сдача работ, отправка сообщений, публикация, удаление и другие необратимые внешние действия
 требуют отдельного явного подтверждения через ask_user с точным описанием действия и адресата.
 При отказе не выполняй действие. Не запрашивай секреты, не обходи sandbox и ручные проверки.
+Работай строго внутри текущей рабочей директории поручения; не читай и не изменяй файлы за её пределами и не обращайся к внутренним адресам сервисов.
 Перед изменением существующего файла прочитай актуальную версию Silo. Не повторяй запись вслепую при потере ответа.
 Кратко поясняй цель и результаты этапов через commentary, без скрытых рассуждений.
 Если не хватает данных — спроси; после ответа продолжай работу.
@@ -213,41 +226,69 @@ async def execute(run_id, payload, progress):
 Различай: выполнено и проверено; выполнено без полной проверки; частично; не выполнено с причиной.
 Успешный thread не доказывает решение. Никогда автоматически не завершай задачу.
 """ + MEMORY_INSTRUCTION + QUESTION_INSTRUCTION + FILE_INSTRUCTION + (
-            ' Ограничения готовых файловых инструментов не ограничивают создание и проверку файлов '
-            'твоими командами в рабочей директории. Используй доступные программы и библиотеки; '
-            'при невозможности нужного формата объясни ограничение и сохрани полезный результат.')
-        adapter = Tools(path, progress)
-        async with serve(adapter) as config:
-            try:
-                options = dict(cwd=str(path), sandbox=Sandbox.workspace_write, model=payload.get('model') or None,
-                    approval_mode=ApprovalMode.deny_all, developer_instructions=instructions, config=config)
-                if previous.get('thread_id'):
-                    thread = await current.thread_resume(previous['thread_id'], **options)
-                else:
-                    thread = await current.thread_start(ephemeral=False, **options)
-                record = metadata(run_id)
-                record.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                record.write_text(json.dumps({'thread_id': thread.id, 'workspace': workspace}))
-                task = asyncio.create_task(run_turn(thread, path, payload, progress, adapter))
-                try:
-                    return await asyncio.shield(task)
-                except asyncio.CancelledError:
+                ' Ограничения готовых файловых инструментов не ограничивают создание и проверку файлов '
+                'твоими командами в рабочей директории. Используй доступные программы и библиотеки; '
+                'при невозможности нужного формата объясни ограничение и сохрани полезный результат.')
+            adapter = Tools(path, progress)
+            with tempfile.TemporaryDirectory(prefix='arrodes-run-') as scratch:
+                os.chmod(scratch, 0o711)
+                run_home = Path(scratch) / 'home'
+                run_tmp = Path(scratch) / 'tmp'
+                for item in (run_home, run_tmp):
+                    item.mkdir(mode=0o700)
+                    os.chown(item, uid, uid)
+                async with serve(adapter) as config:
                     try:
-                        async with asyncio.timeout(15):
-                            if adapter.turn is not None:
-                                await adapter.turn.interrupt()
-                            await asyncio.gather(task, return_exceptions=True)
-                    except Exception as exc:
-                        logging.getLogger('uvicorn.error').warning('Arrodes interruption: %s', type(exc).__name__)
-                        await current.close()
-                        state().client = None
-                        task.cancel()
-                        await asyncio.gather(task, return_exceptions=True)
-                    raise
-            finally:
-                if state().client is current:
-                    await current.close()
-                    state().client = None
+                        run_config = config | {
+                            'allow_login_shell': False,
+                            'shell_environment_policy': {
+                                'inherit': 'none',
+                                'set': {
+                                    'HOME': str(run_home),
+                                    'TMPDIR': str(run_tmp),
+                                    'TMP': str(run_tmp),
+                                    'TEMP': str(run_tmp),
+                                    'PATH': '/usr/local/bin:/usr/bin:/bin',
+                                    'LANG': 'C.UTF-8',
+                                },
+                            },
+                        }
+                        sandbox = Sandbox.full_access if CONTAINER_SANDBOX else Sandbox.workspace_write
+                        options = dict(cwd=str(path), sandbox=sandbox, model=payload.get('model') or None,
+                            approval_mode=ApprovalMode.deny_all, developer_instructions=instructions, config=run_config)
+                        if previous.get('thread_id'):
+                            thread = await current.thread_resume(previous['thread_id'], **options)
+                        else:
+                            thread = await current.thread_start(ephemeral=False, **options)
+                        record = metadata(run_id)
+                        record.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                        record.write_text(json.dumps({'thread_id': thread.id, 'workspace': workspace}))
+                        task = asyncio.create_task(run_turn(thread, path, payload, progress, adapter))
+                        try:
+                            return await asyncio.shield(task)
+                        except asyncio.CancelledError:
+                            try:
+                                async with asyncio.timeout(15):
+                                    if adapter.turn is not None:
+                                        await adapter.turn.interrupt()
+                                    await asyncio.gather(task, return_exceptions=True)
+                            except Exception as exc:
+                                logging.getLogger('uvicorn.error').warning('Arrodes interruption: %s', type(exc).__name__)
+                                await current.close()
+                                state().client = None
+                                task.cancel()
+                                await asyncio.gather(task, return_exceptions=True)
+                            raise
+                    finally:
+                        if current is not None and state().client is current:
+                            await current.close()
+                            state().client = None
+        finally:
+            if current is not None and state().client is current:
+                await current.close()
+                state().client = None
+            os.chown(path, 0, 0)
+            path.chmod(0o700)
 
 
 
@@ -306,6 +347,7 @@ async def run_turn(thread, path, payload, progress, adapter):
     progress.add('Сохраняет подготовленные материалы', description='Готовит результат и файлы для проверки владельцем.')
     fd = open_local(path, 'result.md', os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
     with os.fdopen(fd, 'w') as output:
+        os.fchown(output.fileno(), 10000 + user_id(), 10000 + user_id())
         output.write(summary)
     try:
         await adapter.call('publish_file', {'local_path': 'result.md', 'path': 'Arrodes/' + payload['run_id'] + '/result.md', 'version': ''})
@@ -315,6 +357,15 @@ async def run_turn(thread, path, payload, progress, adapter):
     if adapter.files:
         summary += '\n\nМатериалы в Silo:\n' + '\n'.join(f'[{name}]({url})' for name, url in adapter.files.items())
     return {'summary': summary[:20000]}
+
+
+def lock_workspaces(folder):
+    if not folder.exists():
+        return
+    for item in folder.iterdir():
+        if item.name != 'users' and item.is_dir() and not item.is_symlink():
+            os.chown(item, 0, 0)
+            item.chmod(0o700)
 
 
 def prepare_directories():
@@ -336,9 +387,20 @@ def prepare_directories():
         os.chown(item, 0, 0)
         item.chmod(0o711)
     WORK.mkdir(exist_ok=True)
-    (WORK / 'users').mkdir(exist_ok=True, mode=0o711)
-    os.chown(WORK, 0, 0)
-    WORK.chmod(0o711)
+    lock_workspaces(WORK)
+    users_work = WORK / 'users'
+    users_work.mkdir(exist_ok=True, mode=0o711)
+    for item in (WORK, users_work):
+        os.chown(item, 0, 0)
+        item.chmod(0o711)
+    for item in users_work.iterdir():
+        if item.is_dir() and not item.is_symlink():
+            os.chown(item, 0, 0)
+            item.chmod(0o711)
+            lock_workspaces(item)
+    tmp = Path('/tmp')
+    if tmp.is_dir():
+        tmp.chmod(0o1733)
 
 
 async def close():
