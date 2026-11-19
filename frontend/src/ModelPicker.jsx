@@ -5,13 +5,25 @@ import { Button } from '@/components/ui/button';
 import { Field, Input } from '@/components/ui/input';
 import { Combobox } from '@/components/ui/select';
 
-export default function ModelPicker({ path, endpoint = '', apiKey = '', configured, value, onChange, chatgpt = false }) {
+export default function ModelPicker({
+  path,
+  endpoint = '',
+  apiKey = '',
+  configured,
+  providerConfigured = configured,
+  value,
+  onChange,
+  chatgpt = false,
+  authMode = chatgpt ? 'oauth' : 'api_key',
+  oauthAuthorized = true,
+}) {
   const [items, setItems] = useState([]);
   const [manual, setManual] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState('');
   const active = useRef(null);
+  const isOauth = authMode === 'oauth';
 
   useEffect(() => {
     setItems([]);
@@ -19,7 +31,7 @@ export default function ModelPicker({ path, endpoint = '', apiKey = '', configur
     setError('');
     setLoading(false);
     return () => active.current?.abort();
-  }, [path, endpoint, apiKey]);
+  }, [path, authMode, endpoint, apiKey]);
 
   async function load() {
     active.current?.abort();
@@ -31,7 +43,15 @@ export default function ModelPicker({ path, endpoint = '', apiKey = '', configur
       const result = await request(path, {
         method: 'POST',
         signal: controller.signal,
-        body: JSON.stringify(chatgpt ? {} : { base_url: endpoint.trim(), api_key: apiKey.trim() }),
+        body: JSON.stringify(
+          isOauth
+            ? { auth_mode: 'oauth' }
+            : {
+                auth_mode: 'api_key',
+                ...(endpoint.trim() ? { base_url: endpoint.trim() } : {}),
+                ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}),
+              },
+        ),
       });
       if (controller.signal.aborted) return;
       setItems([...new Set(result.filter((item) => typeof item === 'string' && item.trim()))]);
@@ -43,7 +63,7 @@ export default function ModelPicker({ path, endpoint = '', apiKey = '', configur
     }
   }
 
-  const canLoad = chatgpt || Boolean(endpoint.trim() && (apiKey.trim() || configured));
+  const canLoad = isOauth ? Boolean(oauthAuthorized) : Boolean(providerConfigured || (endpoint.trim() && apiKey.trim()));
   const options = [...new Set([value, ...items].filter(Boolean))];
 
   return (
@@ -57,16 +77,16 @@ export default function ModelPicker({ path, endpoint = '', apiKey = '', configur
           <Combobox
             value={value || null}
             options={options}
-            clearable={chatgpt}
+            clearable={isOauth}
             allowFreeText
-            placeholder={chatgpt ? 'По умолчанию' : 'Выберите модель…'}
+            placeholder={isOauth ? 'По умолчанию' : 'Выберите модель…'}
             searchPlaceholder="Поиск модели…"
             emptyText={loading ? 'Загрузка…' : 'Моделей нет — введите ID вручную'}
             onOpen={() => {
               if (canLoad && !loaded && !loading) load();
             }}
             onChange={(model) => {
-              if (chatgpt || model) onChange(model || '');
+              if (isOauth || model) onChange(model || '');
             }}
           />
         </Field>

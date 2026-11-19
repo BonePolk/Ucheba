@@ -1,0 +1,556 @@
+"""Общий Codex harness (openai-codex SDK + изолированный MCP) для всех агентов."""
+import asyncio
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+import json
+import logging
+import os
+from pathlib import Path
+import shutil
+import socket
+import struct
+import tempfile
+from typing import Any
+
+from fastapi import HTTPException
+import httpx
+from openai_codex import ApprovalMode, AsyncCodex, CodexConfig, Sandbox
+
+from common.browser_client import browser_run_id
+from common.identity import current_user_id, user_id
+from common.progress import timestamp
+from common.provider import provider_url
+
+HOME = Path('/home/codex')
+WORKER_BIN = '/usr/local/bin/codex-worker'
+MCP_STDIO_SCRIPT = '/app/common/mcp_stdio.py'
+CONTAINER_SANDBOX = os.environ.get('ARRODES_SANDBOX', '').strip().lower() == 'container'
+API_PROVIDER_ID = 'ucheba_api'
+
+
+def user_home() -> Path:
+    return HOME / '.codex' / 'users' / str(user_id())
+
+
+def prepare_codex_root(migrate_legacy: bool = False) -> None:
+    root = HOME / '.codex'
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    users = root / 'users'
+    users.mkdir(exist_ok=True, mode=0o711)
+    owner_home = users / '1'
+    owner_home.mkdir(exist_ok=True, mode=0o700)
+    oauth_home = owner_home / '.codex'
+    api_home = owner_home / '.codex-api'
+    oauth_home.mkdir(exist_ok=True, mode=0o700)
+    api_home.mkdir(exist_ok=True, mode=0o700)
+    if migrate_legacy:
+        for item in root.iterdir():
+            if item.name in ('users', 'arrodes-state'):
+                continue
+            target = oauth_home / item.name
+            try:
+                if not target.exists():
+                    shutil.move(str(item), target)
+            except (FileNotFoundError, shutil.Error):
+                pass
+    for item in (owner_home, oauth_home, api_home):
+        os.chown(item, 10001, 10001)
+        item.chmod(0o700)
+    for item in (HOME, root, users):
+        os.chown(item, 0, 0)
+        item.chmod(0o711)
+    tmp = Path('/tmp')
+    if tmp.is_dir():
+        tmp.chmod(0o1733)
+
+
+def prepare_codex_user() -> None:
+    uid = 10000 + user_id()
+    root = user_home()
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chown(root, uid, uid)
+    root.chmod(0o700)
+    for sub in ('.codex', '.codex-api'):
+        folder = root / sub
+        folder.mkdir(exist_ok=True, mode=0o700)
+        os.chown(folder, uid, uid)
+        folder.chmod(0o700)
+
+
+def normalize_auth(config: dict | None, api_key: str = '', *, default_mode: str = 'api_key', label: str = 'Агент'):
+    cfg = config or {}
+    auth_mode = (cfg.get('auth_mode') or default_mode).strip()
+    if auth_mode not in ('oauth', 'api_key'):
+        raise HTTPException(422, 'Неизвестный режим авторизации')
+    model = (cfg.get('model') or '').strip()
+    if auth_mode == 'api_key':
+        key = (api_key or '').strip()
+        if not key:
+            raise HTTPException(400, f'Для {label} в режиме API-ключа сохраните API-ключ в профиле')
+        if not model:
+            raise HTTPException(400, f'Для {label} в режиме API-ключа укажите модель в профиле')
+        try:
+            base_url = provider_url(cfg.get('base_url') or 'https://lenec.tech/v1')
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        return 'api_key', key, base_url, model
+    return 'oauth', '', '', model
+
+
+def normalize_effort(value: str | None, default: str = 'medium') -> str:
+    return value if value in ('low', 'medium', 'high') else default
+
+
+def append_custom_instructions(base: str, custom: str | None) -> str:
+    text = (custom or '').strip()[:2000]
+    if not text:
+        return base
+    return base + '\n\nДополнительные указания владельца (не отменяют правила безопасности и формат ответа):\n' + text
+
+
+def build_codex_config(
+    auth_mode: str,
+    *,
+    api_key: str = '',
+    base_url: str = '',
+    allow_shell: bool = False,
+    web_search: str = 'disabled',
+    cwd: str | Path | None = None,
+) -> tuple[CodexConfig, str | None]:
+    mode_arg = 'api' if auth_mode == 'api_key' else 'oauth'
+    web_search = web_search if web_search in ('disabled', 'cached', 'live') else 'disabled'
+    args = [
+        WORKER_BIN,
+        str(user_id()),
+        mode_arg,
+        '-c',
+        'sandbox_workspace_write.network_access=false',
+        '-c',
+        f'web_search={json.dumps(web_search)}',
+    ]
+    if not allow_shell:
+        args.extend(['-c', 'features.shell_tool=false'])
+    if auth_mode == 'api_key':
+        args.extend([
+            '-c', f'model_provider={json.dumps(API_PROVIDER_ID)}',
+            '-c', f'model_providers.{API_PROVIDER_ID}.name="Ucheba API"',
+            '-c', f'model_providers.{API_PROVIDER_ID}.base_url={json.dumps(base_url)}',
+            '-c', f'model_providers.{API_PROVIDER_ID}.wire_api="responses"',
+            '-c', f'model_providers.{API_PROVIDER_ID}.env_key="UCHEBA_API_KEY"',
+            '-c', f'model_providers.{API_PROVIDER_ID}.requires_openai_auth=false',
+        ])
+        env = {'UCHEBA_API_KEY': api_key}
+        thread_provider = API_PROVIDER_ID
+    else:
+        env = None
+        thread_provider = None
+    args.extend(['app-server', '--listen', 'stdio://'])
+    return CodexConfig(cwd=str(cwd or user_home()), env=env, launch_args_override=tuple(args)), thread_provider
+
+
+@asynccontextmanager
+async def open_codex(
+    label: str,
+    *,
+    auth_mode: str,
+    api_key: str = '',
+    base_url: str = '',
+    allow_shell: bool = False,
+    web_search: str = 'disabled',
+    cwd: str | Path | None = None,
+):
+    prepare_codex_user()
+    config, thread_provider = build_codex_config(
+        auth_mode,
+        api_key=api_key,
+        base_url=base_url,
+        allow_shell=allow_shell,
+        web_search=web_search,
+        cwd=cwd,
+    )
+    client = AsyncCodex(config)
+    await client.__aenter__()
+    try:
+        if auth_mode == 'oauth':
+            account = await client.account()
+            if account.account is None:
+                raise HTTPException(400, f'Подключите OpenAI OAuth в профиле для {label}')
+        yield client, thread_provider
+    finally:
+        try:
+            await client.close()
+        except Exception:
+            pass
+
+
+@asynccontextmanager
+async def scratch_env(writable: bool = False):
+    uid = 10000 + user_id()
+    with tempfile.TemporaryDirectory(prefix='codex-run-') as scratch:
+        os.chmod(scratch, 0o711)
+        run_home = Path(scratch) / 'home'
+        run_tmp = Path(scratch) / 'tmp'
+        work_dir = Path(scratch) / 'work'
+        for item in (run_home, run_tmp):
+            item.mkdir(mode=0o700)
+            os.chown(item, uid, uid)
+        if writable:
+            work_dir.mkdir(mode=0o700)
+            os.chown(work_dir, uid, uid)
+        else:
+            work_dir.mkdir(mode=0o555)
+            os.chown(work_dir, 0, 0)
+        yield work_dir, {
+            'allow_login_shell': False,
+            'shell_environment_policy': {
+                'inherit': 'none',
+                'set': {
+                    'HOME': str(run_home),
+                    'TMPDIR': str(run_tmp),
+                    'TMP': str(run_tmp),
+                    'TEMP': str(run_tmp),
+                    'PATH': '/usr/local/bin:/usr/bin:/bin',
+                    'LANG': 'C.UTF-8',
+                },
+            },
+        }
+
+
+class McpToolAdapter:
+    def __init__(self, tools, handler, progress):
+        self.tools = tools
+        self.schemas = {item['name']: item for item in tools}
+        self.handler = handler
+        self.progress = progress
+        self.turn = None
+        self.lock = asyncio.Lock()
+        self.terminal_result = None
+        self.fatal_error = None
+
+    async def respond(self, message):
+        method = message['method']
+        if method == 'initialize':
+            return {
+                'protocolVersion': message['params']['protocolVersion'],
+                'capabilities': {'tools': {}},
+                'serverInfo': {'name': 'ucheba', 'version': '1'},
+            }
+        if method == 'ping':
+            return {}
+        if method == 'tools/list':
+            return {
+                'tools': [
+                    {
+                        'name': item['name'],
+                        'description': item['description'],
+                        'inputSchema': item['parameters'],
+                    }
+                    for item in self.tools
+                ]
+            }
+        if method != 'tools/call':
+            raise ValueError('Метод не поддерживается')
+        name = message['params']['name']
+        if name not in self.schemas:
+            raise ValueError('Неизвестный инструмент')
+        args = message['params'].get('arguments', {})
+        try:
+            async with self.lock:
+                output, extra_content = await self.handler(name, args)
+            content = [{'type': 'text', 'text': json.dumps(output, ensure_ascii=False, default=str)}]
+            for item in extra_content or ():
+                if item.get('type') == 'input_text':
+                    content.append({'type': 'text', 'text': item['text']})
+                elif item.get('type') == 'input_image':
+                    url = item['image_url']
+                    header, data = url.split(',', 1)
+                    content.append({'type': 'image', 'data': data, 'mimeType': header[5:].split(';')[0]})
+            return {'content': content, 'isError': False}
+        except (HTTPException, httpx.HTTPError, ValueError, OSError, KeyError, TypeError) as exc:
+            detail = str(exc.detail) if isinstance(exc, HTTPException) else 'Ошибка инструмента: ' + type(exc).__name__
+            if self.progress is not None and self.fatal_error is None:
+                self.progress.add(detail)
+            return {'content': [{'type': 'text', 'text': detail}], 'isError': True}
+
+
+@asynccontextmanager
+async def serve_mcp(adapter: McpToolAdapter):
+    owner = user_id()
+    run_id = browser_run_id.get()
+    handlers = set()
+
+    async def handle(reader, writer):
+        task = asyncio.current_task()
+        handlers.add(task)
+        token = current_user_id.set(owner)
+        browser_token = browser_run_id.set(run_id)
+        try:
+            credentials = writer.get_extra_info('socket').getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+            if struct.unpack('3i', credentials)[1] != 10000 + owner:
+                return
+            while line := await reader.readline():
+                message = json.loads(line)
+                if 'id' not in message:
+                    continue
+                try:
+                    result = {'result': await adapter.respond(message)}
+                except (ValueError, KeyError):
+                    result = {'error': {'code': -32602, 'message': 'Некорректный MCP-запрос'}}
+                except Exception as exc:
+                    # Keep the connection usable; expose no arguments or private exception text.
+                    logging.getLogger('uvicorn.error').error('Codex MCP handler: %s', type(exc).__name__)
+                    result = {'error': {'code': -32603, 'message': 'Внутренняя ошибка инструмента: ' + type(exc).__name__}}
+                writer.write((json.dumps({'jsonrpc': '2.0', 'id': message['id'], **result}, ensure_ascii=False) + '\n').encode())
+                await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            browser_run_id.reset(browser_token)
+            current_user_id.reset(token)
+            handlers.discard(task)
+
+    with tempfile.TemporaryDirectory(prefix='codex-mcp-') as directory:
+        os.chmod(directory, 0o711)
+        path = str(Path(directory) / 'tools.sock')
+        server = await asyncio.start_unix_server(handle, path, limit=4 * 1024 * 1024)
+        os.chown(path, 10000 + owner, 10000 + owner)
+        os.chmod(path, 0o600)
+        try:
+            async with server:
+                yield {
+                    'mcp_servers': {
+                        'ucheba': {
+                            'command': '/usr/local/bin/python',
+                            'args': [MCP_STDIO_SCRIPT, path],
+                            'tool_timeout_sec': 2147483647,
+                            'required': True,
+                            'default_tools_approval_mode': 'approve',
+                        }
+                    }
+                }
+        finally:
+            for task in list(handlers):
+                task.cancel()
+            await asyncio.gather(*handlers, return_exceptions=True)
+
+
+@dataclass
+class TurnOutcome:
+    text: str
+    completed: bool
+    status: str
+    error_detail: str | None
+    usage: dict
+    terminal_result: Any = None
+
+
+def _extract_error_info(error_obj):
+    if error_obj is None:
+        return None, None
+    info = getattr(error_obj, 'codex_error_info', None) or getattr(error_obj, 'codexErrorInfo', None)
+    if info is None and isinstance(error_obj, dict):
+        info = error_obj.get('codex_error_info') or error_obj.get('codexErrorInfo')
+    if info is None:
+        return None, None
+    inner = getattr(info, 'root', info)
+    kind = getattr(inner, 'type', None)
+    if kind is None and isinstance(inner, dict):
+        kind = inner.get('type') or (next(iter(inner)) if len(inner) == 1 else None)
+    elif kind is None and not isinstance(inner, str):
+        kind = type(inner).__name__
+    elif isinstance(inner, str):
+        kind = inner
+    status_code = (
+        getattr(inner, 'http_status_code', None)
+        or getattr(inner, 'httpStatusCode', None)
+        or (inner.get('http_status_code') or inner.get('httpStatusCode') if isinstance(inner, dict) else None)
+    )
+    if status_code is None and isinstance(inner, dict) and len(inner) == 1:
+        nested = next(iter(inner.values()))
+        if isinstance(nested, dict):
+            status_code = nested.get('http_status_code') or nested.get('httpStatusCode')
+    return kind, status_code
+
+
+def format_turn_error(label: str, turn_obj) -> str:
+    error_obj = getattr(turn_obj, 'error', None)
+    kind, status_code = _extract_error_info(error_obj)
+    if status_code == 401 or kind == 'unauthorized':
+        return f'{label}: шлюз или OpenAI отклонил авторизацию (401)'
+    if status_code == 402:
+        return f'{label}: недостаточно средств или исчерпан баланс ключа на шлюзе (HTTP 402)'
+    if status_code == 403:
+        return f'{label}: шлюз запретил доступ к модели (HTTP 403)'
+    if status_code == 404 or kind == 'modelNotFound':
+        return f'{label}: шлюз не нашёл модель или Responses API (HTTP 404)'
+    if status_code == 429 or kind == 'usageLimitExceeded':
+        return f'{label}: превышен лимит запросов или квота шлюза (HTTP 429)'
+    if kind in ('httpConnectionFailed', 'responseStreamConnectionFailed', 'responseStreamDisconnected'):
+        return f'{label}: ошибка соединения с модельным шлюзом'
+    if kind == 'contextWindowExceeded':
+        return f'{label}: превышен контекст модели'
+    return f'{label}: агент не завершил работу'
+
+
+async def run_codex_turn(
+    thread,
+    prompt_input,
+    *,
+    label: str,
+    progress,
+    adapter: McpToolAdapter | None = None,
+    effort: str | None = None,
+    output_schema: dict | None = None,
+    summary: str | None = 'auto',
+    client=None,
+) -> TurnOutcome:
+    progress.begin_response()
+    turn_kwargs = {}
+    if effort is not None:
+        turn_kwargs['effort'] = effort
+    if output_schema is not None:
+        turn_kwargs['output_schema'] = output_schema
+    if summary is not None:
+        turn_kwargs['summary'] = summary
+
+    turn = None
+    summary_text = None
+    fallback_text = None
+    delta_buffers = {}
+    last_delta_id = None
+    commentary = set()
+    completed = False
+    turn_status = ''
+    error_detail = None
+    usage = {'input_tokens': 0, 'output_tokens': 0}
+
+    try:
+        turn = await thread.turn(prompt_input, **turn_kwargs)
+        if adapter is not None:
+            adapter.turn = turn
+
+        async def consume():
+            nonlocal summary_text, fallback_text, last_delta_id, completed, turn_status, error_detail, usage
+            async for event in turn.stream():
+                progress.update(last_activity_at=timestamp())
+                data = event.payload
+                if event.method in ('item/started', 'item/completed'):
+                    item = data.item.root if hasattr(data.item, 'root') else data.item
+                    phase = getattr(getattr(item, 'phase', None), 'value', None)
+                    if event.method == 'item/started':
+                        progress.update(model_waiting=item.type in ('reasoning', 'agentMessage'))
+                        if item.type in ('commandExecution', 'fileChange', 'webSearch'):
+                            labels = {
+                                'commandExecution': 'Выполняет команду',
+                                'fileChange': 'Изменяет файлы',
+                                'webSearch': 'Ищет информацию',
+                            }
+                            progress.add(
+                                labels[item.type],
+                                description='Работает над материалами поручения; цель шага агент поясняет в комментариях.',
+                            )
+                        if item.type == 'agentMessage' and phase == 'commentary':
+                            commentary.add(item.id)
+                    else:
+                        if item.type == 'agentMessage':
+                            if phase == 'final_answer':
+                                summary_text = item.text
+                            elif phase is None:
+                                fallback_text = item.text
+                        else:
+                            progress.update(model_waiting=True)
+                        if adapter is not None and (adapter.fatal_error is not None or adapter.terminal_result is not None):
+                            try:
+                                async with asyncio.timeout(5):
+                                    await turn.interrupt()
+                            except Exception:
+                                pass
+                            break
+                elif event.method == 'item/agentMessage/delta':
+                    if data.item_id in commentary:
+                        progress.summary(data.delta, ('commentary', data.item_id))
+                        progress.update(agent_comment=progress.record['events'][-1]['message'])
+                    else:
+                        delta_buffers[data.item_id] = delta_buffers.get(data.item_id, '') + data.delta
+                        last_delta_id = data.item_id
+                elif event.method == 'item/reasoning/summaryTextDelta':
+                    progress.reasoning_delta(data.delta, (data.item_id, data.summary_index))
+                elif event.method == 'thread/tokenUsage/updated':
+                    usage_obj = data.token_usage.total
+                    usage = {'input_tokens': usage_obj.input_tokens, 'output_tokens': usage_obj.output_tokens}
+                    progress.update(token_usage=dict(usage), current_usage_known=True)
+                elif event.method == 'turn/completed':
+                    turn_status = getattr(getattr(data.turn, 'status', None), 'value', None) or str(getattr(data.turn, 'status', ''))
+                    completed = turn_status == 'completed'
+                    if not completed:
+                        error_detail = format_turn_error(label, data.turn)
+
+        task = asyncio.create_task(consume())
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            try:
+                async with asyncio.timeout(15):
+                    if turn is not None:
+                        await turn.interrupt()
+                    await asyncio.gather(task, return_exceptions=True)
+            except Exception as exc:
+                logging.getLogger('uvicorn.error').warning('%s interruption: %s', label, type(exc).__name__)
+                if client is not None:
+                    try:
+                        await client.close()
+                    except Exception:
+                        pass
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            raise
+    finally:
+        if adapter is not None:
+            adapter.turn = None
+        progress.update(model_waiting=False)
+
+    if adapter is not None and adapter.fatal_error is not None:
+        raise adapter.fatal_error
+
+    text = summary_text or fallback_text or (delta_buffers.get(last_delta_id, '') if last_delta_id else '')
+    return TurnOutcome(
+        text=text or '',
+        completed=completed,
+        status=turn_status,
+        error_detail=error_detail,
+        usage=usage,
+        terminal_result=adapter.terminal_result if adapter is not None else None,
+    )
+
+
+async def check_connection(label: str, *, config: dict | None, api_key: str = '', default_mode: str = 'api_key') -> dict:
+    auth_mode, key, base_url, model = normalize_auth(config, api_key, default_mode=default_mode, label=label)
+    sandbox = Sandbox.full_access if CONTAINER_SANDBOX else Sandbox.read_only
+    try:
+        async with open_codex(
+            label,
+            auth_mode=auth_mode,
+            api_key=key,
+            base_url=base_url,
+            allow_shell=False,
+            web_search='disabled',
+        ) as (client, thread_provider), scratch_env(writable=False) as (work_dir, shell_policy):
+            thread = await client.thread_start(
+                cwd=str(work_dir),
+                sandbox=sandbox,
+                ephemeral=True,
+                approval_mode=ApprovalMode.deny_all,
+                model=model or None,
+                model_provider=thread_provider,
+                config=shell_policy,
+            )
+            async with asyncio.timeout(90):
+                await thread.run('Ответь только OK.')
+        return {'ok': True}
+    except HTTPException:
+        raise
+    except TimeoutError:
+        raise HTTPException(502, f'{label}: проверка подключения превысила время ожидания') from None
+    except Exception as exc:
+        logging.getLogger('uvicorn.error').warning('%s check failed: %s', label, type(exc).__name__)
+        raise HTTPException(502, f'{label}: не удалось выполнить проверочный запрос ({type(exc).__name__})') from None

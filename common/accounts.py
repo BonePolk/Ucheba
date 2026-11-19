@@ -31,9 +31,10 @@ def bootstrap():
     token = current_user_id.set(1)
     try:
         with Session(engine) as session:
+            provider_exists = session.get(IntegrationSetting, 'ai_provider') is not None
             context_exists = session.get(IntegrationSetting, 'context') is not None
-        if not context_exists and os.getenv('LUNA_API_KEY'):
-            save_settings('monocle', secrets={'api_key': os.environ['LUNA_API_KEY']})
+        if not provider_exists and not context_exists and os.getenv('LUNA_API_KEY'):
+            save_settings('ai_provider', secrets={'api_key': os.environ['LUNA_API_KEY']})
     finally:
         current_user_id.reset(token)
 

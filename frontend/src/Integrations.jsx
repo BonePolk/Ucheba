@@ -1,12 +1,10 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ExternalLink } from 'lucide-react';
 import { request } from './api';
 import AgentSettings from './AgentSettings';
+import AiConnections from './AiConnections';
 import BotSettings from './BotSettings';
-import ModelPicker from './ModelPicker';
 import { Button } from '@/components/ui/button';
-import { Switch } from '@/components/ui/controls';
 import { Field, PasswordField } from '@/components/ui/input';
 import { MultiCombobox } from '@/components/ui/select';
 import { Badge, Notice, PageLoader, SectionHeader, StatusIndicator } from '@/components/ui/surface';
@@ -48,7 +46,6 @@ function IntegrationForms({ data, features }) {
   const client = useQueryClient();
   const reduced = useReducedMotion();
   const [telegram, setTelegram] = useState({ enabled: data.telegram.enabled, api_id: '', api_hash: '', phone: '' });
-  const [arrodes, setArrodes] = useState({ enabled: data.arrodes.enabled, auto_prepare: data.arrodes.auto_prepare, model: data.arrodes.model ?? '' });
   const [code, setCode] = useState('');
   const [password, setPassword] = useState('');
   const [step, setStep] = useState('');
@@ -62,15 +59,27 @@ function IntegrationForms({ data, features }) {
     retry: false,
   });
 
-  const arrodesState = useQuery({
-    queryKey: ['integrations', 'arrodes'],
-    enabled: features.arrodes !== false,
-    queryFn: () => request('/integrations/arrodes/status'),
-    refetchInterval: 10000,
+  const anyAgentEnabled = (
+    features.ameba !== false
+    || features.monocle !== false
+    || features.straus !== false
+    || features.arrodes !== false
+  );
+  const oauthState = useQuery({
+    queryKey: ['integrations', 'openai-oauth'],
+    enabled: anyAgentEnabled,
+    queryFn: () => request('/integrations/openai-oauth/status'),
+    refetchInterval: (query) => (
+      ['waiting', 'starting'].includes(query.state.data?.device?.state) ? 3000 : 10000
+    ),
     retry: false,
   });
 
+  const aiReady = Boolean(oauthState.data?.authorized || data.ai_provider?.configured?.api_key);
+  const aiError = Boolean(data.ai_provider?.last_error);
+
   const items = [
+    ...(anyAgentEnabled ? [{ id: 'ai_provider', label: 'Подключения AI', enabled: aiReady, error: aiError }] : []),
     ...(features.ameba !== false && data.ameba ? [{ id: 'ameba', label: 'Ameba', enabled: data.ameba.enabled, error: Boolean(data.ameba.last_error) }] : []),
     ...(features.monocle !== false ? [{ id: 'monocle', label: 'Monocle', enabled: data.monocle.enabled, error: Boolean(data.monocle.last_error) }] : []),
     ...(features.straus !== false && data.straus ? [{ id: 'straus', label: 'Straus', enabled: data.straus.enabled, error: Boolean(data.straus.last_error) }] : []),
@@ -80,7 +89,7 @@ function IntegrationForms({ data, features }) {
     ...(features.notifications !== false ? [{ id: 'notifications', label: 'Уведомления', enabled: data.notifications.enabled, error: Boolean(data.notifications.last_error) }] : []),
   ];
 
-  const [selectedId, setSelectedId] = useState(() => items[0]?.id ?? 'ameba');
+  const [selectedId, setSelectedId] = useState(() => items[0]?.id ?? 'ai_provider');
   const activeId = items.some((i) => i.id === selectedId) ? selectedId : items[0]?.id;
 
   const mutation = useMutation({
@@ -89,13 +98,10 @@ function IntegrationForms({ data, features }) {
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     }),
     onSuccess: async (result, variables) => {
-      if (variables.method === 'PATCH') {
-        const setter = { telegram: setTelegram, arrodes: setArrodes }[variables.path];
-        if (setter) {
-          setter((current) => Object.fromEntries(Object.entries(current).map(([key, value]) => [
-            key, ['api_id', 'api_hash', 'phone', 'api_key', 'api_token'].includes(key) ? '' : variables.body[key] ?? value,
-          ])));
-        }
+      if (variables.method === 'PATCH' && variables.path === 'telegram') {
+        setTelegram((current) => Object.fromEntries(Object.entries(current).map(([key, value]) => [
+          key, ['api_id', 'api_hash', 'phone', 'api_key', 'api_token'].includes(key) ? '' : variables.body[key] ?? value,
+        ])));
       }
       if (result.step) {
         setStep(result.step);
@@ -108,7 +114,6 @@ function IntegrationForms({ data, features }) {
           : 'Готово',
       );
       await client.invalidateQueries({ queryKey: ['integrations'], exact: true });
-      if (variables.path.startsWith('arrodes/')) client.invalidateQueries({ queryKey: ['integrations', 'arrodes'] });
       await client.invalidateQueries({ queryKey: ['tasks'] });
       await client.invalidateQueries({ queryKey: ['inbox'] });
     },
@@ -125,7 +130,7 @@ function IntegrationForms({ data, features }) {
     const value = event.currentTarget.value;
     setter((current) => ({ ...current, [name]: value }));
   };
-  const error = mutation.error || chats.error || arrodesState.error;
+  const error = mutation.error || chats.error || oauthState.error;
 
   if (!items.length) {
     return <Notice tone="info">Все интеграции и агенты отключены администратором.</Notice>;
@@ -168,90 +173,56 @@ function IntegrationForms({ data, features }) {
         {/* Right Detail Configuration Pane */}
         <div className="p-4 min-w-0">
           <StageSwap stageKey={activeId}>
+            {activeId === 'ai_provider' && (
+              <AiConnections key="ai_provider" data={data.ai_provider} oauthState={oauthState} />
+            )}
+
             {activeId === 'ameba' && data.ameba && (
-              <AgentSettings key="ameba" name="ameba" title="Ameba" data={data.ameba} />
+              <AgentSettings
+                key="ameba"
+                name="ameba"
+                title="Ameba"
+                data={data.ameba}
+                provider={data.ai_provider}
+                oauthState={oauthState}
+                onOpenProvider={() => setSelectedId('ai_provider')}
+              />
             )}
 
             {activeId === 'monocle' && (
-              <AgentSettings key="monocle" name="monocle" title="Monocle" data={data.monocle} />
+              <AgentSettings
+                key="monocle"
+                name="monocle"
+                title="Monocle"
+                data={data.monocle}
+                provider={data.ai_provider}
+                oauthState={oauthState}
+                onOpenProvider={() => setSelectedId('ai_provider')}
+              />
             )}
 
             {activeId === 'straus' && data.straus && (
-              <AgentSettings key="straus" name="straus" title="Straus" data={data.straus} />
+              <AgentSettings
+                key="straus"
+                name="straus"
+                title="Straus"
+                data={data.straus}
+                provider={data.ai_provider}
+                oauthState={oauthState}
+                onOpenProvider={() => setSelectedId('ai_provider')}
+              />
             )}
 
             {activeId === 'arrodes' && (
-              <div className="flex flex-col gap-3">
-                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#222222] pb-2.5">
-                  <SectionHeader title="Arrodes" />
-                  <Badge variant={arrodesState.data?.authorized ? 'success' : 'outline'}>
-                    {arrodesState.data?.authorized ? 'Вход выполнен' : 'Нет авторизации'}
-                  </Badge>
-                </div>
-
-                {arrodesState.data && !arrodesState.data.sandbox_available && (
-                  <Notice tone="warning">
-                    Sandbox недоступен: {arrodesState.data.sandbox_error || 'выполнение заблокировано'}.
-                  </Notice>
-                )}
-
-                <div className="flex flex-wrap gap-2">
-                  <Button variant="primary" disabled={mutation.isPending} onClick={() => run('arrodes/connect')}>
-                    Подключить ChatGPT
-                  </Button>
-                  <Button variant="default" disabled={mutation.isPending} onClick={() => run('arrodes/check')}>
-                    Проверить
-                  </Button>
-                </div>
-
-                {arrodesState.data?.device?.state === 'waiting' && (
-                  <Notice tone="accent" title="Подтвердите вход в браузере">
-                    <div className="flex flex-col gap-1.5 mt-1">
-                      {arrodesState.data.device.url && (
-                        <a href={arrodesState.data.device.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-[#CFA9F5] underline w-fit">
-                          OpenAI <ExternalLink className="h-3 w-3" />
-                        </a>
-                      )}
-                      <div className="font-mono text-[15px] font-bold tracking-wider text-[#EAEAEA]">
-                        {arrodesState.data.device.code ?? 'Ожидание кода…'}
-                      </div>
-                    </div>
-                  </Notice>
-                )}
-
-                {['failed', 'expired'].includes(arrodesState.data?.device?.state) && (
-                  <Notice tone="warning">Код истёк. Запросите новый.</Notice>
-                )}
-
-                <ModelPicker
-                  path="/integrations/arrodes/models"
-                  chatgpt
-                  value={arrodes.model}
-                  onChange={(model) => setArrodes((current) => ({ ...current, model }))}
-                />
-
-                <Switch
-                  label="Включить"
-                  checked={arrodes.enabled}
-                  onCheckedChange={(checked) => setArrodes((current) => ({ ...current, enabled: checked }))}
-                />
-                <Switch
-                  label="Автоподготовка задач из Telegram"
-                  checked={arrodes.auto_prepare}
-                  onCheckedChange={(checked) => setArrodes((current) => ({ ...current, auto_prepare: checked }))}
-                />
-
-                <div className="flex flex-wrap gap-2 pt-1">
-                  <Button variant="primary" loading={saving('arrodes')} disabled={mutation.isPending} onClick={() => save('arrodes', arrodes)}>
-                    Сохранить
-                  </Button>
-                  <Button variant="danger-ghost" disabled={mutation.isPending} onClick={() => run('arrodes/disconnect')}>
-                    Отключить
-                  </Button>
-                </div>
-
-                <ConnectionInfo value={data.arrodes} />
-              </div>
+              <AgentSettings
+                key="arrodes"
+                name="arrodes"
+                title="Arrodes"
+                data={data.arrodes}
+                provider={data.ai_provider}
+                oauthState={oauthState}
+                onOpenProvider={() => setSelectedId('ai_provider')}
+              />
             )}
 
             {activeId === 'telegram' && (

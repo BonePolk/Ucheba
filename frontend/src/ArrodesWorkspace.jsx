@@ -140,7 +140,7 @@ export default function ArrodesWorkspace({ task: fixedTask = null, features = {}
   const integrations = useQuery({
     queryKey: ['integrations'],
     queryFn: () => request('/integrations'),
-    enabled: features.arrodes !== false && !compact,
+    enabled: features.arrodes !== false,
     retry: false,
   });
 
@@ -218,7 +218,11 @@ export default function ArrodesWorkspace({ task: fixedTask = null, features = {}
     .slice(-5);
   const browserActive = isBrowserActiveInRun(liveEntry);
 
-  const notAuthorized = arrodesStatus.data && !arrodesStatus.data.authorized;
+  const authMode = integrations.data?.arrodes?.auth_mode || 'oauth';
+  const apiKeyReady = Boolean(integrations.data?.ai_provider?.configured?.api_key && (integrations.data?.arrodes?.model || '').trim());
+  const oauthReady = Boolean(arrodesStatus.data?.authorized);
+  const authReady = authMode === 'api_key' ? apiKeyReady : oauthReady;
+  const notAuthorized = authMode === 'api_key' ? Boolean(integrations.data && !apiKeyReady) : Boolean(arrodesStatus.data && !oauthReady);
   const sandboxBlocked = arrodesStatus.data && !arrodesStatus.data.sandbox_available;
   const configuredModel = integrations.data?.arrodes?.model;
   const liveActiveCard = Boolean(
@@ -241,9 +245,9 @@ export default function ArrodesWorkspace({ task: fixedTask = null, features = {}
           <div className="flex items-center gap-2 min-w-0">
             {!compact && <Terminal className="h-4 w-4 text-[#B98CE8] shrink-0" aria-hidden="true" />}
             {!compact && <span className="text-[14px] font-semibold text-[#EAEAEA]">Arrodes</span>}
-            {arrodesStatus.data && (
-              <Badge variant={arrodesStatus.data.authorized ? 'success' : 'warning'}>
-                {arrodesStatus.data.authorized ? 'Подключён' : 'Нет входа'}
+            {(authMode === 'api_key' ? integrations.data : arrodesStatus.data) && (
+              <Badge variant={authReady ? 'success' : 'warning'}>
+                {authMode === 'api_key' ? (authReady ? 'API-ключ' : 'Нет ключа') : (authReady ? 'Подключён' : 'Нет входа')}
               </Badge>
             )}
             {configuredModel && <Badge variant="outline">{configuredModel}</Badge>}
@@ -281,8 +285,10 @@ export default function ArrodesWorkspace({ task: fixedTask = null, features = {}
         )}
 
         {notAuthorized && (
-          <Notice tone="warning" action={<Button size="xs" asChild><a href="/profile?tab=agents">Подключить</a></Button>}>
-            Нужна авторизация ChatGPT в настройках агентов.
+          <Notice tone="warning" action={<Button size="xs" asChild><a href="/profile?tab=agents">Настроить</a></Button>}>
+            {authMode === 'api_key'
+              ? 'Сохраните API-ключ и модель Arrodes в настройках агентов.'
+              : 'Нужна авторизация OpenAI OAuth в настройках агентов.'}
           </Notice>
         )}
 

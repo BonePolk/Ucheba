@@ -92,6 +92,8 @@ services:
     networks:
       default:
         aliases: [codex]
+      context-egress:
+        gw_priority: 1
     # Bubblewrap needs nested namespaces; retain the default syscall restrictions otherwise.
     security_opt:
       - no-new-privileges:true
@@ -131,8 +133,11 @@ services:
     healthcheck: *health
     environment:
       INTERNAL_SECRET: ${INTEGRATION_ENCRYPTION_KEY:-}
+      ARRODES_SANDBOX: ${ARRODES_SANDBOX:-}
       SILO_ACCESS_KEY: ${SILO_ACCESS_KEY:-}
       SILO_SECRET_KEY: ${SILO_SECRET_KEY:-}
+    volumes:
+      - codex-home:/home/codex/.codex
     networks:
       default:
         aliases: [lucheba]
@@ -162,6 +167,9 @@ services:
     healthcheck: *health
     environment:
       INTERNAL_SECRET: ${INTEGRATION_ENCRYPTION_KEY:-}
+      ARRODES_SANDBOX: ${ARRODES_SANDBOX:-}
+    volumes:
+      - codex-home:/home/codex/.codex
     networks:
       default:
       context-egress:
@@ -190,6 +198,9 @@ services:
     healthcheck: *health
     environment:
       INTERNAL_SECRET: ${INTEGRATION_ENCRYPTION_KEY:-}
+      ARRODES_SANDBOX: ${ARRODES_SANDBOX:-}
+    volumes:
+      - codex-home:/home/codex/.codex
     networks:
       default:
       context-egress:

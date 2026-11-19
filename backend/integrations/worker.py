@@ -27,7 +27,7 @@ async def run():
             if config['enabled'] and now >= next_score:
                 next_score = now + 60
                 inputs = ameba.automatic_inputs()
-                if inputs != previous_inputs:
+                if config.get('auto_replan', True) and inputs != previous_inputs:
                     # Не повторяем один и тот же запрос каждую минуту при ошибке модели.
                     previous_inputs = inputs
                     await provider_call('ameba', ameba.rank_all())
@@ -41,7 +41,7 @@ async def run():
                         refresh = bool(saved and saved.snapshot == ameba.task_state(session)[0]
                                        and ameba.plan_expired(json.loads(saved.result)))
                     if refresh:
-                        if not await ameba.refresh_saved_plan():
+                        if not await ameba.refresh_saved_plan() and config.get('auto_replan', True):
                             await provider_call('ameba', ameba.rank_all())
             agent, _ = read_settings('arrodes')
             if agent['enabled'] and agent['auto_prepare'] and now >= next_prepare and not (arrodes.job_tasks.get(user_id()) and not arrodes.job_tasks[user_id()].done()):

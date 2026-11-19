@@ -11,7 +11,7 @@ from sqlmodel import Session, select
 
 from common.database import get_engine
 from common.rpc import call
-from common.settings import read_settings, report
+from common.settings import report, resolve_agent_auth
 from common.models.integration import ArrodesRun, TaskAction
 from common.models.task import Task
 
@@ -31,12 +31,13 @@ async def disconnect():
 
 
 async def check():
-    result = await call('arrodes', '/check', {'model': read_settings('arrodes')[0]['model'].strip()}, timeout=100)
+    config, api_key = resolve_agent_auth('arrodes')
+    result = await call('arrodes', '/check', {'config': config, 'api_key': api_key}, timeout=120)
     report('arrodes', success=True)
     return result
 
 
-async def execute(run_id, payload, task_id):
+async def execute(run_id, payload, task_id, auth=None, options=None):
     try:
         with Session(get_engine()) as session:
             run = session.get(ArrodesRun, run_id)
@@ -45,7 +46,13 @@ async def execute(run_id, payload, task_id):
             session.commit()
         async with scheduler.slot('arrodes', task_id):
             try:
-                result = await call('arrodes', '/run', {'run_id': run_id, 'payload': payload, 'task_id': task_id}, timeout=None)
+                result = await call('arrodes', '/run', {
+                    'run_id': run_id,
+                    'payload': payload,
+                    'task_id': task_id,
+                    'auth': auth or {},
+                    'options': options or {},
+                }, timeout=None)
             except BaseException:
                 try:
                     await call('arrodes', '/cancel', {'run_id': run_id}, timeout=None)
@@ -82,9 +89,16 @@ async def execute(run_id, payload, task_id):
 
 def start_task(task_id, instruction='', resume_run_id=None):
     job_task = job_tasks.get(user_id())
-    config = read_settings('arrodes')[0]
-    if not config['enabled']:
-        raise HTTPException(400, 'Включите Arrodes в настройках')
+    config, api_key = resolve_agent_auth('arrodes', require_enabled=True)
+    auth = {
+        'auth_mode': config['auth_mode'],
+        'base_url': config['base_url'],
+        'api_key': api_key,
+    }
+    options = {
+        key: config[key]
+        for key in ('reasoning_effort', 'web_search_mode', 'allow_browser', 'allow_shell', 'ask_clarifications', 'custom_instructions')
+    }
     if job_task and not job_task.done():
         raise HTTPException(409, 'Arrodes уже обрабатывает задачу')
     with Session(get_engine()) as session:
@@ -103,7 +117,7 @@ def start_task(task_id, instruction='', resume_run_id=None):
                    'instruction': instruction.strip() or 'Выполни эту задачу и сохрани результат для моей проверки.',
                    'resume_run_id': resume_run_id,
                    'previous_summary': previous.summary if resume_run_id else None}
-    job_tasks[user_id()] = asyncio.create_task(execute(run_id, payload, task_id))
+    job_tasks[user_id()] = asyncio.create_task(execute(run_id, payload, task_id, auth, options))
     return {'id': run_id, 'status': 'queued'}
 
 

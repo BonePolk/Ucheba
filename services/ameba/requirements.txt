@@ -1,1 +1,2 @@
 openai>=2,<3
+openai-codex==0.163.0

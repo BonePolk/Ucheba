@@ -1,11 +1,13 @@
 """Каждый инструмент Straus: схема, диспетчеризация и результат в истории модели."""
 import asyncio
+from contextlib import asynccontextmanager
 import json
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import agent
+from common.codex_harness import TurnOutcome
 from common.identity import current_user_id
 from common.file_tools import FILE_NAMES, LIBRARY_NAMES
 
@@ -46,16 +48,59 @@ class StrausTools(unittest.IsolatedAsyncioTestCase):
         current_user_id.reset(self.token)
 
     async def execute(self, calls, calendar=None, remote=None):
-        client = Client(calls)
+        mcp_replies = []
+        thread = MagicMock()
+        codex_client = MagicMock()
+        codex_client.thread_start = AsyncMock(return_value=thread)
+
+        @asynccontextmanager
+        async def fake_open_codex(*args, **kwargs):
+            yield codex_client, 'ucheba_api'
+
+        @asynccontextmanager
+        async def fake_scratch(*args, **kwargs):
+            yield '/tmp/work', {}
+
+        @asynccontextmanager
+        async def fake_serve(adapter):
+            yield {'mcp_servers': {}}
+
+        async def fake_turn(thread_arg, prompt_input, *, adapter=None, **kwargs):
+            for idx, (name, args) in enumerate(calls, start=1):
+                reply = await adapter.respond({
+                    'jsonrpc': '2.0',
+                    'id': idx,
+                    'method': 'tools/call',
+                    'params': {'name': name, 'arguments': args},
+                })
+                mcp_replies.append(reply)
+                if adapter.terminal_result is not None:
+                    break
+            return TurnOutcome(
+                text='',
+                completed=True,
+                status='completed',
+                error_detail=None,
+                usage={'input_tokens': 0, 'output_tokens': 0},
+                terminal_result=adapter.terminal_result,
+            )
+
         browser = AsyncMock(return_value=remote or {'status': 'page', 'text': 'Fixture text',
                             'image': 'aW1hZ2U=', 'mime': 'image/png', 'elements': [{'id': '1', 'name': 'Button'}]})
         library = AsyncMock(return_value={'output': {'status': 'read_file'}, 'content': [{'type': 'input_image', 'image_url': 'data:image/png;base64,aW1hZ2U='}]})
         browser.library_client = library
         body = {'api_key': 'fixture-key', 'config': {'model': 'fixture'}, 'instruction': 'Fixture instruction',
                 'calendar': calendar or {'events': [], 'timezone': 'UTC'}, 'tasks': []}
-        with patch.object(agent, 'AsyncOpenAI', return_value=client), patch.object(agent, 'browser_request', browser), patch.object(agent, 'memory_tool', new=AsyncMock(return_value={'ok': True})), patch.object(agent, 'report_problem', new=AsyncMock(return_value={'reported': True})), patch('common.library_client.library_request', library):
+        with patch.object(agent, 'open_codex', fake_open_codex), \
+             patch.object(agent, 'scratch_env', fake_scratch), \
+             patch.object(agent, 'serve_mcp', fake_serve), \
+             patch.object(agent, 'run_codex_turn', side_effect=fake_turn), \
+             patch.object(agent, 'browser_request', browser), \
+             patch.object(agent, 'memory_tool', new=AsyncMock(return_value={'ok': True})), \
+             patch.object(agent, 'report_problem', new=AsyncMock(return_value={'reported': True})), \
+             patch('common.library_client.library_request', library):
             result = await asyncio.wait_for(agent.run.__wrapped__(body), 3)
-        return result, browser, client
+        return result, browser, mcp_replies
 
     async def test_every_tool_routes_and_returns_results(self):
         arguments = {
@@ -95,20 +140,19 @@ class StrausTools(unittest.IsolatedAsyncioTestCase):
                 calls = [(name, args)]
                 if name != 'calendar_finish':
                     calls.append(('calendar_finish', {'status': 'changed' if changed else 'unchanged', 'reason': 'Fixture result'}))
-                result, browser, client = await self.execute(calls, calendar)
+                result, browser, mcp_replies = await self.execute(calls, calendar)
                 self.assertEqual(result['status'], 'changed' if changed else 'unchanged')
                 if name in agent.VISUAL_ACTIONS or name in FILE_NAMES or name in ('browser_login', 'browser_sites', 'browser_read', 'browser_follow', 'browser_download', 'read_page', 'web_read', 'web_search'):
                     self.assertEqual(browser.library_client.await_count if name in LIBRARY_NAMES else browser.await_count, 1)
-                    self.assertTrue(any(isinstance(item, dict) and item.get('type') == 'function_call_output' for item in client.inputs[-1]))
-                    self.assertTrue(any(isinstance(item, dict) and item.get('role') == 'user' and isinstance(item.get('content'), list) and item['content'][0].get('type') == 'input_image' for item in client.inputs[-1]))
+                    self.assertFalse(mcp_replies[0]['isError'])
+                    self.assertTrue(any(part.get('type') == 'image' for part in mcp_replies[0]['content']))
 
     async def test_finish_cannot_claim_change_without_mutation(self):
-        result, _, client = await self.execute([
+        result, _, mcp_replies = await self.execute([
             ('calendar_finish', {'status': 'changed', 'reason': 'Not actually changed'}),
             ('calendar_finish', {'status': 'blocked', 'reason': 'Missing facts'})])
         self.assertEqual(result['status'], 'blocked')
-        output = next(item for item in client.inputs[-1] if isinstance(item, dict) and item.get('type') == 'function_call_output')
-        self.assertIn('error', json.loads(output['output']))
+        self.assertIn('error', json.loads(mcp_replies[0]['content'][0]['text']))
 
     async def test_blocked_discards_draft(self):
         result, _, _ = await self.execute([
@@ -118,10 +162,11 @@ class StrausTools(unittest.IsolatedAsyncioTestCase):
 
     async def test_file_from_read_page_is_preserved(self):
         remote = AsyncMock(side_effect=[{'status': 'file', 'name': 'fixture.txt', 'content': 'dGV4dA=='}, {'file_id': 'saved'}])
-        client = Client([('read_page', {'site_id': '', 'action': 'read', 'url': '', 'index': 0}),
-                         ('calendar_finish', {'status': 'unchanged', 'reason': 'Fixture'})])
-        with patch.object(agent, 'AsyncOpenAI', return_value=client), patch.object(agent, 'browser_request', remote):
-            await agent.run.__wrapped__({'api_key': 'fixture', 'config': {}, 'instruction': 'Fixture', 'calendar': {'events': []}, 'tasks': []})
+        await self.execute(
+            [('read_page', {'site_id': '', 'action': 'read', 'url': '', 'index': 0}),
+             ('calendar_finish', {'status': 'unchanged', 'reason': 'Fixture'})],
+            remote=remote,
+        )
         self.assertEqual(remote.call_args_list[-1].args[0], '/files')
         self.assertEqual(remote.call_args_list[-1].args[1]['action'], 'save_download')
 

@@ -14,7 +14,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 import httpx
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from sqlmodel import Session, select
 
 from common.provider import provider_url
@@ -23,7 +23,7 @@ from common.rpc import call, internal_token, service_name
 from common.security import require_user
 from common.identity import user_id
 from common.accounts import check_feature, features
-from integrations import ameba, arrodes, telegram, context, jobs, scheduler
+from integrations import ameba, arrodes, telegram, context, jobs, scheduler, straus
 from common import extraction as pipeline
 from common.settings import read_config, SECRET_FIELDS, public_settings, read_settings, report, save_settings
 from common.models.integration import ArrodesRun, Suggestion
@@ -70,18 +70,81 @@ async def stop_schedule_import():
 
 
 @router.api_route('/agents/{name}/models', methods=['GET', 'POST'])
-async def agent_models(name: Literal['monocle', 'ameba', 'straus'], request: Request):
-    config, secrets = read_settings(name)
+async def agent_models(name: Literal['monocle', 'ameba', 'straus', 'arrodes'], request: Request):
+    config, _ = read_settings(name)
     check_feature(name)
     body = await request.json() if request.method == 'POST' else {}
-    key = body.get('api_key') or secrets.get('api_key')
+    auth_mode = (body.get('auth_mode') or config.get('auth_mode') or ('oauth' if name == 'arrodes' else 'api_key')).strip()
+    if auth_mode not in ('api_key', 'oauth'):
+        raise HTTPException(422, 'Неизвестный режим авторизации')
+    if auth_mode == 'oauth':
+        return await call('arrodes', '/models', method='GET', timeout=45)
+    provider_cfg, provider_secrets = read_settings('ai_provider', apply_feature=False)
+    key = body.get('api_key') or provider_secrets.get('api_key')
     if not key:
-        raise HTTPException(400, 'Введите API-ключ этого агента')
+        raise HTTPException(400, 'Сохраните общий API-ключ в разделе «Подключения AI»')
     try:
-        endpoint = provider_url(body.get('base_url') or config['base_url'])
+        endpoint = provider_url(body.get('base_url') or provider_cfg['base_url'])
     except ValueError:
         raise HTTPException(422, 'Проверьте endpoint провайдера') from None
     return await call(name, '/models', {'api_key': key, 'base_url': endpoint}, timeout=45)
+
+
+@router.post('/ai_provider/check')
+async def check_ai_provider(body: dict | None = None):
+    check_any_agent_feature()
+    data = body or {}
+    provider_cfg, provider_secrets = read_settings('ai_provider', apply_feature=False)
+    key = (data.get('api_key') or provider_secrets.get('api_key') or '').strip()
+    if not key:
+        raise HTTPException(400, 'Сохраните общий API-ключ в разделе «Подключения AI»')
+    try:
+        endpoint = provider_url(data.get('base_url') or provider_cfg['base_url'])
+    except ValueError:
+        raise HTTPException(422, 'Проверьте endpoint провайдера') from None
+    enabled = features()
+    service = next((name for name in ('monocle', 'ameba', 'straus', 'arrodes') if enabled[name]), None)
+    if not service:
+        raise HTTPException(403, 'Все AI-агенты отключены администратором')
+    models = await provider_call('ai_provider', call(service, '/models', {'api_key': key, 'base_url': endpoint}, timeout=45))
+    return {'ok': True, 'models_count': len(models)}
+
+
+@router.post('/agents/{name}/check')
+async def check_agent(name: Literal['monocle', 'ameba', 'straus', 'arrodes']):
+    check_feature(name)
+    operations = {
+        'ameba': ameba.evaluate,
+        'arrodes': arrodes.check,
+        'monocle': context.check,
+        'straus': straus.check,
+    }
+    return await provider_call(name, operations[name]())
+
+
+def check_any_agent_feature():
+    enabled = features()
+    if not any(enabled[name] for name in ('monocle', 'ameba', 'straus', 'arrodes')):
+        raise HTTPException(403, 'Все AI-агенты отключены администратором')
+
+
+@router.get('/openai-oauth/status')
+async def openai_oauth_status():
+    check_any_agent_feature()
+    return await arrodes.status()
+
+
+@router.post('/openai-oauth/connect')
+async def openai_oauth_connect():
+    check_any_agent_feature()
+    return await arrodes.start_login()
+
+
+@router.post('/openai-oauth/disconnect')
+async def openai_oauth_disconnect():
+    check_any_agent_feature()
+    await arrodes.disconnect()
+    return {'ok': True}
 
 
 class AgentAnswer(BaseModel):
@@ -244,10 +307,34 @@ class ProviderConfig(BaseModel):
         return provider_url(value)
 
 
-class ArrodesConfig(BaseModel):
+class AiProviderConfig(ProviderConfig):
+    pass
+
+
+class BaseAgentConfig(BaseModel):
+    auth_mode: Literal['api_key', 'oauth'] = 'api_key'
+    model: str = Field(default='gpt-6-luna', max_length=200)
+    reasoning_effort: Literal['low', 'medium', 'high'] = 'medium'
+    custom_instructions: str = Field(default='', max_length=2000)
+
+    @model_validator(mode='after')
+    def check_api_key_model(self):
+        self.model = self.model.strip()
+        self.custom_instructions = self.custom_instructions.strip()
+        if self.auth_mode == 'api_key' and getattr(self, 'enabled', False) and not self.model:
+            raise ValueError('model')
+        return self
+
+
+class ArrodesConfig(BaseAgentConfig):
     enabled: bool = False
-    auto_prepare: bool = False
+    auth_mode: Literal['api_key', 'oauth'] = 'oauth'
     model: str = Field(default='', max_length=200)
+    auto_prepare: bool = False
+    web_search_mode: Literal['cached', 'live', 'disabled'] = 'cached'
+    allow_browser: bool = True
+    allow_shell: bool = True
+    ask_clarifications: bool = True
 
 
 class NotificationsConfig(BaseModel):
@@ -260,18 +347,36 @@ class CollectorConfig(BaseModel):
     enabled: bool = False
 
 
-class ContextConfig(ProviderConfig):
+class ContextConfig(BaseAgentConfig):
     enabled: bool = True
     rewrite_title: bool = False
-    model: str = Field(default='gpt-6-luna', min_length=1, max_length=200)
+    allow_browser: bool = True
+    ask_clarifications: bool = True
 
 
-class AgentConfig(ProviderConfig):
+class AmebaConfig(BaseAgentConfig):
+    enabled: bool = False
+    auto_replan: bool = True
+    planning_style: Literal['gentle', 'balanced', 'intense'] = 'balanced'
+    allow_context_recheck: bool = True
+
+
+class StrausConfig(BaseAgentConfig):
     enabled: bool = True
-    model: str = Field(default='gpt-6-luna', min_length=1, max_length=200)
+    allow_browser: bool = True
+    ask_clarifications: bool = True
 
 
-CONFIG_MODELS = {'monocle': ContextConfig, 'ameba': AgentConfig, 'straus': AgentConfig, 'notifications': NotificationsConfig, 'collector': CollectorConfig, 'telegram': TelegramConfig, 'arrodes': ArrodesConfig}
+CONFIG_MODELS = {
+    'ai_provider': AiProviderConfig,
+    'monocle': ContextConfig,
+    'ameba': AmebaConfig,
+    'straus': StrausConfig,
+    'notifications': NotificationsConfig,
+    'collector': CollectorConfig,
+    'telegram': TelegramConfig,
+    'arrodes': ArrodesConfig,
+}
 
 
 @router.get('')
@@ -284,9 +389,11 @@ async def settings():
 
 
 @router.patch('/{name}')
-async def configure(name: Literal['telegram', 'arrodes', 'collector', 'notifications', 'monocle', 'ameba', 'straus'], body: dict):
+async def configure(name: Literal['telegram', 'arrodes', 'collector', 'notifications', 'monocle', 'ameba', 'straus', 'ai_provider'], body: dict):
     name = service_name(name)
-    if body.get('enabled'):
+    if name == 'ai_provider':
+        check_any_agent_feature()
+    elif body.get('enabled'):
         check_feature(name)
     allowed = set(CONFIG_MODELS[name].model_fields) | (SECRET_FIELDS[name] - {'session'})
     if set(body) - allowed:
@@ -314,7 +421,10 @@ async def configure(name: Literal['telegram', 'arrodes', 'collector', 'notificat
                 raise HTTPException(409, 'Отключите Telegram перед сменой реквизитов аккаунта')
             await provider_call('telegram', telegram.close())
         save_settings(name, config=config, secrets=secrets if secrets else None)
-        if name == 'monocle' and current.get('model') != config.get('model'):
+        if name == 'ai_provider' and current.get('base_url') != config.get('base_url'):
+            if read_config('monocle').get('auth_mode') == 'api_key':
+                context.invalidate_file_contexts()
+        if name == 'monocle' and (current.get('model') != config.get('model') or current.get('auth_mode') != config.get('auth_mode')):
             context.invalidate_file_contexts()
     return {'ok': True}
 
@@ -362,8 +472,8 @@ async def arrodes_status():
 
 
 @router.api_route('/arrodes/models', methods=['GET', 'POST'])
-async def arrodes_models():
-    return await provider_call('arrodes', call('arrodes', '/models', method='GET', timeout=45))
+async def arrodes_models(request: Request):
+    return await agent_models('arrodes', request)
 
 
 @router.post('/arrodes/connect')

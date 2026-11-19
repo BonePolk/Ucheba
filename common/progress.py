@@ -177,17 +177,19 @@ class Progress:
                 self.update(token_usage=dict(self.usage_totals), current_usage_known=True)
         self.update(model_waiting=False, current_action='Обрабатывает ответ модели', action_description='Проверяет ответ и готовит следующий шаг или итог.', action_started_at=timestamp())
 
+    def reasoning_delta(self, delta, key):
+        with records_lock:
+            text = self.record.get('reasoning_text', '')
+            if self.reasoning_key != key and text:
+                text += '\n\n'
+            self.record['reasoning_text'] = (text + delta)[-24000:]
+            self.reasoning_key = key
+        self.summary(delta, key)
+
     def model_event(self, event):
         self.update(last_activity_at=timestamp())
         if event.type == 'response.reasoning_summary_text.delta':
-            key = (event.item_id, event.summary_index)
-            with records_lock:
-                text = self.record.get('reasoning_text', '')
-                if self.reasoning_key != key and text:
-                    text += '\n\n'
-                self.record['reasoning_text'] = (text + event.delta)[-24000:]
-                self.reasoning_key = key
-            self.summary(event.delta, key)
+            self.reasoning_delta(event.delta, (event.item_id, event.summary_index))
         elif event.type in ('response.completed', 'response.incomplete'):
             self.finish_response(event.response)
 

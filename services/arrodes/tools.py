@@ -1,14 +1,7 @@
-"""Run-scoped MCP adapter over the existing Ucheba tools, in the trusted process."""
-import asyncio
+"""Run-scoped MCP tool handlers over the existing Ucheba tools, in the trusted process."""
 import base64
-from contextlib import asynccontextmanager
 import json
-import logging
 import os
-from pathlib import Path
-import socket
-import struct
-import tempfile
 from urllib.parse import quote
 
 import httpx
@@ -17,10 +10,10 @@ from fastapi import HTTPException
 from common.agent_history import history_request
 from common.agent_memory import MEMORY_TOOLS, MEMORY_NAMES, memory_tool
 from common.agent_questions import QUESTION_TOOL, ask_user
-from common.browser_client import browser_request, browser_run_id
+from common.browser_client import browser_request
 from common.browser_tools import BROWSER_TOOLS, BROWSER_NAMES, run_browser_tool, visual_tool
 from common.file_tools import FILE_TOOLS, FILE_NAMES, run_file_tool
-from common.identity import current_user_id, user_id
+from common.identity import user_id
 from common.library_client import library_request
 from common.rpc import internal_token
 
@@ -66,8 +59,6 @@ class Tools:
         self.path, self.progress = path, progress
         self.elements = {}
         self.files = {}
-        self.turn = None
-        self.lock = asyncio.Lock()
 
     async def call(self, name, args):
         if name not in SCHEMAS:
@@ -130,81 +121,3 @@ class Tools:
             result = await library_request('save_file_to_silo', {'path': args['path'], 'version': args['version'], 'content': base64.b64encode(data).decode()})
             self.files[args['path']] = '/api/integrations/monocle/workspace/download?path=' + quote(args['path'], safe='')
             return result['output'] | {'url': self.files[args['path']]}, []
-
-    async def respond(self, message):
-        method = message['method']
-        if method == 'initialize':
-            return {'protocolVersion': message['params']['protocolVersion'], 'capabilities': {'tools': {}}, 'serverInfo': {'name': 'ucheba', 'version': '1'}}
-        if method == 'ping':
-            return {}
-        if method == 'tools/list':
-            return {'tools': [{'name': item['name'], 'description': item['description'], 'inputSchema': item['parameters']} for item in TOOLS]}
-        if method != 'tools/call':
-            raise ValueError('Метод не поддерживается')
-        try:
-            async with self.lock:
-                output, images = await self.call(message['params']['name'], message['params'].get('arguments', {}))
-            content = [{'type': 'text', 'text': json.dumps(output, ensure_ascii=False, default=str)}]
-            for image in images:
-                if image.get('type') == 'input_text':
-                    content.append({'type': 'text', 'text': image['text']})
-                elif image.get('type') == 'input_image':
-                    url = image['image_url']
-                    header, data = url.split(',', 1)
-                    content.append({'type': 'image', 'data': data, 'mimeType': header[5:].split(';')[0]})
-            return {'content': content, 'isError': False}
-        except (HTTPException, httpx.HTTPError, ValueError, OSError, KeyError, TypeError) as exc:
-            detail = str(exc.detail) if isinstance(exc, HTTPException) else 'Ошибка инструмента: ' + type(exc).__name__
-            self.progress.add(detail)
-            return {'content': [{'type': 'text', 'text': detail}], 'isError': True}
-
-
-@asynccontextmanager
-async def serve(adapter):
-    owner = user_id()
-    run_id = browser_run_id.get()
-    handlers = set()
-    async def handle(reader, writer):
-        task = asyncio.current_task()
-        handlers.add(task)
-        token = current_user_id.set(owner)
-        browser_token = browser_run_id.set(run_id)
-        try:
-            credentials = writer.get_extra_info('socket').getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
-            if struct.unpack('3i', credentials)[1] != 10000 + owner:
-                return
-            while line := await reader.readline():
-                message = json.loads(line)
-                if 'id' not in message:
-                    continue
-                try:
-                    result = {'result': await adapter.respond(message)}
-                except (ValueError, KeyError):
-                    result = {'error': {'code': -32602, 'message': 'Некорректный MCP-запрос'}}
-                except Exception as exc:
-                    # Keep the connection usable; expose no arguments or private exception text.
-                    logging.getLogger('uvicorn.error').error('Arrodes MCP handler: %s', type(exc).__name__)
-                    result = {'error': {'code': -32603, 'message': 'Внутренняя ошибка инструмента: ' + type(exc).__name__}}
-                writer.write((json.dumps({'jsonrpc': '2.0', 'id': message['id'], **result}, ensure_ascii=False) + '\n').encode())
-                await writer.drain()
-        finally:
-            writer.close()
-            await writer.wait_closed()
-            browser_run_id.reset(browser_token)
-            current_user_id.reset(token)
-            handlers.discard(task)
-    with tempfile.TemporaryDirectory(prefix='arrodes-') as directory:
-        os.chmod(directory, 0o711)
-        path = str(Path(directory) / 'tools.sock')
-        server = await asyncio.start_unix_server(handle, path, limit=2 * 1024 * 1024)
-        os.chown(path, 10000 + owner, 10000 + owner)
-        os.chmod(path, 0o600)
-        try:
-            async with server:
-                yield {'mcp_servers': {'ucheba': {'command': '/usr/local/bin/python', 'args': ['/app/mcp_stdio.py', path],
-                       'tool_timeout_sec': 2147483647, 'required': True,
-                       'default_tools_approval_mode': 'approve'}}}
-        finally:
-            for task in list(handlers):
-                task.cancel()
-            await asyncio.gather(*handlers, return_exceptions=True)

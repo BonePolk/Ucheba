@@ -15,7 +15,7 @@ from common.identity import user_id
 from common.models.integration import IntegrationSetting, TaskContext, TaskRanking
 from common.models.task import Task
 from common.rpc import call
-from common.settings import read_config, read_settings, report
+from common.settings import read_config, read_settings, report, resolve_agent_auth
 from integrations import scheduler
 from integrations.context import context_status, prepare, snapshot
 
@@ -223,6 +223,7 @@ def _build_signature(session, state, include_ameba_facts: bool = True) -> str:
     adjustments = read_adjustments(session)
     profile = read_profile(session)
     ameba_cfg = read_config('ameba')
+    provider_base = read_settings('ai_provider', apply_feature=False)[0].get('base_url')
     allowed_agents = ('Владелец', 'user', 'Ameba') if include_ameba_facts else ('Владелец', 'user')
     return json.dumps({
         'version': 41,
@@ -231,7 +232,13 @@ def _build_signature(session, state, include_ameba_facts: bool = True) -> str:
         'facts': sorted(({'key': fact['key'], 'text': fact['text']} for fact in read_facts() if fact['agent'] in allowed_agents), key=lambda fact: fact['key']),
         'feedback': adjustments,
         'preferences': profile.get('preferences', {}),
-        'provider': {key: ameba_cfg.get(key) for key in ('model', 'base_url')},
+        'provider': {
+            'base_url': provider_base,
+            **{
+                key: ameba_cfg.get(key)
+                for key in ('auth_mode', 'model', 'reasoning_effort', 'planning_style', 'allow_context_recheck', 'custom_instructions')
+            },
+        },
     }, sort_keys=True)
 
 
@@ -367,11 +374,7 @@ async def clear_plan():
 
 
 async def request_ranking(tasks, task_id=0, checked_contexts=(), refresh=False):
-    config, secrets = read_settings('ameba')
-    if not config['enabled']:
-        raise HTTPException(400, 'Ameba выключена в настройках профиля')
-    if not refresh and not secrets.get('api_key'):
-        raise HTTPException(400, 'Для Ameba не сохранён API-ключ. Добавьте его в профиле')
+    config, api_key = resolve_agent_auth('ameba', require_enabled=True, require_credentials=not refresh)
     with Session(get_engine()) as session:
         input_signature = task_state(session)[0]
         saved = session.get(TaskRanking, 1)
@@ -380,7 +383,7 @@ async def request_ranking(tasks, task_id=0, checked_contexts=(), refresh=False):
         profile = read_profile(session)
     return await scheduler.run_ranking({
         'input_signature': input_signature,
-        'api_key': secrets.get('api_key', ''),
+        'api_key': api_key,
         'config': config,
         'tasks': tasks,
         'now': datetime.now(timezone.utc).isoformat(),
@@ -642,10 +645,8 @@ async def evaluate(task_id=None):
 
 
 async def check_model():
-    config, secrets = read_settings('ameba')
-    if not secrets.get('api_key'):
-        raise HTTPException(400, 'Для Ameba не сохранён API-ключ')
-    return await call('ameba', '/check', {'config': config, 'api_key': secrets['api_key']}, timeout=None)
+    config, api_key = resolve_agent_auth('ameba')
+    return await call('ameba', '/check', {'config': config, 'api_key': api_key}, timeout=120)
 
 
 async def evaluate_task(task_id):

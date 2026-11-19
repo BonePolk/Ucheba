@@ -1,10 +1,20 @@
 from common.agent_questions import QUESTION_TOOL, QUESTION_INSTRUCTION, ask_user
-from common.agent_api import stream_model_response
 from common.browser_tools import BROWSER_TOOLS, BROWSER_NAMES, VISUAL_ACTIONS, run_browser_tool
 from common.agent_issues import ISSUE_TOOL, ISSUE_INSTRUCTION, report_problem
 from common.agent_memory import MEMORY_TOOLS, MEMORY_NAMES, MEMORY_INSTRUCTION, memory_tool
 from common.file_tools import FILE_TOOLS, FILE_NAMES, FILE_INSTRUCTION, run_file_tool
 from common.agent_history import with_history
+from common.codex_harness import (
+    CONTAINER_SANDBOX,
+    McpToolAdapter,
+    append_custom_instructions,
+    normalize_auth,
+    normalize_effort,
+    open_codex,
+    run_codex_turn,
+    scratch_env,
+    serve_mcp,
+)
 """Straus исследует источники и редактирует календарь инструментами."""
 import json
 from datetime import datetime
@@ -12,10 +22,9 @@ from typing import Literal
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-import httpx
 from fastapi import HTTPException
-from openai import AsyncOpenAI
-from pydantic import BaseModel, Field, ValidationError
+from openai_codex import ApprovalMode, ExternalMessage, Sandbox
+from pydantic import BaseModel, ValidationError
 
 from browser_client import browser_request
 from common.calendar import CalendarConfig, CalendarEvent
@@ -158,110 +167,183 @@ def edit_calendar(name, args, config, task_ids):
     raise ValueError('Неизвестный инструмент календаря')
 
 
+class StrausTools:
+    def __init__(self, config, original, task_ids, progress):
+        self.config = config
+        self.original = original
+        self.task_ids = task_ids
+        self.progress = progress
+        self.browser_elements = {}
+        self.adapter = None
+
+    async def call(self, name, args):
+        extra_content = []
+        raw_args = json.dumps(args, ensure_ascii=False)
+        try:
+            if name == 'ask_user':
+                output = await ask_user(raw_args, self.progress)
+            elif name == 'calendar_finish':
+                status = args.get('status')
+                reason = args.get('reason')
+                if status not in ('changed', 'unchanged', 'blocked') or not isinstance(reason, str) or not reason.strip() or len(reason) > 1000:
+                    raise ValueError('Укажи status и конкретную краткую причину до 1000 символов')
+                changed = self.config.model_dump() != self.original
+                if status == 'changed' and not changed:
+                    raise ValueError('Рабочая копия не изменилась. Сначала измени календарь инструментом либо заверши как unchanged/blocked с объяснением.')
+                if status == 'unchanged' and changed:
+                    raise ValueError('В рабочей копии есть изменения. Выбери changed для сохранения либо blocked для отмены черновика.')
+                if status == 'changed':
+                    self.progress.add('Изменения календаря подготовлены к сохранению')
+                else:
+                    self.progress.update(outcome=status)
+                    self.progress.add(('Изменения не внесены: ' if status == 'blocked' else 'Изменения не нужны: ') + reason.strip())
+                if self.adapter is not None:
+                    self.adapter.terminal_result = {
+                        'calendar': self.config.model_dump() if status == 'changed' else self.original,
+                        'status': status,
+                        'reason': reason.strip(),
+                    }
+                return {'status': 'accepted'}, []
+            elif name == 'report_tool_problem':
+                self.progress.add(
+                    'Сообщает администратору о технической проблеме',
+                    description='Передаёт категорию сбоя для диагностики; само поручение этим не завершается.',
+                )
+                output = await report_problem(args, 'Straus')
+            elif name in MEMORY_NAMES:
+                self.progress.add(
+                    'Обновляет общую память' if name == 'remember_user_fact' else 'Читает общую память',
+                    description='Сохраняет или использует подтверждённые факты владельца для следующих поручений.',
+                )
+                output = await memory_tool(name, args, 'Straus')
+            elif name == 'agent_note':
+                output = self.progress.note(raw_args)
+            elif name.startswith('calendar_'):
+                labels = {
+                    'calendar_list': 'Читает события календаря',
+                    'calendar_save_events': 'Обновляет события в рабочей копии',
+                    'calendar_remove_events': 'Убирает события из рабочей копии',
+                    'calendar_timezone': 'Меняет часовой пояс',
+                }
+                self.progress.add(
+                    labels.get(name, 'Проверяет календарь'),
+                    description='Готовит календарь по поручению владельца; изменения сохранятся после завершения и проверки.',
+                )
+                output = edit_calendar(name, args, self.config, self.task_ids)
+                if name == 'calendar_list' and isinstance(output, dict):
+                    output['now_local'] = datetime.now(ZoneInfo(self.config.timezone)).isoformat()
+            elif name in FILE_NAMES:
+                output, extra_content = await run_file_tool(name, args, browser_request, self.progress)
+                extra_content = list(extra_content)
+            elif name in BROWSER_NAMES:
+                output = await run_browser_tool(name, args, browser_request, self.progress, self.browser_elements)
+            else:
+                output = {'error': 'Неизвестный инструмент'}
+        except HTTPException as exc:
+            output = {'status': 'unavailable', 'reason': exc.detail}
+            self.progress.add('Источник недоступен: ' + str(exc.detail)[:300])
+        except (ValidationError, ValueError, KeyError, TypeError) as exc:
+            output = {'error': 'Проверь ID, время, повторения и параметры инструмента по схеме.'}
+            if isinstance(exc, ValueError) and not isinstance(exc, ValidationError):
+                output['error'] = str(exc)
+            self.progress.add('Уточняет параметры инструмента')
+
+        if isinstance(output, dict) and output.get('status') == 'file' and output.get('content'):
+            output = await browser_request('/files', {'action': 'save_download', 'name': output['name'], 'content': output['content']})
+        if isinstance(output, dict):
+            image = output.pop('image', None)
+            if 'elements' in output:
+                self.browser_elements = {
+                    item['id']: item.get('name') or item.get('text') or item.get('role', 'элемент')
+                    for item in output['elements']
+                }
+            if image:
+                extra_content.append({
+                    'type': 'input_image',
+                    'image_url': f"data:{output.get('mime', 'image/jpeg')};base64,{image}",
+                })
+        return output, extra_content
+
+
 @with_history('Straus')
 async def run(body):
-    key = body.pop('api_key')
+    key = body.pop('api_key', None) or ''
     provider = body.pop('config', {})
-    model = provider.get('model', 'gpt-6-luna')
+    auth_mode, api_key, base_url, model = normalize_auth(provider, key, default_mode='api_key', label='Straus')
+    reasoning_effort = normalize_effort(provider.get('reasoning_effort'))
+    allow_browser = bool(provider.get('allow_browser', True))
+    ask_clarifications = bool(provider.get('ask_clarifications', True))
+    custom_instructions = provider.get('custom_instructions') or ''
+
+    active_tools = [
+        item for item in TOOLS
+        if (allow_browser or item['name'] not in BROWSER_NAMES)
+        and (ask_clarifications or item['name'] != 'ask_user')
+    ]
+    instructions = INSTRUCTIONS
+    if not allow_browser:
+        instructions += '\nБраузер и веб-поиск отключены владельцем: работай по описанию поручения, календарю, памяти и личным файлам.'
+    if not ask_clarifications:
+        instructions += '\nИнтерактивный инструмент ask_user отключён: если не хватает данных, заверши через calendar_finish со статусом blocked и точной причиной.'
+    instructions = append_custom_instructions(instructions, custom_instructions)
+
     config = CalendarConfig.model_validate(body['calendar'])
     task_ids = {task['id'] for task in body['tasks']} | {event.task_id for event in config.events if event.task_id}
     original = config.model_dump()
-    browser_elements = {}
-    messages = [{'role': 'user', 'content': json.dumps(body, ensure_ascii=False)}]
+    initial_payload = body | {'now_local': datetime.now(ZoneInfo(config.timezone)).isoformat()}
+    sandbox = Sandbox.full_access if CONTAINER_SANDBOX else Sandbox.read_only
+
     with Progress('Straus') as progress:
         progress.add('Читает поручение и календарь')
-        finish_reminded = False
-        async with AsyncOpenAI(api_key=key, base_url=provider.get('base_url') or 'https://lenec.tech/v1', max_retries=0,
-                              http_client=httpx.AsyncClient(timeout=httpx.Timeout(None, connect=8))) as client:
-            while True:
-                messages.append({'role': 'user', 'content': json.dumps({
-                    'now_local': datetime.now(ZoneInfo(config.timezone)).isoformat()})})
-                progress.begin_response()
-                response = await stream_model_response(client, progress,
-                        model=model, reasoning={'effort': 'medium', 'summary': 'auto'},
-                        instructions=INSTRUCTIONS, input=messages, tools=TOOLS,
-                        tool_choice='required', parallel_tool_calls=False,
-                        include=['reasoning.encrypted_content'], max_output_tokens=8000, store=False,
-                    )
-                progress.finish_response(response)
-                if response.status != 'completed':
-                    raise HTTPException(502, 'Straus не завершил поручение. Изменения календаря не сохранены.')
-                calls = [item for item in response.output if item.type == 'function_call']
-                if not calls:
-                    if finish_reminded:
-                        raise HTTPException(502, 'Straus завершил ответ без результата инструмента. Изменения календаря не сохранены.')
-                    finish_reminded = True
-                    messages.extend(response.output)
-                    messages.append({'role': 'user', 'content':
-                        'Поручение ещё не завершено. Если данные найдены, внеси изменения инструментами. '
-                        'Затем вызови calendar_finish. Если не можешь внести изменения, укажи blocked '
-                        'и конкретную причину. Не выдумывай события ради завершения.'})
-                    continue
-                messages.extend(response.output)
-                for call in calls:
-                    extra_content = []
-                    try:
-                        args = json.loads(call.arguments)
-                        if call.name == 'ask_user':
-                            output = await ask_user(call.arguments, progress)
-                        elif call.name == 'calendar_finish':
-                            status = args.get('status')
-                            reason = args.get('reason')
-                            if status not in ('changed', 'unchanged', 'blocked') or not isinstance(reason, str) or not reason.strip() or len(reason) > 1000:
-                                raise ValueError('Укажи status и конкретную краткую причину до 1000 символов')
-                            changed = config.model_dump() != original
-                            if status == 'changed' and not changed:
-                                raise ValueError('Рабочая копия не изменилась. Сначала измени календарь инструментом либо заверши как unchanged/blocked с объяснением.')
-                            if status == 'unchanged' and changed:
-                                raise ValueError('В рабочей копии есть изменения. Выбери changed для сохранения либо blocked для отмены черновика.')
-                            if status == 'changed':
-                                progress.add('Изменения календаря подготовлены к сохранению')
-                            else:
-                                progress.update(outcome=status)
-                                progress.add(('Изменения не внесены: ' if status == 'blocked' else 'Изменения не нужны: ') + reason.strip())
-                            return {'calendar': config.model_dump() if status == 'changed' else original,
-                                    'status': status, 'reason': reason.strip()}
-                        elif call.name == 'report_tool_problem':
-                            progress.add('Сообщает администратору о технической проблеме', description='Передаёт категорию сбоя для диагностики; само поручение этим не завершается.')
-                            output = await report_problem(args, 'Straus')
-                        elif call.name in MEMORY_NAMES:
-                            progress.add('Обновляет общую память' if call.name == 'remember_user_fact' else 'Читает общую память', description='Сохраняет или использует подтверждённые факты владельца для следующих поручений.')
-                            output = await memory_tool(call.name, args, 'Straus')
-                        elif call.name == 'agent_note':
-                            output = progress.note(call.arguments)
-                        elif call.name.startswith('calendar_'):
-                            labels = {'calendar_list': 'Читает события календаря', 'calendar_save_events': 'Обновляет события в рабочей копии',
-                                      'calendar_remove_events': 'Убирает события из рабочей копии', 'calendar_timezone': 'Меняет часовой пояс'}
-                            progress.add(labels.get(call.name, 'Проверяет календарь'), description='Готовит календарь по поручению владельца; изменения сохранятся после завершения и проверки.')
-                            output = edit_calendar(call.name, args, config, task_ids)
-                        elif call.name in FILE_NAMES:
-                            output, extra_content = await run_file_tool(call.name, args, browser_request, progress)
-                        elif call.name in BROWSER_NAMES:
-                            output = await run_browser_tool(call.name, args, browser_request, progress, browser_elements)
-                        else:
-                            output = {'error': 'Неизвестный инструмент'}
-                    except HTTPException as exc:
-                        output = {'status': 'unavailable', 'reason': exc.detail}
-                        progress.add('Источник недоступен: ' + str(exc.detail)[:300])
-                    except (ValidationError, ValueError, KeyError, TypeError) as exc:
-                        output = {'error': 'Проверь ID, время, повторения и параметры инструмента по схеме.'}
-                        if isinstance(exc, ValueError) and not isinstance(exc, ValidationError):
-                            output['error'] = str(exc)
-                        progress.add('Уточняет параметры инструмента')
-                    if isinstance(output, dict) and output.get('status') == 'file' and output.get('content'):
-                        output = await browser_request('/files', {'action': 'save_download', 'name': output['name'], 'content': output['content']})
-                    image = None
-                    if isinstance(output, dict):
-                        image = output.pop('image', None)
-                        if 'elements' in output:
-                            browser_elements = {item['id']: item.get('name') or item.get('text') or item.get('role', 'элемент')
-                                                for item in output['elements']}
-                    messages.append({'type': 'function_call_output', 'call_id': call.call_id,
-                                     'output': json.dumps(output, ensure_ascii=False)})
-                    if extra_content:
-                        messages.append({'role': 'user', 'content': extra_content})
-                    if image:
-                        messages.append({'role': 'user', 'content': [
-                            {'type': 'input_image', 'image_url': f"data:{output.get('mime', 'image/jpeg')};base64,{image}",
-                             'detail': 'high'},
-                        ]})
+        tools_handler = StrausTools(config, original, task_ids, progress)
+        adapter = McpToolAdapter(active_tools, tools_handler.call, progress)
+        tools_handler.adapter = adapter
+
+        async with open_codex(
+            'Straus',
+            auth_mode=auth_mode,
+            api_key=api_key,
+            base_url=base_url,
+            allow_shell=False,
+            web_search='disabled',
+        ) as (client, thread_provider), scratch_env(writable=False) as (work_dir, shell_policy), serve_mcp(adapter) as mcp_config:
+            thread = await client.thread_start(
+                cwd=str(work_dir),
+                sandbox=sandbox,
+                ephemeral=True,
+                approval_mode=ApprovalMode.deny_all,
+                model=model or None,
+                model_provider=thread_provider,
+                developer_instructions=instructions,
+                config=mcp_config | shell_policy,
+            )
+            outcome = await run_codex_turn(
+                thread,
+                ExternalMessage(tool_name='task_manager', content=json.dumps(initial_payload, ensure_ascii=False, default=str)),
+                label='Straus',
+                progress=progress,
+                adapter=adapter,
+                effort=reasoning_effort,
+                client=client,
+            )
+            if outcome.terminal_result is not None:
+                return outcome.terminal_result
+            if outcome.status == 'failed':
+                raise HTTPException(502, outcome.error_detail or 'Straus не завершил поручение. Изменения календаря не сохранены.')
+
+            outcome = await run_codex_turn(
+                thread,
+                'Поручение ещё не завершено. Если данные найдены, внеси изменения инструментами. '
+                'Затем вызови calendar_finish. Если не можешь внести изменения, укажи blocked '
+                'и конкретную причину. Не выдумывай события ради завершения.',
+                label='Straus',
+                progress=progress,
+                adapter=adapter,
+                effort=reasoning_effort,
+                client=client,
+            )
+            if outcome.terminal_result is not None:
+                return outcome.terminal_result
+            if outcome.status == 'failed':
+                raise HTTPException(502, outcome.error_detail or 'Straus не завершил поручение. Изменения календаря не сохранены.')
+            raise HTTPException(502, 'Straus завершил ответ без результата инструмента. Изменения календаря не сохранены.')

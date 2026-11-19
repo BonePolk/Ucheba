@@ -1,0 +1,28 @@
+#!/bin/sh
+owner="$1"
+mode="$2"
+shift 2
+case "$owner" in ''|*[!0-9]*) exit 1 ;; esac
+user_home="/home/codex/.codex/users/$owner"
+user_uid=$((10000 + owner))
+case "$mode" in
+  oauth)
+    exec /usr/bin/setpriv --reuid="$user_uid" --regid="$user_uid" --clear-groups \
+      /usr/bin/env -i HOME="$user_home" CODEX_HOME="$user_home/.codex" \
+      PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 /usr/local/bin/codex-native "$@"
+    ;;
+  api)
+    if [ -n "${UCHEBA_API_KEY:-}" ]; then
+      exec /usr/bin/setpriv --reuid="$user_uid" --regid="$user_uid" --clear-groups \
+        /usr/bin/env -i HOME="$user_home" CODEX_HOME="$user_home/.codex-api" \
+        UCHEBA_API_KEY="$UCHEBA_API_KEY" \
+        PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 /usr/local/bin/codex-native "$@"
+    fi
+    exec /usr/bin/setpriv --reuid="$user_uid" --regid="$user_uid" --clear-groups \
+      /usr/bin/env -i HOME="$user_home" CODEX_HOME="$user_home/.codex-api" \
+      PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 /usr/local/bin/codex-native "$@"
+    ;;
+  *)
+    exit 1
+    ;;
+esac

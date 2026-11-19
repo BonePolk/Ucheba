@@ -9,14 +9,17 @@ from common import calendar
 from common.database import get_engine
 from common.models.task import Task
 from common.rpc import call
-from common.settings import read_settings, report
+from common.settings import report, resolve_agent_auth
 from integrations import jobs, scheduler
 
 
+async def check():
+    config, api_key = resolve_agent_auth('straus')
+    return await call('straus', '/check', {'config': config, 'api_key': api_key}, timeout=120)
+
+
 def start_edit(instruction):
-    config, secrets = read_settings('straus')
-    if not config['enabled'] or not secrets.get('api_key'):
-        raise HTTPException(400, 'Включите Straus и сохраните его API-ключ')
+    config, api_key = resolve_agent_auth('straus', require_enabled=True)
     run_id = uuid4().hex
 
     async def operation():
@@ -27,7 +30,7 @@ def start_edit(instruction):
                     tasks = [{'id': task.id, 'title': task.title, 'summary': task.description or ''}
                              for task in session.exec(select(Task).where(Task.archived == False, Task.status != 'done')).all()]
                 result = await call('straus', '/edit', {'instruction': instruction, 'calendar': original,
-                    'tasks': tasks, 'run_id': run_id, 'config': config, 'api_key': secrets['api_key']}, timeout=None)
+                    'tasks': tasks, 'run_id': run_id, 'config': config, 'api_key': api_key}, timeout=None)
                 updated = calendar.CalendarConfig.model_validate(result['calendar'])
                 updated.revision = original['revision']
                 original_ids = {event['task_id'] for event in original['events'] if event.get('task_id')}

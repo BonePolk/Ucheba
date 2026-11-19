@@ -13,6 +13,7 @@ from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from common.agent_api import agent_routes
 from common.http import private_app
 from common.progress import Progress
 import runner
@@ -28,6 +29,7 @@ async def lifespan(app):
 
 
 app = private_app('arrodes', lifespan)
+agent_routes(app, 'Arrodes')
 
 
 @app.get('/status')
@@ -47,7 +49,7 @@ async def disconnect():
 
 @app.post('/check')
 async def check(body: dict | None = None):
-    return await runner.check((body or {}).get('model'))
+    return await runner.check(body or {})
 
 
 @app.get('/models')
@@ -59,6 +61,8 @@ class Run(BaseModel):
     run_id: str = Field(pattern=r'^[a-f0-9]{32}$')
     payload: dict
     task_id: int = Field(default=0, ge=0)
+    auth: dict = Field(default_factory=dict)
+    options: dict = Field(default_factory=dict)
 
 
 active_runs = {}
@@ -84,21 +88,24 @@ async def run(body: Run):
     key = (user_id(), body.run_id)
     if key in cancelled_runs or any(owner == user_id() for owner, _ in active_runs):
         raise HTTPException(409, 'Arrodes остановлен или уже работает')
+    allow_browser = bool(body.options.get('allow_browser', True))
     token = browser_run_id.set(body.run_id)
     async def execute():
         with Progress('Arrodes', body.task_id) as progress:
+            if allow_browser:
+                try:
+                    await browser_request('/session/start', {})
+                except HTTPException as exc:
+                    logging.getLogger('uvicorn.error').warning('Arrodes browser start: HTTP %s', exc.status_code)
             try:
-                await browser_request('/session/start', {})
-            except HTTPException as exc:
-                logging.getLogger('uvicorn.error').warning('Arrodes browser start: HTTP %s', exc.status_code)
-            try:
-                payload = body.payload | {'run_id': body.run_id, 'task_id': body.task_id, '_progress': progress}
+                payload = body.payload | {'run_id': body.run_id, 'task_id': body.task_id, '_progress': progress, '_auth': body.auth, '_options': body.options}
                 return await runner.execute_with_history(payload)
             finally:
-                try:
-                    await browser_request('/session/end', {})
-                except HTTPException as exc:
-                    logging.getLogger('uvicorn.error').warning('Arrodes browser cleanup: HTTP %s', exc.status_code)
+                if allow_browser:
+                    try:
+                        await browser_request('/session/end', {})
+                    except HTTPException as exc:
+                        logging.getLogger('uvicorn.error').warning('Arrodes browser cleanup: HTTP %s', exc.status_code)
     task = asyncio.create_task(execute())
     active_runs[key] = task
     try:

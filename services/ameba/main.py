@@ -1,25 +1,46 @@
 import asyncio
 from collections import OrderedDict
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import json
 import logging
 
 import httpx
 from fastapi import HTTPException
-from openai import AsyncOpenAI
+from openai_codex import ApprovalMode, ExternalMessage, Sandbox
 from pydantic import BaseModel, Field, ValidationError
 
-from common.agent_api import agent_routes, response_text, stream_model_response
+from common.agent_api import agent_routes
 from common.agent_history import with_history
 from common.agent_issues import ISSUE_INSTRUCTION, ISSUE_TOOL, report_problem
 from common.agent_memory import MEMORY_INSTRUCTION, MEMORY_NAMES, MEMORY_TOOLS, memory_tool
+from common.codex_harness import (
+    CONTAINER_SANDBOX,
+    McpToolAdapter,
+    append_custom_instructions,
+    check_connection,
+    normalize_auth,
+    normalize_effort,
+    open_codex,
+    prepare_codex_root,
+    run_codex_turn,
+    scratch_env,
+    serve_mcp,
+)
 from common.dates import deadline_facts
 from common.http import private_app
 from common.identity import user_id
 from common.progress import NOTE_INSTRUCTION, NOTE_TOOL, Progress, get_progress, get_work_progress
 import planning
 
-app = private_app('ameba')
+
+@asynccontextmanager
+async def lifespan(app):
+    prepare_codex_root()
+    yield
+
+
+app = private_app('ameba', lifespan)
 agent_routes(app, 'Ameba')
 
 
@@ -79,21 +100,12 @@ def read_ranking(text, expected):
 
 @app.post('/check')
 async def check_model(body: dict):
-    config = body['config']
-    async with AsyncOpenAI(
-        api_key=body['api_key'],
-        base_url=config.get('base_url') or 'https://lenec.tech/v1',
-        max_retries=0,
-        timeout=180,
-    ) as client:
-        response = await client.responses.create(
-            model=config['model'],
-            input='Ответь одним словом: готова.',
-            reasoning={'effort': 'low'},
-            max_output_tokens=1000,
-        )
-    if response.status != 'completed' or not response_text(response).strip():
-        raise HTTPException(502, 'Модель не завершила проверочный ответ')
+    await check_connection(
+        'Ameba',
+        config=body.get('config'),
+        api_key=body.get('api_key', ''),
+        default_mode='api_key',
+    )
     return {'ok': True, 'comparisons': 0}
 
 
@@ -230,6 +242,11 @@ CONTEXT_TOOL = {
     },
 }
 
+AMEBA_TOOLS = [
+    planning.TOOL, planning.ORDER_TOOL, planning.REST_TOOL,
+    planning.READ_TOOL, CONTEXT_TOOL, NOTE_TOOL, ISSUE_TOOL, *MEMORY_TOOLS,
+]
+
 AMEBA_INSTRUCTIONS = (
     'Ты Ameba — адаптивный персональный менеджер нагрузки, приоритетов и восстановления '
     '(всегда говори о себе в женском роде: «я прочитала», «получила», «оценила», «запланировала», без мужского рода; '
@@ -267,21 +284,258 @@ AMEBA_INSTRUCTIONS = (
 )
 
 
+class AmebaTools:
+    def __init__(self, body, planning_week, progress, has_feedback):
+        self.body = body
+        self.tasks = body.get('tasks', [])
+        self.expected = [task['id'] for task in self.tasks]
+        self.profile = body.get('adaptation_profile')
+        self.adjustments = body.get('manual_adjustments')
+        self.old_plan = body.get('previous_plan') or {}
+        self.tz = body.get('timezone', 'UTC')
+        self.planning_week = planning_week
+        self.progress = progress
+        self.memory_checked = False
+        self.feedback_saved = not has_feedback
+        self.plans = {}
+        self.schedule = None
+        self.rest_planned = False
+        self.order = list(self.expected)
+        self.failed_actions = {}
+        self.adapter = None
+
+    async def call(self, name, args):
+        raw_args = json.dumps(args, ensure_ascii=False)
+        try:
+            if name in ('plan_tasks', 'plan_rest', 'reorder_tasks', 'read_current_plan') and not self.memory_checked:
+                raise ValueError('Сначала прочитай факты владельца через read_user_memory')
+            if name == 'agent_note':
+                output = self.progress.note(raw_args)
+            elif name == 'report_tool_problem':
+                self.progress.add('Сообщает администратору о технической проблеме')
+                output = await report_problem(args, 'Ameba')
+            elif name in MEMORY_NAMES:
+                self.progress.add('Читает общую память' if name == 'read_user_memory' else 'Запоминает факт о владельце')
+                output = await memory_tool(name, args, 'Ameba')
+                if name == 'read_user_memory':
+                    self.body['user_memory'] = output
+                    self.memory_checked = True
+                elif name == 'remember_user_fact':
+                    self.feedback_saved = True
+            elif name == 'request_context_check':
+                ids = args['task_ids']
+                checked = self.body.get('checked_contexts', [])
+                if not ids or len(ids) != len(set(ids)) or any(value not in self.expected or value in checked for value in ids):
+                    raise ValueError('Invalid context IDs')
+                titles = [task['title'] for task in self.tasks if task['id'] in ids]
+                self.progress.add('Просит Monocle перепроверить: ' + ', '.join(titles), description=str(args['reason'])[:400])
+                self.progress.update(stage='context', context_requests=ids)
+                if self.adapter is not None:
+                    self.adapter.terminal_result = {'context_requests': ids, 'context_reason': str(args['reason'])[:1000]}
+                return {'status': 'accepted'}, []
+            elif name == 'read_current_plan':
+                output = planning.read_summary(
+                    self.planning_week, self.body['now'], self.old_plan, self.plans, self.expected,
+                    profile=self.profile, adjustments=self.adjustments,
+                )
+                self.progress.add('Изучает ёмкость дней и прошлый план')
+            elif name == 'plan_rest':
+                self.planning_week = planning.with_rest(self.planning_week, self.body['now'], raw_args, self.tz)
+                self.rest_planned = True
+                self.schedule = None
+                self.progress.add('Настраивает режим нагрузки и восстановления')
+                output = {
+                    'status': 'configured',
+                    'rest_config': self.planning_week['rest_config'],
+                    'notice': 'Теперь вызови reorder_tasks для расчёта периодов.',
+                }
+            elif name == 'plan_tasks':
+                self.progress.add('Оценивает объём, сложность и зависимости задач')
+                calculated = planning.calculate(
+                    raw_args,
+                    self.expected,
+                    completed={task['id']: task.get('completed_work_minutes', 0) for task in self.tasks},
+                    profile=self.profile,
+                    tasks=self.tasks,
+                    adjustments=self.adjustments,
+                )
+                self.plans.update(calculated)
+                self.schedule = None
+                for task_id, plan in calculated.items():
+                    title = next(task['title'] for task in self.tasks if task['id'] == task_id)
+                    self.progress.add(f"Оценка: {title} — {plan['time_estimate']}")
+                output = {'plans': list(calculated.values())}
+            elif name == 'reorder_tasks':
+                self.progress.add('Рассчитывает гибкие периоды нагрузки и отдыха')
+                self.schedule = planning.reorder(
+                    raw_args,
+                    self.plans,
+                    self.expected,
+                    self.planning_week,
+                    datetime.now(timezone.utc).isoformat(),
+                    previous=self.old_plan.get('schedule'),
+                    tasks=self.tasks,
+                    profile=self.profile,
+                    adjustments=self.adjustments,
+                )
+                self.order = self.schedule['task_ids']
+                self.progress.add(
+                    f"Сформировано периодов: {len(self.schedule['periods'])}; работа {self.schedule['hours_label']}"
+                )
+                output = {
+                    'task_ids': self.schedule['task_ids'],
+                    'feasible': self.schedule['feasible'],
+                    'replan_mode': self.schedule['replan_mode'],
+                    'hours_label': self.schedule['hours_label'],
+                    'periods': [
+                        {
+                            'id': p['id'],
+                            'start_date': p['start_date'],
+                            'end_date': p['end_date'],
+                            'kind': p['kind'],
+                            'title': p['title'],
+                            'hours_label': p['hours_label'],
+                            'load_level': p['load_level'],
+                            'tasks': p['tasks'],
+                            'day_hints': p['day_hints'],
+                            'rest_note': p['rest_note'],
+                            'risks': p['risks'],
+                        }
+                        for p in self.schedule['periods']
+                    ],
+                    'deadline_conflicts': self.schedule['deadline_conflicts'],
+                    'remaining': self.schedule['remaining'],
+                    'plan_changes': self.schedule['plan_changes'],
+                }
+            else:
+                raise ValueError('Unknown tool')
+
+            if name in ('plan_tasks', 'plan_rest', 'reorder_tasks', 'remember_user_fact'):
+                self.failed_actions.clear()
+            titles = {task['id']: task['title'] for task in self.tasks}
+            self.progress.update(
+                stage='sorting' if set(self.plans) == set(self.expected) else 'planning',
+                total=len(self.expected),
+                completed=len(self.plans),
+                schedule=self.schedule,
+                timeline=[{'id': task_id, 'title': titles[task_id], 'plan': self.plans.get(task_id)} for task_id in self.order],
+            )
+            return output, []
+        except (ValidationError, ValueError) as exc:
+            if isinstance(exc, ValidationError):
+                errors = [
+                    {'field': '.'.join(map(str, item['loc'])), 'type': item['type'], 'message': item['msg']}
+                    for item in exc.errors(include_input=False, include_context=False, include_url=False)[:8]
+                ]
+                reason = '; '.join(f"{item['field']}: {item['type']}" for item in errors)
+            else:
+                reason = str(exc)
+                errors = [{'message': reason}]
+            failed_key = (name, raw_args, reason)
+            self.failed_actions[failed_key] = self.failed_actions.get(failed_key, 0) + 1
+            if self.failed_actions[failed_key] >= 3:
+                if self.adapter is not None:
+                    self.adapter.fatal_error = HTTPException(502, 'Ameba трижды повторила одинаковое неудачное действие. Предыдущий план сохранён.')
+            logging.getLogger('uvicorn.error').warning('Ameba tool %s: %s', name, reason)
+            self.progress.add('Исправляет параметры ' + name + ': ' + reason)
+            return {
+                'error': 'Исправь указанные поля инструмента; уже принятые оценки сохранены.',
+                'details': errors,
+                'expected_task_ids': self.expected,
+                'planned_task_ids': list(self.plans),
+                'missing_plan_ids': [task_id for task_id in self.expected if task_id not in self.plans],
+            }, []
+        except httpx.HTTPError as exc:
+            if name not in MEMORY_NAMES:
+                raise
+            status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+            self.progress.add('Не удалось прочитать память' if name == 'read_user_memory' else 'Не удалось сохранить факт')
+            if name == 'remember_user_fact' and status == 422:
+                failed_key = (name, raw_args, '422')
+                self.failed_actions[failed_key] = self.failed_actions.get(failed_key, 0) + 1
+                if self.failed_actions[failed_key] >= 3 and self.adapter is not None:
+                    self.adapter.fatal_error = HTTPException(502, 'Ameba трижды повторила одинаковое неудачное действие. Предыдущий план сохранён.')
+                return {
+                    'error': 'Ключ задан владельцем или неверен формат. Используй новый ключ латиницей вида ameba.<тема> и повтори remember_user_fact.',
+                    'status': status,
+                }, []
+            if name == 'remember_user_fact':
+                self.feedback_saved = True
+            return {
+                'error': (
+                    'Память отклонила запись. Проверь формат.'
+                    if status == 422 else 'Память временно недоступна. Повтори обращение.'
+                ),
+                'status': status,
+            }, []
+
+
 @with_history('Ameba')
 async def rank(body: dict):
-    key = body.pop('api_key', None)
+    key = body.pop('api_key', None) or ''
     config = body.pop('config', {})
-    model = config.get('model', 'gpt-6-luna')
-    if not key:
-        raise HTTPException(503, 'Сохраните API-ключ Ameba в профиле')
+    auth_mode, api_key, base_url, model = normalize_auth(config, key, default_mode='api_key', label='Ameba')
+    reasoning_effort = normalize_effort(config.get('reasoning_effort'))
+    planning_style = config.get('planning_style') or 'balanced'
+    allow_context_recheck = bool(config.get('allow_context_recheck', True))
+    custom_instructions = config.get('custom_instructions') or ''
 
     tasks = body.get('tasks', [])
     expected = [task['id'] for task in tasks]
-    profile = body.get('adaptation_profile')
-    adjustments = body.get('manual_adjustments')
     old_plan = body.get('previous_plan') or {}
     tz = body.get('timezone', 'UTC')
     planning_week = planning.restore_week(body.get('weekly_schedule'), old_plan, body['now'], tz)
+    has_feedback = bool((body.get('user_feedback') or '').strip())
+
+    now = datetime.now(timezone.utc)
+    payload = {k: v for k, v in body.items() if k not in ('agent_history', 'history_notice')}
+    if body.get('agent_history') or body.get('history_notice'):
+        payload['reference_history'] = {
+            'notice': body.get('history_notice', ''),
+            'items': body.get('agent_history', []),
+        }
+    payload['current_clock'] = {
+        'notice': 'Актуальная дата сервера; старые даты проверки в контексте не являются сегодняшней датой.',
+        'now': now.isoformat(),
+        'deadlines': [{'task_id': task['id'], **deadline_facts(task.get('deadline'), now)} for task in tasks],
+    }
+    payload['instruction'] = (
+        f'Немедленно построй план для всех {len(expected)} актуальных задач из поля tasks (ID: {expected}): '
+        'сначала вызови read_user_memory, затем оцени каждую через plan_tasks, настрой нагрузку/отдых через plan_rest, '
+        'рассчитай периоды через reorder_tasks'
+        + (', обязательно примени и сохрани разовое пожелание user_feedback в память через remember_user_fact' if has_feedback else '')
+        + ' и верни итоговый JSON RankingResult.'
+    )
+    if has_feedback:
+        payload['feedback_notice'] = (
+            'Поле user_feedback — разовое пожелание владельца и очистится после этого запуска. '
+            'Учти его прямо сейчас в плане и обязательно сохрани правило/предпочтение в память через remember_user_fact.'
+        )
+    prompt_text = (
+        'Ниже переданы актуальные задачи (поле tasks) и календарь владельца. '
+        'Немедленно выполни полный расчёт плана для всех задач из tasks.\n'
+        + json.dumps(payload, ensure_ascii=False, default=str)
+    )
+    output_schema = RankingResult.model_json_schema() | {'additionalProperties': False}
+    active_tools = [tool for tool in AMEBA_TOOLS if allow_context_recheck or tool['name'] != 'request_context_check']
+    instructions = ISSUE_INSTRUCTION + MEMORY_INSTRUCTION + NOTE_INSTRUCTION + AMEBA_INSTRUCTIONS
+    if planning_style == 'gentle':
+        instructions += (
+            '\nРежим нагрузки владельца: ЩАДЯЩИЙ. Закладывай больше запаса на восстановление, '
+            'избегай подряд тяжёлых дней, оставляй вечера свободными при плотном графике и выбирай комфортный дневной лимит ниже обычного.'
+        )
+    elif planning_style == 'intense':
+        instructions += (
+            '\nРежим нагрузки владельца: ИНТЕНСИВНЫЙ. Допустимы более плотные рабочие дни ради ускорения прогресса по задачам, '
+            'при сохранении базового сна и минимальных перерывов.'
+        )
+    if not allow_context_recheck:
+        instructions += (
+            '\nПерепроверка задач через Monocle (request_context_check) отключена: '
+            'планируй по текущему контексту с явными допущениями в assumptions.'
+        )
+    instructions = append_custom_instructions(instructions, custom_instructions)
+    sandbox = Sandbox.full_access if CONTAINER_SANDBOX else Sandbox.read_only
 
     with Progress('Ameba', body.get('task_id', 0), namespace='ranking') as progress:
         progress.update(
@@ -291,314 +545,112 @@ async def rank(body: dict):
             timeline=[{'id': task['id'], 'title': task['title']} for task in tasks],
         )
         progress.add('Изучает задачи, календарь и накопленный опыт')
-        http = httpx.AsyncClient(timeout=httpx.Timeout(None, connect=8))
-        async with AsyncOpenAI(
-            api_key=key,
-            base_url=config.get('base_url') or 'https://lenec.tech/v1',
-            http_client=http,
-            max_retries=0,
-        ) as client:
-            memory_checked = False
-            context_sent = False
-            has_feedback = bool((body.get('user_feedback') or '').strip())
-            feedback_saved = not has_feedback
-            plans = {}
-            schedule = None
-            rest_planned = False
-            order = list(expected)
-            repaired = False
-            failed_actions = {}
-            messages = [{
-                'role': 'user',
-                'content': (
-                    f'Запущено построение плана Ameba для {len(expected)} активных задач (ID: {expected}). '
-                    'Сначала вызови read_user_memory; сразу после чтения памяти тебе будут переданы '
-                    'полные данные задач и календаря для расчёта.'
-                ),
-            }]
+        tools_handler = AmebaTools(body, planning_week, progress, has_feedback)
+        adapter = McpToolAdapter(active_tools, tools_handler.call, progress)
+        tools_handler.adapter = adapter
 
+        async with open_codex(
+            'Ameba',
+            auth_mode=auth_mode,
+            api_key=api_key,
+            base_url=base_url,
+            allow_shell=False,
+            web_search='disabled',
+        ) as (client, thread_provider), scratch_env(writable=False) as (work_dir, shell_policy), serve_mcp(adapter) as mcp_config:
+            thread = await client.thread_start(
+                cwd=str(work_dir),
+                sandbox=sandbox,
+                ephemeral=True,
+                approval_mode=ApprovalMode.deny_all,
+                model=model or None,
+                model_provider=thread_provider,
+                developer_instructions=instructions,
+                config=mcp_config | shell_policy,
+            )
+            outcome = await run_codex_turn(
+                thread,
+                ExternalMessage(tool_name='task_manager', content=prompt_text),
+                label='Ameba',
+                progress=progress,
+                adapter=adapter,
+                effort=reasoning_effort,
+                output_schema=output_schema,
+                client=client,
+            )
+
+            followups = 0
             while True:
-                if memory_checked and not context_sent:
-                    now = datetime.now(timezone.utc)
-                    payload = {key: value for key, value in body.items() if key not in ('agent_history', 'history_notice')}
-                    if body.get('agent_history') or body.get('history_notice'):
-                        payload['reference_history'] = {
-                            'notice': body.get('history_notice', ''),
-                            'items': body.get('agent_history', []),
-                        }
-                    payload['current_clock'] = {
-                        'notice': 'Актуальная дата сервера; старые даты проверки в контексте не являются сегодняшней датой.',
-                        'now': now.isoformat(),
-                        'deadlines': [{'task_id': task['id'], **deadline_facts(task.get('deadline'), now)} for task in tasks],
-                    }
-                    payload['instruction'] = (
-                        f'Немедленно построй план для всех {len(expected)} актуальных задач из поля tasks (ID: {expected}): '
-                        'оцени каждую через plan_tasks, настрой нагрузку/отдых через plan_rest, '
-                        'рассчитай периоды через reorder_tasks'
-                        + (', обязательно примени и сохрани разовое пожелание user_feedback в память через remember_user_fact' if has_feedback else '')
-                        + ' и верни итоговый JSON RankingResult.'
+                if outcome.terminal_result is not None:
+                    return outcome.terminal_result
+                if outcome.status == 'failed':
+                    raise HTTPException(502, outcome.error_detail or 'Ameba не завершила планирование. Предыдущий план сохранён.')
+                missing = [task_id for task_id in expected if task_id not in tools_handler.plans]
+                if missing or tools_handler.schedule is None or not tools_handler.rest_planned or not tools_handler.feedback_saved:
+                    if followups >= 3:
+                        raise HTTPException(502, 'Ameba не завершила обязательные этапы планирования. Предыдущий план сохранён.')
+                    followups += 1
+                    error_msg = (
+                        'Сначала оцени все задачи через plan_tasks, настрой нагрузку/отдых через plan_rest и вызови reorder_tasks.'
+                        if (missing or tools_handler.schedule is None or not tools_handler.rest_planned)
+                        else 'Перед итоговым ответом сохрани разовое пожелание user_feedback в общую память через remember_user_fact (ключ вида ameba.<тема>).'
                     )
-                    if has_feedback:
-                        payload['feedback_notice'] = (
-                            'Поле user_feedback — разовое пожелание владельца и очистится после этого запуска. '
-                            'Учти его прямо сейчас в плане и обязательно сохрани правило/предпочтение в память через remember_user_fact.'
-                        )
-                    messages.append({
-                        'role': 'user',
-                        'content': (
-                            'Ниже переданы актуальные задачи (поле tasks) и календарь владельца. '
-                            'Немедленно выполни полный расчёт плана для всех задач из tasks.\n'
-                            + json.dumps(payload, ensure_ascii=False, default=str)
-                        ),
-                    })
-                    context_sent = True
+                    if (missing or tools_handler.schedule is None or not tools_handler.rest_planned) and not tools_handler.feedback_saved:
+                        error_msg += ' Также обязательно сохрани user_feedback в общую память через remember_user_fact.'
+                    reminder = json.dumps({
+                        'error': error_msg,
+                        'remaining': missing,
+                        'feedback_saved': tools_handler.feedback_saved,
+                    }, ensure_ascii=False)
+                    outcome = await run_codex_turn(
+                        thread,
+                        reminder,
+                        label='Ameba',
+                        progress=progress,
+                        adapter=adapter,
+                        effort=reasoning_effort,
+                        output_schema=output_schema,
+                        client=client,
+                    )
+                    continue
+                break
 
-                progress.update(
-                    stage='sorting' if set(plans) == set(expected) else 'planning',
-                    total=0 if set(plans) == set(expected) else len(expected),
-                )
-                progress.begin_response()
-                tools = [
-                    planning.TOOL, planning.ORDER_TOOL, planning.REST_TOOL,
-                    planning.READ_TOOL, CONTEXT_TOOL, NOTE_TOOL, ISSUE_TOOL, *MEMORY_TOOLS,
-                ]
-                required_tool = 'read_user_memory' if not memory_checked else None
-                if required_tool:
-                    tools = [tool for tool in tools if tool['name'] == required_tool]
+            repaired = False
+            while True:
+                if outcome.terminal_result is not None:
+                    return outcome.terminal_result
+                if outcome.status == 'failed':
+                    raise HTTPException(502, outcome.error_detail or 'Ameba не завершила планирование. Старый порядок сохранён.')
+                try:
+                    if not outcome.completed:
+                        raise ValueError('Incomplete response')
+                    result = read_ranking(outcome.text, expected)
+                    if tools_handler.schedule is None or tools_handler.schedule.get('timeline_error') or result.task_ids != tools_handler.schedule['task_ids']:
+                        raise ValueError('Final order differs from verified plan')
+                    break
+                except (ValidationError, ValueError) as exc:
+                    reason = exc.errors(include_input=False)[0]['type'] if isinstance(exc, ValidationError) else type(exc).__name__
+                    logging.getLogger('uvicorn.error').warning('Ameba: invalid ranking (%s)', reason)
+                    if repaired:
+                        raise HTTPException(502, 'Ameba вернула неверный формат сортировки. Старый порядок сохранён.') from None
+                    repaired = True
+                    progress.add('Исправляет формат итогового ответа')
+                    outcome = await run_codex_turn(
+                        thread,
+                        'Исправь только формат ответа. Верни JSON с task_ids, explanation и reasons '
+                        '(task_id, reason, time_estimate, effort, impact, deadline_risk). '
+                        'Все переданные ID должны присутствовать ровно по одному разу. Без Markdown. '
+                        'Используй порядок последнего reorder_tasks.',
+                        label='Ameba',
+                        progress=progress,
+                        adapter=adapter,
+                        effort='low',
+                        output_schema=output_schema,
+                        client=client,
+                    )
 
-                response = await stream_model_response(
-                    client, progress,
-                    model=model,
-                    reasoning={'effort': 'medium' if memory_checked else 'low', 'summary': 'auto'},
-                    max_output_tokens=8000,
-                    instructions=ISSUE_INSTRUCTION + MEMORY_INSTRUCTION + NOTE_INSTRUCTION + AMEBA_INSTRUCTIONS,
-                    input=messages,
-                    tools=tools,
-                    tool_choice=(
-                        'required' if required_tool else 'none' if repaired else
-                        'required' if set(plans) != set(expected) or schedule is None or not rest_planned or not feedback_saved else 'auto'
-                    ),
-                    parallel_tool_calls=False,
-                    text={'format': {
-                        'type': 'json_schema',
-                        'name': 'task_ranking',
-                        'strict': True,
-                        'schema': RankingResult.model_json_schema() | {'additionalProperties': False},
-                    }},
-                    include=['reasoning.encrypted_content'],
-                    store=False,
-                )
-                progress.finish_response(response)
-                calls = [item for item in response.output if item.type == 'function_call']
-                if response.status != 'completed':
-                    raise HTTPException(502, 'Ameba не завершила планирование. Предыдущий план сохранён.')
-
-                if not calls:
-                    missing = [task_id for task_id in expected if task_id not in plans]
-                    if missing or schedule is None or not rest_planned or not feedback_saved:
-                        messages.extend(response.output)
-                        error_msg = (
-                            'Сначала оцени все задачи через plan_tasks, настрой нагрузку/отдых через plan_rest и вызови reorder_tasks.'
-                            if (missing or schedule is None or not rest_planned)
-                            else 'Перед итоговым ответом сохрани разовое пожелание user_feedback в общую память через remember_user_fact (ключ вида ameba.<тема>).'
-                        )
-                        if (missing or schedule is None or not rest_planned) and not feedback_saved:
-                            error_msg += ' Также обязательно сохрани user_feedback в общую память через remember_user_fact.'
-                        messages.append({'role': 'user', 'content': json.dumps({
-                            'error': error_msg,
-                            'remaining': missing,
-                            'feedback_saved': feedback_saved,
-                        }, ensure_ascii=False)})
-                        continue
-                    try:
-                        result = read_ranking(response_text(response), expected)
-                        if schedule is None or schedule.get('timeline_error') or result.task_ids != schedule['task_ids']:
-                            raise ValueError('Final order differs from verified plan')
-                        break
-                    except (ValidationError, ValueError) as exc:
-                        reason = exc.errors(include_input=False)[0]['type'] if isinstance(exc, ValidationError) else type(exc).__name__
-                        logging.getLogger('uvicorn.error').warning('Ameba: invalid ranking (%s)', reason)
-                        if repaired:
-                            raise HTTPException(502, 'Ameba вернула неверный формат сортировки. Старый порядок сохранён.') from None
-                        repaired = True
-                        progress.add('Исправляет формат итогового ответа')
-                        messages.extend(response.output)
-                        messages.append({'role': 'user', 'content': (
-                            'Исправь только формат ответа. Верни JSON с task_ids, explanation и reasons '
-                            '(task_id, reason, time_estimate, effort, impact, deadline_risk). '
-                            'Все переданные ID должны присутствовать ровно по одному разу. Без Markdown. '
-                            'Используй порядок последнего reorder_tasks.'
-                        )})
-                        continue
-
-                messages.extend(response.output)
-                for call in calls:
-                    try:
-                        if call.name in ('plan_tasks', 'plan_rest', 'reorder_tasks', 'read_current_plan') and not memory_checked:
-                            raise ValueError('Сначала прочитай факты владельца через read_user_memory')
-                        if call.name == 'agent_note':
-                            output = progress.note(call.arguments)
-                        elif call.name == 'report_tool_problem':
-                            progress.add('Сообщает администратору о технической проблеме')
-                            output = await report_problem(json.loads(call.arguments), 'Ameba')
-                        elif call.name in MEMORY_NAMES:
-                            progress.add('Читает общую память' if call.name == 'read_user_memory' else 'Запоминает факт о владельце')
-                            output = await memory_tool(call.name, json.loads(call.arguments), 'Ameba')
-                            if call.name == 'read_user_memory':
-                                body['user_memory'] = output
-                                memory_checked = True
-                            elif call.name == 'remember_user_fact':
-                                feedback_saved = True
-                        elif call.name == 'request_context_check':
-                            arguments = json.loads(call.arguments)
-                            ids = arguments['task_ids']
-                            checked = body.get('checked_contexts', [])
-                            if not ids or len(ids) != len(set(ids)) or any(value not in expected or value in checked for value in ids):
-                                raise ValueError('Invalid context IDs')
-                            titles = [task['title'] for task in tasks if task['id'] in ids]
-                            progress.add('Просит Monocle перепроверить: ' + ', '.join(titles), description=str(arguments['reason'])[:400])
-                            progress.update(stage='context', context_requests=ids)
-                            return {'context_requests': ids, 'context_reason': str(arguments['reason'])[:1000]}
-                        elif call.name == 'read_current_plan':
-                            output = planning.read_summary(planning_week, body['now'], old_plan, plans, expected, profile=profile, adjustments=adjustments)
-                            progress.add('Изучает ёмкость дней и прошлый план')
-                        elif call.name == 'plan_rest':
-                            planning_week = planning.with_rest(planning_week, body['now'], call.arguments, tz)
-                            rest_planned = True
-                            schedule = None
-                            progress.add('Настраивает режим нагрузки и восстановления')
-                            output = {
-                                'status': 'configured',
-                                'rest_config': planning_week['rest_config'],
-                                'notice': 'Теперь вызови reorder_tasks для расчёта периодов.',
-                            }
-                        elif call.name == 'plan_tasks':
-                            progress.add('Оценивает объём, сложность и зависимости задач')
-                            calculated = planning.calculate(
-                                call.arguments,
-                                expected,
-                                completed={task['id']: task.get('completed_work_minutes', 0) for task in tasks},
-                                profile=profile,
-                                tasks=tasks,
-                                adjustments=adjustments,
-                            )
-                            plans.update(calculated)
-                            schedule = None
-                            for task_id, plan in calculated.items():
-                                title = next(task['title'] for task in tasks if task['id'] == task_id)
-                                progress.add(f"Оценка: {title} — {plan['time_estimate']}")
-                            output = {'plans': list(calculated.values())}
-                        elif call.name == 'reorder_tasks':
-                            progress.add('Рассчитывает гибкие периоды нагрузки и отдыха')
-                            schedule = planning.reorder(
-                                call.arguments,
-                                plans,
-                                expected,
-                                planning_week,
-                                datetime.now(timezone.utc).isoformat(),
-                                previous=old_plan.get('schedule'),
-                                tasks=tasks,
-                                profile=profile,
-                                adjustments=adjustments,
-                            )
-                            order = schedule['task_ids']
-                            progress.add(
-                                f"Сформировано периодов: {len(schedule['periods'])}; работа {schedule['hours_label']}"
-                            )
-                            output = {
-                                'task_ids': schedule['task_ids'],
-                                'feasible': schedule['feasible'],
-                                'replan_mode': schedule['replan_mode'],
-                                'hours_label': schedule['hours_label'],
-                                'periods': [
-                                    {
-                                        'id': p['id'],
-                                        'start_date': p['start_date'],
-                                        'end_date': p['end_date'],
-                                        'kind': p['kind'],
-                                        'title': p['title'],
-                                        'hours_label': p['hours_label'],
-                                        'load_level': p['load_level'],
-                                        'tasks': p['tasks'],
-                                        'day_hints': p['day_hints'],
-                                        'rest_note': p['rest_note'],
-                                        'risks': p['risks'],
-                                    }
-                                    for p in schedule['periods']
-                                ],
-                                'deadline_conflicts': schedule['deadline_conflicts'],
-                                'remaining': schedule['remaining'],
-                                'plan_changes': schedule['plan_changes'],
-                            }
-                        else:
-                            raise ValueError('Unknown tool')
-
-                        if call.name in ('plan_tasks', 'plan_rest', 'reorder_tasks', 'remember_user_fact'):
-                            failed_actions.clear()
-                        titles = {task['id']: task['title'] for task in tasks}
-                        progress.update(
-                            stage='planning',
-                            total=len(expected),
-                            completed=len(plans),
-                            schedule=schedule,
-                            timeline=[{'id': task_id, 'title': titles[task_id], 'plan': plans.get(task_id)} for task_id in order],
-                        )
-                    except (ValidationError, ValueError) as exc:
-                        if isinstance(exc, ValidationError):
-                            errors = [
-                                {'field': '.'.join(map(str, item['loc'])), 'type': item['type'], 'message': item['msg']}
-                                for item in exc.errors(include_input=False, include_context=False, include_url=False)[:8]
-                            ]
-                            reason = '; '.join(f"{item['field']}: {item['type']}" for item in errors)
-                        else:
-                            reason = str(exc)
-                            errors = [{'message': reason}]
-                        failed_key = (call.name, call.arguments, reason)
-                        failed_actions[failed_key] = failed_actions.get(failed_key, 0) + 1
-                        if failed_actions[failed_key] >= 3:
-                            raise HTTPException(502, 'Ameba трижды повторила одинаковое неудачное действие. Предыдущий план сохранён.')
-                        logging.getLogger('uvicorn.error').warning('Ameba tool %s: %s', call.name, reason)
-                        progress.add('Исправляет параметры ' + call.name + ': ' + reason)
-                        output = {
-                            'error': 'Исправь указанные поля инструмента; уже принятые оценки сохранены.',
-                            'details': errors,
-                            'expected_task_ids': expected,
-                            'planned_task_ids': list(plans),
-                            'missing_plan_ids': [task_id for task_id in expected if task_id not in plans],
-                        }
-                    except httpx.HTTPError as exc:
-                        if call.name not in MEMORY_NAMES:
-                            raise
-                        status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
-                        progress.add('Не удалось прочитать память' if call.name == 'read_user_memory' else 'Не удалось сохранить факт')
-                        if call.name == 'remember_user_fact' and status == 422:
-                            failed_key = (call.name, call.arguments, '422')
-                            failed_actions[failed_key] = failed_actions.get(failed_key, 0) + 1
-                            if failed_actions[failed_key] >= 3:
-                                raise HTTPException(502, 'Ameba трижды повторила одинаковое неудачное действие. Предыдущий план сохранён.')
-                            output = {
-                                'error': 'Ключ задан владельцем или неверен формат. Используй новый ключ латиницей вида ameba.<тема> и повтори remember_user_fact.',
-                                'status': status,
-                            }
-                        else:
-                            if call.name == 'remember_user_fact':
-                                feedback_saved = True
-                            output = {
-                                'error': (
-                                    'Память отклонила запись. Проверь формат.'
-                                    if status == 422 else 'Память временно недоступна. Повтори обращение.'
-                                ),
-                                'status': status,
-                            }
-
-                    messages.append({
-                        'type': 'function_call_output',
-                        'call_id': call.call_id,
-                        'output': json.dumps(output, ensure_ascii=False),
-                    })
-
-        if response.status != 'completed':
-            raise HTTPException(502, 'Ameba не завершила планирование. Старый порядок сохранён.')
+        plans = tools_handler.plans
+        schedule = tools_handler.schedule
+        planning_week = tools_handler.planning_week
         if set(plans) != set(expected):
             raise HTTPException(502, 'Ameba не оценила все задачи. Старый порядок сохранён.')
 

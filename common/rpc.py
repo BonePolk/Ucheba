@@ -43,6 +43,11 @@ async def call(service, path, body=None, method='POST', timeout=90):
             enabled = features()
             if not (enabled['monocle'] or enabled['straus'] or enabled['arrodes']):
                 check_feature('monocle')
+        elif service == 'arrodes' and path in ('/status', '/connect', '/models'):
+            from common.accounts import features
+            enabled = features()
+            if not any(enabled[name] for name in ('monocle', 'ameba', 'straus', 'arrodes')):
+                check_feature('arrodes')
         else:
             check_feature(service)
     async with httpx.AsyncClient(timeout=timeout, transport=httpx.AsyncHTTPTransport(retries=1)) as client:

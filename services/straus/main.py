@@ -1,16 +1,35 @@
 import asyncio
+from contextlib import asynccontextmanager
 import logging
 from collections import OrderedDict
 
 from fastapi import HTTPException
+from common.codex_harness import check_connection, prepare_codex_root
 from common.http import private_app
 from common.agent_api import agent_routes
 from common.identity import user_id
 from browser_client import browser_request, browser_run_id
 import agent
 
-app = private_app('straus')
+
+@asynccontextmanager
+async def lifespan(app):
+    prepare_codex_root()
+    yield
+
+
+app = private_app('straus', lifespan)
 agent_routes(app, 'Straus')
+
+
+@app.post('/check')
+async def check_model(body: dict):
+    return await check_connection(
+        'Straus',
+        config=body.get('config'),
+        api_key=body.get('api_key', ''),
+        default_mode='api_key',
+    )
 active_runs = {}
 cancelled_runs = OrderedDict()
 
@@ -39,11 +58,13 @@ async def edit_schedule(body: dict):
         raise HTTPException(409, 'Работа Straus остановлена')
     if any(owner == user_id() for owner, _ in active_runs):
         raise HTTPException(409, 'Straus уже работает')
+    allow_browser = bool((body.get('config') or {}).get('allow_browser', True))
     token = browser_run_id.set(run_id)
-    try:
-        await browser_request('/session/start', {})
-    except HTTPException as exc:
-        logging.getLogger('uvicorn.error').warning('Straus browser session start failed: %s', exc.status_code)
+    if allow_browser:
+        try:
+            await browser_request('/session/start', {})
+        except HTTPException as exc:
+            logging.getLogger('uvicorn.error').warning('Straus browser session start failed: %s', exc.status_code)
     task = asyncio.create_task(agent.run(body))
     active_runs[key] = task
     try:
@@ -52,8 +73,9 @@ async def edit_schedule(body: dict):
         raise HTTPException(409, 'Работа Straus остановлена') from None
     finally:
         active_runs.pop(key, None)
-        try:
-            await browser_request('/session/end', {})
-        except HTTPException as exc:
-            logging.getLogger('uvicorn.error').warning('Straus browser session cleanup failed: %s', exc.status_code)
+        if allow_browser:
+            try:
+                await browser_request('/session/end', {})
+            except HTTPException as exc:
+                logging.getLogger('uvicorn.error').warning('Straus browser session cleanup failed: %s', exc.status_code)
         browser_run_id.reset(token)

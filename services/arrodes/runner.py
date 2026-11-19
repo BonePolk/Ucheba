@@ -1,26 +1,41 @@
 import asyncio
+from dataclasses import dataclass, field
 import json
-import os
 import logging
-import tempfile
-from common.browser_client import browser_request, browser_run_id
+import os
+from pathlib import Path
+
+from fastapi import HTTPException
+from openai_codex import ApprovalMode, AsyncCodex, ExternalMessage, Sandbox
+
 from common.agent_history import with_history
 from common.agent_memory import MEMORY_INSTRUCTION
 from common.agent_questions import QUESTION_INSTRUCTION
+from common.browser_tools import BROWSER_NAMES
+from common.codex_harness import (
+    CONTAINER_SANDBOX,
+    HOME,
+    WORKER_BIN,
+    McpToolAdapter,
+    append_custom_instructions,
+    build_codex_config,
+    normalize_auth,
+    normalize_effort,
+    open_codex,
+    prepare_codex_root,
+    prepare_codex_user,
+    run_codex_turn,
+    scratch_env,
+    serve_mcp,
+)
 from common.file_tools import FILE_INSTRUCTION
-from tools import Tools, serve, open_local, tasks_request
-from common.library_client import library_request
-from pathlib import Path
-from dataclasses import dataclass, field
 from common.identity import user_id
-from common.progress import timestamp
+from common.library_client import library_request
+from tools import TOOLS, Tools, open_local, tasks_request
 
-from fastapi import HTTPException
-from openai_codex import ApprovalMode, AsyncCodex, CodexConfig, ExternalMessage, Sandbox
-
-HOME = Path('/home/codex')
 WORK = Path('/work')
-CONTAINER_SANDBOX = os.environ.get('ARRODES_SANDBOX', '').strip().lower() == 'container'
+
+
 @dataclass
 class Connection:
     run_lock: object = field(default_factory=asyncio.Lock)
@@ -47,13 +62,7 @@ def work():
 
 
 def prepare_user():
-    uid = 10000 + user_id()
-    root = home()
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chown(root, uid, uid)
-    root.chmod(0o700)
-    (root / '.codex').mkdir(exist_ok=True, mode=0o700)
-    os.chown(root / '.codex', uid, uid)
+    prepare_codex_user()
     if user_id() != 1:
         work().mkdir(parents=True, exist_ok=True, mode=0o711)
         os.chown(work(), 0, 0)
@@ -64,9 +73,7 @@ async def get_client():
     async with init_lock:
         prepare_user()
         if state().client is None:
-            config = CodexConfig(cwd=str(home()), launch_args_override=(
-                '/usr/local/bin/arrodes-worker', str(user_id()), '-c', 'sandbox_workspace_write.network_access=false',
-                '-c', 'web_search="cached"', 'app-server', '--listen', 'stdio://'))
+            config, _ = build_codex_config('oauth', allow_shell=True, web_search='cached', cwd=home())
             current = AsyncCodex(config)
             await current.__aenter__()
             state().client = current
@@ -76,9 +83,10 @@ async def get_client():
 async def sandbox_available():
     prepare_user()
     args = ('--version',) if CONTAINER_SANDBOX else ('sandbox', '--', '/bin/true')
-    process = await asyncio.create_subprocess_exec('/usr/local/bin/arrodes-worker', str(user_id()),
-        *args, cwd=str(home()),
-        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+    process = await asyncio.create_subprocess_exec(
+        WORKER_BIN, str(user_id()), 'oauth', *args, cwd=str(home()),
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+    )
     try:
         _, error = await asyncio.wait_for(process.communicate(), 10)
         detail = ''
@@ -106,17 +114,21 @@ async def sandbox_available():
 async def status():
     current = await get_client()
     account = await current.account()
-    return {'authorized': account.account is not None, 'device': state().login_info,
-            'busy': state().run_lock.locked(), 'sandbox_available': await sandbox_available(),
-            'sandbox_error': state().sandbox_error,
-            'sandbox_mode': 'container' if CONTAINER_SANDBOX else 'bwrap'}
+    return {
+        'authorized': account.account is not None,
+        'device': state().login_info,
+        'busy': state().run_lock.locked(),
+        'sandbox_available': await sandbox_available(),
+        'sandbox_error': state().sandbox_error,
+        'sandbox_mode': 'container' if CONTAINER_SANDBOX else 'bwrap',
+    }
 
 
 async def models():
     current = await get_client()
     account = await current.account()
     if account.account is None:
-        raise HTTPException(400, 'Подключите Arrodes через ChatGPT')
+        raise HTTPException(400, 'Подключите OpenAI OAuth в профиле')
     available = await current.models()
     return list(dict.fromkeys(item.model for item in available.data))
 
@@ -151,16 +163,66 @@ async def disconnect():
     return {'ok': True}
 
 
-async def check(model=None):
+async def check(body=None):
     if not await sandbox_available():
         raise HTTPException(503, 'Linux sandbox недоступен. ' + state().sandbox_error)
-    current = await get_client()
+    data = body or {}
+    if 'config' in data:
+        auth_mode, api_key, base_url, model = normalize_auth(
+            data.get('config'),
+            data.get('api_key', ''),
+            default_mode='oauth',
+            label='Arrodes',
+        )
+    else:
+        auth_mode, api_key, base_url, model = 'oauth', '', '', (data.get('model') or '').strip()
+
     sandbox = Sandbox.full_access if CONTAINER_SANDBOX else Sandbox.read_only
-    thread = await current.thread_start(cwd=str(home()), sandbox=sandbox,
-                                        ephemeral=True, approval_mode=ApprovalMode.deny_all, model=model or None)
-    async with asyncio.timeout(90):
-        await thread.run('Ответь только OK.')
-    return {'ok': True}
+    try:
+        if auth_mode == 'oauth':
+            current = await get_client()
+            account = await current.account()
+            if account.account is None:
+                raise HTTPException(400, 'Подключите OpenAI OAuth в профиле для Arrodes')
+            thread = await current.thread_start(
+                cwd=str(home()),
+                sandbox=sandbox,
+                ephemeral=True,
+                approval_mode=ApprovalMode.deny_all,
+                model=model or None,
+            )
+            async with asyncio.timeout(90):
+                await thread.run('Ответь только OK.')
+            return {'ok': True}
+
+        async with open_codex(
+            'Arrodes',
+            auth_mode='api_key',
+            api_key=api_key,
+            base_url=base_url,
+            allow_shell=False,
+            web_search='disabled',
+            cwd=home(),
+        ) as (current, thread_provider), scratch_env(writable=False) as (work_dir, shell_policy):
+            thread = await current.thread_start(
+                cwd=str(work_dir),
+                sandbox=sandbox,
+                ephemeral=True,
+                approval_mode=ApprovalMode.deny_all,
+                model=model or None,
+                model_provider=thread_provider,
+                config=shell_policy,
+            )
+            async with asyncio.timeout(90):
+                await thread.run('Ответь только OK.')
+        return {'ok': True}
+    except HTTPException:
+        raise
+    except TimeoutError:
+        raise HTTPException(502, 'Arrodes: проверка подключения превысила время ожидания') from None
+    except Exception as exc:
+        logging.getLogger('uvicorn.error').warning('Arrodes check failed: %s', type(exc).__name__)
+        raise HTTPException(502, f'Arrodes: не удалось выполнить проверочный запрос ({type(exc).__name__})') from None
 
 
 def metadata(run_id):
@@ -179,32 +241,54 @@ def result_path(run_id):
 @with_history('Arrodes')
 async def execute_with_history(body):
     progress = body.pop('_progress')
+    auth = body.pop('_auth', None)
+    options = body.pop('_options', None)
     body['task'] = await tasks_request({'task_id': body['task_id']})
     body['task']['attachments'] = (await library_request('list_task_files', {'task_id': body['task_id']}))['output']
-    return await execute(body['run_id'], body, progress)
+    return await execute(body['run_id'], body, progress, auth=auth, options=options)
 
 
-async def execute(run_id, payload, progress):
+async def execute(run_id, payload, progress, auth=None, options=None):
     if state().run_lock.locked():
         raise HTTPException(409, 'Arrodes уже обрабатывает задачу')
     async with state().run_lock:
         progress.add('Проверяет доступность Linux sandbox', description='Проверяет, что материалы задачи можно готовить в изолированной рабочей области.')
         if not await sandbox_available():
             raise HTTPException(503, 'Linux sandbox недоступен. ' + state().sandbox_error)
+        auth_data = auth or {}
+        opts = options or {}
+        reasoning_effort = normalize_effort(opts.get('reasoning_effort'))
+        web_search_mode = opts.get('web_search_mode') if opts.get('web_search_mode') in ('cached', 'live', 'disabled') else 'cached'
+        allow_browser = bool(opts.get('allow_browser', True))
+        allow_shell = bool(opts.get('allow_shell', True))
+        ask_clarifications = bool(opts.get('ask_clarifications', True))
+        custom_instructions = opts.get('custom_instructions') or ''
+
+        auth_mode, api_key, base_url, model = normalize_auth(
+            {
+                'auth_mode': auth_data.get('auth_mode', 'oauth'),
+                'base_url': auth_data.get('base_url'),
+                'model': payload.get('model'),
+            },
+            auth_data.get('api_key', ''),
+            default_mode='oauth',
+            label='Arrodes',
+        )
         previous = run_state(payload['resume_run_id']) if payload.get('resume_run_id') else {}
         workspace = previous.get('workspace', run_id)
         path = work() / workspace
         progress.add('Готовит отдельную рабочую директорию', description='Выделяет место для файлов и результатов этой задачи.')
         uid = 10000 + user_id()
         path.mkdir(mode=0o700, exist_ok=bool(previous))
-        current = None
         try:
             os.chown(path, uid, uid)
             path.chmod(0o700)
             result_file = path / 'result.md'
             if previous and result_file.exists() and not result_file.is_symlink():
                 os.chown(result_file, uid, uid)
-            current = await get_client()
+            if auth_mode == 'oauth' and state().client is not None:
+                await state().client.close()
+                state().client = None
             progress.add('Подключается к Arrodes и создаёт рабочую сессию', description='Передаёт поручение и разрешения рабочему агенту.')
             instructions = """Ты Arrodes, универсальный исполнитель Ucheba. Выполняй поручение, а не объясняй, как его выполнить.
 Пиши и запускай код, создавай документы и проверяй результаты доступными средствами.
@@ -229,134 +313,91 @@ async def execute(run_id, payload, progress):
                 ' Ограничения готовых файловых инструментов не ограничивают создание и проверку файлов '
                 'твоими командами в рабочей директории. Используй доступные программы и библиотеки; '
                 'при невозможности нужного формата объясни ограничение и сохрани полезный результат.')
-            adapter = Tools(path, progress)
-            with tempfile.TemporaryDirectory(prefix='arrodes-run-') as scratch:
-                os.chmod(scratch, 0o711)
-                run_home = Path(scratch) / 'home'
-                run_tmp = Path(scratch) / 'tmp'
-                for item in (run_home, run_tmp):
-                    item.mkdir(mode=0o700)
-                    os.chown(item, uid, uid)
-                async with serve(adapter) as config:
-                    try:
-                        run_config = config | {
-                            'allow_login_shell': False,
-                            'shell_environment_policy': {
-                                'inherit': 'none',
-                                'set': {
-                                    'HOME': str(run_home),
-                                    'TMPDIR': str(run_tmp),
-                                    'TMP': str(run_tmp),
-                                    'TEMP': str(run_tmp),
-                                    'PATH': '/usr/local/bin:/usr/bin:/bin',
-                                    'LANG': 'C.UTF-8',
-                                },
-                            },
-                        }
-                        sandbox = Sandbox.full_access if CONTAINER_SANDBOX else Sandbox.workspace_write
-                        options = dict(cwd=str(path), sandbox=sandbox, model=payload.get('model') or None,
-                            approval_mode=ApprovalMode.deny_all, developer_instructions=instructions, config=run_config)
-                        if previous.get('thread_id'):
-                            thread = await current.thread_resume(previous['thread_id'], **options)
-                        else:
-                            thread = await current.thread_start(ephemeral=False, **options)
-                        record = metadata(run_id)
-                        record.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                        record.write_text(json.dumps({'thread_id': thread.id, 'workspace': workspace}))
-                        task = asyncio.create_task(run_turn(thread, path, payload, progress, adapter))
-                        try:
-                            return await asyncio.shield(task)
-                        except asyncio.CancelledError:
-                            try:
-                                async with asyncio.timeout(15):
-                                    if adapter.turn is not None:
-                                        await adapter.turn.interrupt()
-                                    await asyncio.gather(task, return_exceptions=True)
-                            except Exception as exc:
-                                logging.getLogger('uvicorn.error').warning('Arrodes interruption: %s', type(exc).__name__)
-                                await current.close()
-                                state().client = None
-                                task.cancel()
-                                await asyncio.gather(task, return_exceptions=True)
-                            raise
-                    finally:
-                        if current is not None and state().client is current:
-                            await current.close()
-                            state().client = None
+
+            active_tools = [
+                item for item in TOOLS
+                if (allow_browser or item['name'] not in BROWSER_NAMES)
+                and (ask_clarifications or item['name'] not in ('ask_user', 'delete_silo_file'))
+            ]
+            if not allow_shell:
+                instructions += '\nВыполнение shell-команд отключено владельцем: работай инструментами MCP, документами Silo и локальной рабочей директорией.'
+            if not allow_browser:
+                instructions += '\nБраузер владельца отключён: не обращайся к ЛК через браузер, используй задачи, файлы, Silo и память.'
+            if not ask_clarifications:
+                instructions += '\nИнтерактивные вопросы ask_user отключены: не запрашивай подтверждение и не жди ответа; ограничения укажи в итоге.'
+            instructions = append_custom_instructions(instructions, custom_instructions)
+
+            tools_handler = Tools(path, progress)
+            adapter = McpToolAdapter(active_tools, tools_handler.call, progress)
+            sandbox = Sandbox.full_access if CONTAINER_SANDBOX else Sandbox.workspace_write
+            can_resume = bool(
+                previous.get('thread_id')
+                and previous.get('auth_mode', 'oauth') == auth_mode
+                and (auth_mode != 'api_key' or previous.get('base_url') == base_url)
+            )
+
+            async with open_codex(
+                'Arrodes',
+                auth_mode=auth_mode,
+                api_key=api_key,
+                base_url=base_url,
+                allow_shell=allow_shell,
+                web_search=web_search_mode,
+                cwd=path,
+            ) as (current, thread_provider), scratch_env(writable=True) as (_, shell_policy), serve_mcp(adapter) as mcp_config:
+                options = dict(
+                    cwd=str(path),
+                    sandbox=sandbox,
+                    model=model or None,
+                    model_provider=thread_provider,
+                    approval_mode=ApprovalMode.deny_all,
+                    developer_instructions=instructions,
+                    config=mcp_config | shell_policy,
+                )
+                if can_resume:
+                    thread = await current.thread_resume(previous['thread_id'], **options)
+                else:
+                    thread = await current.thread_start(ephemeral=False, **options)
+                record = metadata(run_id)
+                record.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                record.write_text(json.dumps({
+                    'thread_id': thread.id,
+                    'workspace': workspace,
+                    'auth_mode': auth_mode,
+                    'base_url': base_url,
+                }))
+                outcome = await run_codex_turn(
+                    thread,
+                    ExternalMessage(tool_name='task_manager', content=json.dumps(payload, ensure_ascii=False)),
+                    label='Arrodes',
+                    progress=progress,
+                    adapter=adapter,
+                    effort=reasoning_effort,
+                    client=current,
+                )
+
+            if not outcome.completed:
+                raise HTTPException(502, outcome.error_detail or 'Arrodes не завершил работу')
+            summary = outcome.text
+            if not summary:
+                raise HTTPException(502, 'Arrodes не вернул результат')
+
+            progress.add('Сохраняет подготовленные материалы', description='Готовит результат и файлы для проверки владельцем.')
+            fd = open_local(path, 'result.md', os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+            with os.fdopen(fd, 'w') as output:
+                os.fchown(output.fileno(), uid, uid)
+                output.write(summary)
+            try:
+                await tools_handler.call('publish_file', {'local_path': 'result.md', 'path': 'Arrodes/' + payload['run_id'] + '/result.md', 'version': ''})
+            except HTTPException:
+                summary += '\n\nИтог не удалось сохранить в Silo; локальные материалы доступны в карточке запуска.'
+                progress.add('Silo недоступен: итог сохранён в рабочей директории')
+            if tools_handler.files:
+                summary += '\n\nМатериалы в Silo:\n' + '\n'.join(f'[{name}]({url})' for name, url in tools_handler.files.items())
+            return {'summary': summary[:20000]}
         finally:
-            if current is not None and state().client is current:
-                await current.close()
-                state().client = None
             os.chown(path, 0, 0)
             path.chmod(0o700)
-
-
-
-async def run_turn(thread, path, payload, progress, adapter):
-    summary = None
-    fallback = None
-    commentary = set()
-    completed = False
-    progress.begin_response()
-    turn = None
-    try:
-        turn = await thread.turn(ExternalMessage(tool_name='task_manager', content=json.dumps(payload, ensure_ascii=False)))
-        adapter.turn = turn
-        async for event in turn.stream():
-            progress.update(last_activity_at=timestamp())
-            data = event.payload
-            if event.method in ('item/started', 'item/completed'):
-                item = data.item.root if hasattr(data.item, 'root') else data.item
-                phase = getattr(getattr(item, 'phase', None), 'value', None)
-                if event.method == 'item/started':
-                    progress.update(model_waiting=item.type in ('reasoning', 'agentMessage'))
-                    if item.type not in ('reasoning', 'agentMessage'):
-                        labels = {'commandExecution': 'Выполняет команду', 'fileChange': 'Изменяет файлы', 'webSearch': 'Ищет информацию'}
-                        progress.add(labels.get(item.type, 'Выполняет инструмент Arrodes'), description='Работает над материалами поручения; цель шага агент поясняет в комментариях.')
-                    if item.type == 'agentMessage' and phase == 'commentary':
-                        commentary.add(item.id)
-                elif item.type == 'agentMessage':
-                    if phase == 'final_answer':
-                        summary = item.text
-                    elif phase is None:
-                        fallback = item.text
-                else:
-                    progress.update(model_waiting=True)
-            elif event.method == 'item/agentMessage/delta' and data.item_id in commentary:
-                progress.summary(data.delta, ('commentary', data.item_id))
-                progress.update(agent_comment=progress.record['events'][-1]['message'])
-            elif event.method == 'item/reasoning/summaryTextDelta':
-                progress.summary(data.delta, (data.item_id, data.summary_index))
-            elif event.method == 'thread/tokenUsage/updated':
-                usage = data.token_usage.total
-                progress.update(token_usage={'input_tokens': usage.input_tokens, 'output_tokens': usage.output_tokens},
-                                current_usage_known=True)
-            elif event.method == 'turn/completed':
-                completed = data.turn.status.value == 'completed'
-    except asyncio.CancelledError:
-        if turn is not None:
-            await turn.interrupt()
-        raise
-    finally:
-        progress.update(model_waiting=False)
-    if not completed:
-        raise HTTPException(502, 'Arrodes не завершил работу')
-    summary = summary or fallback
-    if not summary:
-        raise HTTPException(502, 'Arrodes не вернул результат')
-    progress.add('Сохраняет подготовленные материалы', description='Готовит результат и файлы для проверки владельцем.')
-    fd = open_local(path, 'result.md', os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
-    with os.fdopen(fd, 'w') as output:
-        os.fchown(output.fileno(), 10000 + user_id(), 10000 + user_id())
-        output.write(summary)
-    try:
-        await adapter.call('publish_file', {'local_path': 'result.md', 'path': 'Arrodes/' + payload['run_id'] + '/result.md', 'version': ''})
-    except HTTPException:
-        summary += '\n\nИтог не удалось сохранить в Silo; локальные материалы доступны в карточке запуска.'
-        progress.add('Silo недоступен: итог сохранён в рабочей директории')
-    if adapter.files:
-        summary += '\n\nМатериалы в Silo:\n' + '\n'.join(f'[{name}]({url})' for name, url in adapter.files.items())
-    return {'summary': summary[:20000]}
 
 
 def lock_workspaces(folder):
@@ -369,23 +410,7 @@ def lock_workspaces(folder):
 
 
 def prepare_directories():
-    import shutil
-    root = HOME / '.codex'
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    users = root / 'users'
-    users.mkdir(exist_ok=True, mode=0o711)
-    owner_home = users / '1'
-    owner_home.mkdir(exist_ok=True, mode=0o700)
-    legacy = owner_home / '.codex'
-    legacy.mkdir(exist_ok=True, mode=0o700)
-    for item in root.iterdir():
-        if item.name not in ('users', 'arrodes-state'):
-            shutil.move(str(item), legacy / item.name)
-    for item in (owner_home, legacy):
-        os.chown(item, 10001, 10001)
-    for item in (HOME, root, users):
-        os.chown(item, 0, 0)
-        item.chmod(0o711)
+    prepare_codex_root(migrate_legacy=True)
     WORK.mkdir(exist_ok=True)
     lock_workspaces(WORK)
     users_work = WORK / 'users'
@@ -398,9 +423,6 @@ def prepare_directories():
             os.chown(item, 0, 0)
             item.chmod(0o711)
             lock_workspaces(item)
-    tmp = Path('/tmp')
-    if tmp.is_dir():
-        tmp.chmod(0o1733)
 
 
 async def close():

@@ -307,24 +307,71 @@ class PlanningScenarios(unittest.TestCase):
 
 class AgentLoop(unittest.IsolatedAsyncioTestCase):
     async def run_agent(self, actions):
+        from contextlib import asynccontextmanager
+        from common.codex_harness import TurnOutcome
+
         class Clock(datetime):
             @classmethod
             def now(cls, tz=None):
                 return datetime.fromisoformat(NOW)
-        responses = [SimpleNamespace(status='completed', output=[SimpleNamespace(type='function_call',
-                     name=name, arguments=json.dumps(arguments), call_id=str(i))], output_text='')
-                     for i, (name, arguments) in enumerate(actions)]
-        responses.append(SimpleNamespace(status='completed', output=[], output_text=json.dumps({
-            'task_ids': [1], 'explanation': 'Гибкий план периодов', 'reasons': [{
-                'task_id': 1, 'reason': 'Приоритет', 'time_estimate': '3–4 ч',
-                'effort': 'Средняя', 'impact': 'Готовая работа', 'deadline_risk': None}]})))
+
+        thread = MagicMock()
+        codex_client = MagicMock()
+        codex_client.thread_start = AsyncMock(return_value=thread)
+
+        @asynccontextmanager
+        async def fake_open_codex(*args, **kwargs):
+            yield codex_client, 'ucheba_api'
+
+        @asynccontextmanager
+        async def fake_scratch(*args, **kwargs):
+            yield '/tmp/work', {}
+
+        @asynccontextmanager
+        async def fake_serve(adapter):
+            yield {'mcp_servers': {}}
+
+        async def fake_turn(thread_arg, prompt_input, *, adapter=None, **kwargs):
+            for idx, (name, arguments) in enumerate(actions, start=1):
+                await adapter.respond({
+                    'jsonrpc': '2.0',
+                    'id': idx,
+                    'method': 'tools/call',
+                    'params': {'name': name, 'arguments': arguments},
+                })
+                if adapter.fatal_error is not None or adapter.terminal_result is not None:
+                    break
+            if adapter.fatal_error is not None:
+                raise adapter.fatal_error
+            return TurnOutcome(
+                text=json.dumps({
+                    'task_ids': [1],
+                    'explanation': 'Гибкий план периодов',
+                    'reasons': [{
+                        'task_id': 1,
+                        'reason': 'Приоритет',
+                        'time_estimate': '3–4 ч',
+                        'effort': 'Средняя',
+                        'impact': 'Готовая работа',
+                        'deadline_risk': None,
+                    }],
+                }),
+                completed=True,
+                status='completed',
+                error_detail=None,
+                usage={'input_tokens': 0, 'output_tokens': 0},
+                terminal_result=adapter.terminal_result,
+            )
+
         with patch.object(ameba_service, 'datetime', Clock), \
              patch.object(ameba_service, 'Progress', MagicMock()), \
-             patch.object(ameba_service, 'AsyncOpenAI', MagicMock()), \
              patch.object(ameba_service, 'memory_tool', AsyncMock(return_value=[])), \
-             patch.object(ameba_service, 'stream_model_response', AsyncMock(side_effect=responses)):
+             patch.object(ameba_service, 'open_codex', fake_open_codex), \
+             patch.object(ameba_service, 'scratch_env', fake_scratch), \
+             patch.object(ameba_service, 'serve_mcp', fake_serve), \
+             patch.object(ameba_service, 'run_codex_turn', side_effect=fake_turn):
             return await ameba_service.rank.__wrapped__({
-                'api_key': 'synthetic', 'config': {}, 'tasks': [{'id': 1, 'title': 'Лабораторная'}],
+                'api_key': 'synthetic', 'config': {'model': 'fixture'}, 'tasks': [{'id': 1, 'title': 'Лабораторная'}],
                 'now': NOW, 'weekly_schedule': empty_week(),
             })
 
@@ -340,7 +387,7 @@ class AgentLoop(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['schedule']['version'], 2)
         self.assertTrue(result['schedule']['periods'])
 
-        with patch.object(ameba_service, 'AsyncOpenAI', side_effect=AssertionError('LLM must not run')):
+        with patch.object(ameba_service, 'open_codex', side_effect=AssertionError('LLM must not run')):
             refreshed = await ameba_service.refresh_plan({
                 'previous_plan': result,
                 'weekly_schedule': empty_week(),
@@ -443,8 +490,9 @@ class Storage(unittest.TestCase):
             return await ameba_service.refresh_plan(body)
 
         with patch.object(ameba, 'check_feature'), \
-             patch.object(ameba, 'read_config', return_value={'enabled': True, 'model': 'm', 'base_url': 'u'}), \
-             patch.object(ameba, 'read_settings', return_value=({'enabled': True, 'model': 'm', 'base_url': 'u'}, {})), \
+             patch.object(ameba, 'read_config', return_value={'enabled': True, 'model': 'm', 'auth_mode': 'api_key'}), \
+             patch.object(ameba, 'read_settings', return_value=({'base_url': 'u'}, {})), \
+             patch.object(ameba, 'resolve_agent_auth', return_value=({'enabled': True, 'model': 'm', 'base_url': 'u', 'auth_mode': 'api_key'}, '')), \
              patch.object(scheduler, 'call', side_effect=fake_call), \
              patch('agent_memory.read', return_value=[]):
             status = asyncio.run(ameba.submit_feedback(1, 'partial', actual_minutes=60, period_id=saved_result['schedule']['periods'][0]['id']))
