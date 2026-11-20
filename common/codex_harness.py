@@ -1,5 +1,6 @@
 """Общий Codex harness (openai-codex SDK + изолированный MCP) для всех агентов."""
 import asyncio
+from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 import json
@@ -9,7 +10,9 @@ from pathlib import Path
 import shutil
 import socket
 import struct
+import subprocess
 import tempfile
+import types
 from typing import Any
 
 from fastapi import HTTPException
@@ -26,7 +29,7 @@ WORKER_BIN = '/usr/local/bin/codex-worker'
 MCP_STDIO_SCRIPT = '/app/common/mcp_stdio.py'
 CONTAINER_SANDBOX = os.environ.get('ARRODES_SANDBOX', '').strip().lower() == 'container'
 API_PROVIDER_ID = 'ucheba_api'
-CLIENT_CLOSE_TIMEOUT = 15
+CLIENT_CLOSE_TIMEOUT = 10
 MCP_SHUTDOWN_TIMEOUT = 5
 TURN_START_TIMEOUT = 60
 TURN_IDLE_TIMEOUT = 300
@@ -158,6 +161,70 @@ def build_codex_config(
     return CodexConfig(cwd=str(cwd or user_home()), env=env, launch_args_override=tuple(args)), thread_provider
 
 
+def _force_kill_client(label: str, client) -> None:
+    if client is None:
+        return
+    queue = deque([(client, 0)])
+    seen = {id(client)}
+    killed = 0
+    primitives = (str, bytes, bytearray, int, float, bool, type, types.ModuleType)
+
+    def enqueue(value, next_depth: int) -> None:
+        if value is None or isinstance(value, primitives) or next_depth > 4 or len(seen) >= 64:
+            return
+        identity = id(value)
+        if identity in seen:
+            return
+        seen.add(identity)
+        queue.append((value, next_depth))
+
+    while queue:
+        obj, depth = queue.popleft()
+        if isinstance(obj, subprocess.Popen):
+            if obj.poll() is None:
+                try:
+                    obj.kill()
+                    killed += 1
+                except OSError:
+                    pass
+            continue
+        if isinstance(obj, asyncio.subprocess.Process):
+            if obj.returncode is None:
+                try:
+                    obj.kill()
+                    killed += 1
+                except ProcessLookupError:
+                    pass
+            continue
+        if depth >= 4 or len(seen) >= 64:
+            continue
+        if isinstance(obj, dict):
+            for value in obj.values():
+                enqueue(value, depth + 1)
+            continue
+        if isinstance(obj, (list, tuple, set, frozenset)):
+            for value in obj:
+                enqueue(value, depth + 1)
+            continue
+        attrs = getattr(obj, '__dict__', None)
+        if isinstance(attrs, dict):
+            for value in attrs.values():
+                enqueue(value, depth + 1)
+        for cls in type(obj).__mro__:
+            slots = cls.__dict__.get('__slots__')
+            if not slots:
+                continue
+            slot_names = (slots,) if isinstance(slots, str) else slots
+            for slot in slot_names:
+                if slot in ('__dict__', '__weakref__'):
+                    continue
+                attr_name = f'_{cls.__name__.lstrip("_")}{slot}' if slot.startswith('__') and not slot.endswith('__') else slot
+                enqueue(getattr(obj, attr_name, None), depth + 1)
+
+    if killed:
+        logging.getLogger('uvicorn.error').warning('%s: force-killed %d hung codex subprocess(es)', label, killed)
+
+
 async def _close_client(label: str, client) -> None:
     if client is None:
         return
@@ -166,8 +233,9 @@ async def _close_client(label: str, client) -> None:
             await client.close()
     except TimeoutError:
         logging.getLogger('uvicorn.error').warning('%s: codex client close timed out', label)
+        _force_kill_client(label, client)
     except Exception:
-        pass
+        _force_kill_client(label, client)
 
 
 @asynccontextmanager
@@ -552,11 +620,14 @@ async def run_codex_turn(
         idle_since = loop.time()
         timeout_limit = idle_timeout
         active_commands: set[str] = set()
+        last_method = ''
+        last_item_type = ''
 
         async def consume():
-            nonlocal summary_text, fallback_text, last_delta_id, completed, turn_status, error_detail, usage, idle_since
+            nonlocal summary_text, fallback_text, last_delta_id, completed, turn_status, error_detail, usage, idle_since, last_method, last_item_type
             async for event in turn.stream():
                 method = event.method
+                last_method = method
                 data = event.payload
                 meaningful = True
                 if method in ('item/agentMessage/delta', 'item/reasoning/summaryTextDelta'):
@@ -569,12 +640,15 @@ async def run_codex_turn(
                 if method in ('item/started', 'item/completed'):
                     item = data.item.root if hasattr(data.item, 'root') else data.item
                     item_type = getattr(getattr(item, 'type', None), 'value', getattr(item, 'type', None))
+                    last_item_type = str(item_type or '')
                     phase = getattr(getattr(item, 'phase', None), 'value', getattr(item, 'phase', None))
                     item_id = getattr(item, 'id', None)
                     if method == 'item/started':
                         progress.update(model_waiting=item_type in ('reasoning', 'agentMessage'))
                         if item_type == 'commandExecution' and item_id:
                             active_commands.add(item_id)
+                        if item_type == 'contextCompaction':
+                            progress.update(current_action='Сжимает контекст диалога')
                         if item_type in ('commandExecution', 'fileChange', 'webSearch'):
                             labels = {
                                 'commandExecution': 'Выполняет команду',
@@ -632,6 +706,7 @@ async def run_codex_turn(
                     completed = turn_status == 'completed'
                     if not completed:
                         error_detail = format_turn_error(label, data.turn)
+                    break
 
         async def watchdog():
             nonlocal idle_since, timeout_limit
@@ -663,9 +738,11 @@ async def run_codex_turn(
                 if watch_task in done and not consume_task.done():
                     active_tools = list(adapter.active_tools) if adapter is not None else []
                     logging.getLogger('uvicorn.error').warning(
-                        '%s: turn stream idle timeout after %ss (active_tools=%s, active_commands=%d)',
+                        '%s: turn stream idle timeout after %ss (last=%s/%s, active_tools=%s, active_commands=%d)',
                         label,
                         timeout_limit,
+                        last_method or '-',
+                        last_item_type or '-',
                         active_tools,
                         len(active_commands),
                     )

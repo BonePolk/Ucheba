@@ -577,6 +577,17 @@ class MonocleTools:
         return output, extra_content
 
 
+SILO_OP_TIMEOUT = 75
+
+
+async def run_silo(func, *args):
+    try:
+        async with asyncio.timeout(SILO_OP_TIMEOUT):
+            return await asyncio.to_thread(func, *args)
+    except TimeoutError:
+        raise HTTPException(503, 'Хранилище Silo не ответило вовремя. Повторите запрос.') from None
+
+
 @app.post('/analyze')
 @with_history('Monocle')
 async def analyze(body: dict):
@@ -606,10 +617,11 @@ async def analyze_task(auth, task_id, body, progress, options=None):
         except HTTPException as exc:
             logging.getLogger('uvicorn.error').warning('Monocle browser session start failed: %s', exc.status_code)
     try:
-        memory = await asyncio.to_thread(Memory)
+        memory = await run_silo(Memory)
         return await run_agent(auth, memory, task_id, body, progress, options=opts)
     finally:
         if allow_browser:
+            progress.update(current_action='Закрывает сессию браузера')
             try:
                 await browser_request('/session/end', {})
             except HTTPException as exc:
@@ -628,10 +640,10 @@ async def run_agent(auth, memory, task_id, body, progress, options=None):
     body.pop('_model', None)
     body.pop('_base_url', None)
     prompt_parts = [json.dumps(body, ensure_ascii=False, default=str)]
-    for item in await asyncio.to_thread(materials.model_input, memory, task_id):
+    for item in await run_silo(materials.model_input, memory, task_id):
         if item.get('type') == 'input_text' and item.get('text'):
             prompt_parts.append(item['text'])
-    site_id = await asyncio.to_thread(materials.browser_site, memory, task_id)
+    site_id = await run_silo(materials.browser_site, memory, task_id)
     if site_id and allow_browser:
         prompt_parts.append(f'Предпочтительный ЛК владельца для задачи: {site_id}. Можно выбрать другой подходящий ЛК из browser_sites.')
     prompt_text = '\n\n'.join(prompt_parts)
@@ -741,6 +753,7 @@ async def run_agent(auth, memory, task_id, body, progress, options=None):
                 if isinstance(exc, ValidationError):
                     raise
                 raise HTTPException(502, 'Monocle вернул некорректный формат контекста.') from None
+        progress.update(current_action='Завершает сессию агента')
 
     if result.questions:
         result.status = 'needs_context'
@@ -749,7 +762,8 @@ async def run_agent(auth, memory, task_id, body, progress, options=None):
     data = result.model_dump() | {'usage': usage | {'sources': list(tools_handler.sources.values())}}
     saved = {name: body.get(name) for name in ('task_id', 'task', 'subject', 'owner_notes')}
     saved['result'] = data
-    await asyncio.to_thread(memory.save, task_id, saved)
+    progress.update(current_action='Сохраняет контекст задачи')
+    await run_silo(memory.save, task_id, saved)
     return data
 
 
