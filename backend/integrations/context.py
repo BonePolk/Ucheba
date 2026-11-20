@@ -106,7 +106,7 @@ def invalidate_file_contexts(task_id=None):
 
 
 async def prepare(task_id, force=False, review_request=""):
-    async with scheduler.slot('context', task_id):
+    async with scheduler.slot('monocle', task_id):
         return await prepare_task(task_id, force, review_request)
 
 

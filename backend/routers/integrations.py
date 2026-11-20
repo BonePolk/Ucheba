@@ -160,20 +160,61 @@ async def answer_agent(name: Literal['monocle', 'ameba', 'straus', 'arrodes'], q
 
 
 @router.get('/queue')
-def agent_queue():
+async def agent_queue():
     state = scheduler.queue_state()
     enabled = features()
+    browser_state = {'holder': None, 'waiting': []}
+    if state['agents_busy']:
+        try:
+            from common.browser_client import browser_request
+            browser_state = await asyncio.wait_for(browser_request('/session/status', method='GET'), timeout=2)
+        except (HTTPException, TimeoutError):
+            pass
+    holder = browser_state.get('holder')
+    browser_waiters = browser_state.get('waiting') or []
+
+    def provider_feature(name, task_id):
+        if name == 'context':
+            return 'straus' if not task_id else 'monocle'
+        return service_name(name)
+
+    def item_browser_state(name, task_id):
+        agent_label = {'monocle': 'Monocle', 'straus': 'Straus', 'arrodes': 'Arrodes'}.get(name)
+        if not agent_label:
+            return None
+        if holder and holder.get('agent') == agent_label and (not task_id or not holder.get('task_id') or holder.get('task_id') == task_id):
+            return 'using'
+        if any(w.get('agent') == agent_label and (not task_id or not w.get('task_id') or w.get('task_id') == task_id) for w in browser_waiters):
+            return 'waiting'
+        return None
+
     with Session(get_engine()) as session:
+        def enrich_browser_entry(entry):
+            tid = entry.get('task_id') or 0
+            task = session.get(Task, tid) if tid else None
+            return entry | {'title': task.title if task else (entry.get('agent') or 'Агент')}
+
         for group in ('active', 'waiting'):
             entries = []
             for item in state[group]:
-                feature = 'ameba' if item['provider'] == 'ameba' else 'straus' if item['provider'] == 'context' and not item['task_id'] else item['provider']
+                feature = provider_feature(item['provider'], item['task_id'])
                 if not enabled.get(feature, False):
                     continue
                 task = session.get(Task, item['task_id']) if item['task_id'] else None
-                entries.append({'provider': item['provider'], 'task_id': item['task_id'],
-                                'title': task.title if task else 'Расписание · Straus' if item['provider'] == 'context' else 'Общая сортировка'})
+                title = task.title if task else ('Расписание · Straus' if feature == 'straus' else 'Общая сортировка')
+                entry = {
+                    'provider': feature if item['provider'] == 'context' else item['provider'],
+                    'task_id': item['task_id'],
+                    'title': title,
+                }
+                if group == 'active':
+                    entry['browser_state'] = item_browser_state(entry['provider'], item['task_id'])
+                entries.append(entry)
             state[group] = entries
+        state['browser'] = {
+            'holder': enrich_browser_entry(holder) if holder else None,
+            'waiting': [enrich_browser_entry(item) for item in browser_waiters],
+        }
     return state
 
 
@@ -190,12 +231,16 @@ async def agent_progress(task_id: int = 0, providers: str = 'context,arrodes'):
     names = [name for name in allowed if name in providers.split(',') and allowed[name]]
 
     async def read(name):
-        queued = scheduler.queued('context' if name in ('monocle', 'straus') else service_name(name), task_id)
+        queue_provider = ('monocle' if task_id else 'straus') if name == 'context' else service_name(name)
+        queued = scheduler.queued(queue_provider, task_id)
         try:
+            extras = []
             if name in ('monocle', 'straus'):
                 service = 'context' if name == 'monocle' else 'straus'
                 path = '/work/progress' if name == 'monocle' and task_id == 0 else f'/progress?task_id={task_id}'
                 result = await call(service, path, method='GET', timeout=2)
+                if isinstance(result, dict) and task_id == 0:
+                    extras = result.pop('other_running', None) or []
                 available = True
             elif name == 'context' and task_id == 0:
                 operations = []
@@ -204,19 +249,36 @@ async def agent_progress(task_id: int = 0, providers: str = 'context,arrodes'):
                 if enabled['straus']:
                     operations.append(call('straus', '/progress', method='GET', timeout=2))
                 results = await asyncio.gather(*operations, return_exceptions=True)
-                runs = [run for run in results if isinstance(run, dict)]
-                result = max(runs, key=lambda run: (run['status'] == 'running', run['started_at'])) if runs else None
+                runs = []
+                for run in results:
+                    if isinstance(run, dict):
+                        extras.extend(run.pop('other_running', None) or [])
+                        runs.append(run)
+                result = max(runs, key=lambda run: (
+                    run['status'] == 'running',
+                    bool(run.get('pending_question')),
+                    run.get('last_activity_at') or run['started_at'],
+                )) if runs else None
                 available = any(not isinstance(run, Exception) for run in results)
             else:
                 service = name
                 path = '/ranking/progress' if name == 'ameba' else '/progress'
                 result = await call(service, f'{path}?task_id={task_id}' + ('&work=true' if name in ('arrodes', 'codex') and task_id == 0 else ''), method='GET', timeout=2)
                 available = True
-            return {'provider': name, 'run': result, 'available': available, 'queued': queued}
+            items = [{'provider': name, 'run': result, 'available': available, 'queued': queued}]
+            if task_id == 0:
+                seen_ids = {result['id']} if isinstance(result, dict) and result.get('id') else set()
+                for extra in extras:
+                    if extra.get('id') in seen_ids:
+                        continue
+                    seen_ids.add(extra.get('id'))
+                    items.append({'provider': f"{name}:{extra['task_id']}", 'run': extra, 'available': available, 'queued': False})
+            return items
         except (HTTPException, httpx.HTTPError):
-            return {'provider': name, 'run': None, 'available': False, 'queued': queued}
+            return [{'provider': name, 'run': None, 'available': False, 'queued': queued}]
 
-    return await asyncio.gather(*(read(name) for name in names))
+    groups = await asyncio.gather(*(read(name) for name in names))
+    return [entry for group in groups for entry in group]
 
 
 @router.get('/progress/stream')
@@ -283,12 +345,34 @@ async def agent_progress_stream(request: Request, task_id: int = 0, providers: s
                     entries = []
                     for name in dict.fromkeys(source[0] for source in sources):
                         values = [states[source[1]] for source in sources if source[0] == name and source[1] in states]
-                        runs = [value['run'] for value in values if value['run']]
-                        current = max(runs, key=lambda item: (item['status'] == 'running', item['started_at'])) if runs else None
+                        raw_runs = [value['run'] for value in values if value['run']]
+                        runs = []
+                        extras = []
+                        for item in raw_runs:
+                            clean = dict(item)
+                            extras.extend(clean.pop('other_running', None) or [])
+                            runs.append(clean)
+                        current = max(runs, key=lambda item: (
+                            item['status'] == 'running',
+                            bool(item.get('pending_question')),
+                            item.get('last_activity_at') or item['started_at'],
+                        )) if runs else None
+                        now_iso = datetime.now(timezone.utc).isoformat()
+                        is_available = any(value['available'] for value in values)
                         entries.append({'provider': name, 'run': current,
-                                        'server_time': datetime.now(timezone.utc).isoformat(),
-                                        'available': any(value['available'] for value in values),
-                                        'queued': scheduler.queued('context' if name in ('monocle', 'straus') else service_name(name), task_id)})
+                                        'server_time': now_iso,
+                                        'available': is_available,
+                                        'queued': scheduler.queued(('monocle' if task_id else 'straus') if name == 'context' else service_name(name), task_id)})
+                        if task_id == 0:
+                            seen_ids = {current['id']} if current and current.get('id') else set()
+                            for extra in extras:
+                                if extra.get('id') in seen_ids:
+                                    continue
+                                seen_ids.add(extra.get('id'))
+                                entries.append({'provider': f"{name}:{extra['task_id']}", 'run': extra,
+                                                'server_time': now_iso,
+                                                'available': is_available,
+                                                'queued': False})
                     yield 'data: ' + json.dumps(entries, ensure_ascii=False) + '\n\n'
                 except TimeoutError:
                     yield ': keepalive\n\n'
@@ -1068,7 +1152,7 @@ async def browser_handoff(body: dict):
 
 @router.post('/monocle/browser/manual')
 async def profile_browser_action(body: dict):
-    if scheduler.queue_state()['busy']:
+    if scheduler.work_busy():
         raise HTTPException(409, 'Дождитесь завершения работы агентов перед ручным управлением браузером')
     return await call('monocle', '/browser/manual', body)
 

@@ -5,6 +5,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
+from common.browser_client import browser_request, browser_run_id
 from common.identity import user_id
 
 
@@ -53,6 +54,11 @@ async def ask_user(arguments, progress):
     progress.update(stage='waiting_user', model_waiting=False,
                     pending_question={'id': question_id, 'question': body.question.strip(),
                                       'options': [value.strip() for value in body.options if value.strip()]})
+    if browser_run_id.get():
+        try:
+            await browser_request('/session/release', {})
+        except Exception:
+            pass
     try:
         answer = await future
         progress.add('Ответ владельца получен. Продолжает работу')

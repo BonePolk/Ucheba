@@ -23,7 +23,7 @@ def start_edit(instruction):
     run_id = uuid4().hex
 
     async def operation():
-        async with scheduler.slot('context'):
+        async with scheduler.slot('straus'):
             try:
                 original = calendar.read_config()
                 with Session(get_engine()) as session:

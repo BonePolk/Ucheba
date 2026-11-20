@@ -19,7 +19,8 @@ from fastapi import HTTPException
 import httpx
 from openai_codex import ApprovalMode, AsyncCodex, CodexConfig, Sandbox
 
-from common.browser_client import browser_run_id
+from common.browser_client import browser_agent, browser_run_id, browser_task_id
+from common.browser_tools import BROWSER_NAMES
 from common.identity import current_user_id, user_id
 from common.progress import timestamp
 from common.provider import provider_url
@@ -337,7 +338,9 @@ class McpToolAdapter:
 
     @property
     def waiting_for_user(self) -> bool:
-        return any(name in USER_WAIT_TOOLS for name in self.active_tools)
+        return any(name in USER_WAIT_TOOLS for name in self.active_tools) or bool(
+            self.progress is not None and self.progress.record.get('browser_waiting')
+        )
 
     async def respond(self, message):
         method = message['method']
@@ -370,7 +373,7 @@ class McpToolAdapter:
         self.active_tools.append(name)
         try:
             async with self.lock:
-                if name in UNBOUNDED_TOOLS:
+                if name in UNBOUNDED_TOOLS or name in BROWSER_NAMES:
                     output, extra_content = await self.handler(name, args)
                 else:
                     async with asyncio.timeout(MCP_TOOL_TIMEOUT):
@@ -405,6 +408,8 @@ class McpToolAdapter:
 async def serve_mcp(adapter: McpToolAdapter):
     owner = user_id()
     run_id = browser_run_id.get()
+    agent_name = browser_agent.get()
+    task_id = browser_task_id.get()
     handlers = set()
     writers = set()
 
@@ -414,6 +419,8 @@ async def serve_mcp(adapter: McpToolAdapter):
         writers.add(writer)
         token = current_user_id.set(owner)
         browser_token = browser_run_id.set(run_id)
+        agent_token = browser_agent.set(agent_name)
+        task_token = browser_task_id.set(task_id)
         try:
             credentials = writer.get_extra_info('socket').getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
             if struct.unpack('3i', credentials)[1] != 10000 + owner:
@@ -458,6 +465,8 @@ async def serve_mcp(adapter: McpToolAdapter):
                     writer.transport.abort()
             finally:
                 writers.discard(writer)
+                browser_task_id.reset(task_token)
+                browser_agent.reset(agent_token)
                 browser_run_id.reset(browser_token)
                 current_user_id.reset(token)
                 handlers.discard(task)

@@ -1,6 +1,7 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 import json
+import logging
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -20,6 +21,7 @@ from integrations import scheduler
 from integrations.context import context_status, prepare, snapshot
 
 ranking_locks = {}
+deferred_refreshes = {}
 MARKER_WORDS = ('дедлайн', 'срок', 'сдача', 'сдать', 'напоминан', 'открыт', 'deadline', 'due', 'reminder')
 
 
@@ -453,6 +455,28 @@ async def refresh_saved_plan():
         return result
 
 
+async def _run_deferred_refresh(owner: int):
+    try:
+        await refresh_saved_plan()
+    except HTTPException as exc:
+        if exc.status_code != 409:
+            logging.getLogger('uvicorn.error').warning('Ameba deferred refresh failed for user %s: %s', owner, exc.detail)
+    except Exception as exc:
+        logging.getLogger('uvicorn.error').warning('Ameba deferred refresh error for user %s: %s', owner, type(exc).__name__)
+
+
+async def _trigger_refresh():
+    owner = user_id()
+    if scheduler.work_busy(owner):
+        existing = deferred_refreshes.get(owner)
+        if existing is None or existing.done():
+            task = asyncio.create_task(_run_deferred_refresh(owner))
+            deferred_refreshes[owner] = task
+            task.add_done_callback(lambda done, key=owner: deferred_refreshes.pop(key, None) if deferred_refreshes.get(key) is done else None)
+        return
+    await refresh_saved_plan()
+
+
 async def submit_feedback(task_id: int, outcome: str, actual_minutes: int | None = None, period_id: str | None = None):
     check_feature('ameba')
     with Session(get_engine()) as session:
@@ -479,7 +503,7 @@ async def submit_feedback(task_id: int, outcome: str, actual_minutes: int | None
         task.updated_at = datetime.now(timezone.utc)
         session.add(task)
         session.commit()
-    await refresh_saved_plan()
+    await _trigger_refresh()
     return ranking_status() | {'feedback_saved': True}
 
 
@@ -530,8 +554,32 @@ async def adjust_plan(
         save_adjustments(adj, session=session)
         session.commit()
     if has_schedule_changes:
-        await refresh_saved_plan()
+        await _trigger_refresh()
     return ranking_status()
+
+
+async def _prepare_parallel(task_ids, **kwargs):
+    if not task_ids:
+        return [], None
+    results = await asyncio.gather(
+        *(prepare(tid, **kwargs) for tid in task_ids),
+        return_exceptions=True,
+    )
+    succeeded = []
+    first_error = None
+    for tid, item in zip(task_ids, results):
+        if isinstance(item, BaseException):
+            if not isinstance(item, Exception):
+                raise item
+            if first_error is None:
+                first_error = item
+        else:
+            succeeded.append(tid)
+    if first_error is not None:
+        if isinstance(first_error, HTTPException):
+            report('monocle', error=str(first_error.detail))
+        return succeeded, first_error
+    return succeeded, None
 
 
 async def rank_all(force=False, task_id=0):
@@ -549,12 +597,10 @@ async def rank_all(force=False, task_id=0):
             pending = [task.id for task in tasks
                        if context_status(task, session.get(TaskContext, task.id)) == 'new']
         async with scheduler.batch(pending):
-            for pending_id in pending:
-                try:
-                    await prepare(pending_id)
-                except HTTPException as exc:
-                    report('monocle', error=str(exc.detail))
-                    raise
+            if pending:
+                _, error = await _prepare_parallel(pending)
+                if error is not None:
+                    raise error
         with Session(get_engine()) as session:
             signature, ready, waiting = task_state(session)
             pre_external = _external_signature(session)
@@ -562,10 +608,14 @@ async def rank_all(force=False, task_id=0):
             if not force and saved and saved.snapshot == signature and not plan_expired(json.loads(saved.result)):
                 return json.loads(saved.result)
         checked_contexts = set()
+        result = None
         while ready:
             async with scheduler.slot('ameba', task_id):
                 with Session(get_engine()) as session:
                     signature, ready, waiting = task_state(session)
+                    if not ready:
+                        result = None
+                        break
                     pre_external = _external_signature(session)
                     saved = session.get(TaskRanking, 1)
                     refresh = not force and bool(saved and saved.snapshot == signature and _can_refresh_only(saved, {t['id'] for t in ready}))
@@ -577,13 +627,20 @@ async def rank_all(force=False, task_id=0):
             if any(value not in ready_ids or value in checked_contexts for value in requests):
                 raise HTTPException(502, 'Ameba запросила некорректную перепроверку контекста')
             async with scheduler.batch(requests):
-                for context_id in requests:
-                    await prepare(context_id, force=True, review_request=result.get('context_reason', ''))
-                    checked_contexts.add(context_id)
+                succeeded, error = await _prepare_parallel(
+                    requests,
+                    force=True,
+                    review_request=result.get('context_reason', ''),
+                )
+                checked_contexts.update(succeeded)
+                if error is not None:
+                    raise error
             with Session(get_engine()) as session:
                 signature, ready, waiting = task_state(session)
                 pre_external = _external_signature(session)
-        else:
+                if not ready:
+                    result = None
+        if result is None:
             with Session(get_engine()) as session:
                 wish_text = read_adjustments(session)['text'].strip()
             if wish_text:

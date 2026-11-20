@@ -147,7 +147,7 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
   const queue = useQuery({
     queryKey: ['agent-queue'],
     queryFn: () => request('/integrations/queue'),
-    enabled: features.monocle !== false || features.ameba !== false,
+    enabled: features.monocle !== false || features.straus !== false || features.arrodes !== false || features.ameba !== false,
     refetchInterval: (query) => (query.state.data?.busy ? 1500 : 5000),
   });
   const livePlan = useQuery({
@@ -349,6 +349,12 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
           )}
         >
           Ameba отключена в настройках.
+        </Notice>
+      )}
+
+      {Boolean(queue.data?.agents_busy ?? queue.data?.browser_busy) && !isRunning && (
+        <Notice tone="info">
+          Сейчас работают другие агенты — Ameba запустится после их завершения.
         </Notice>
       )}
 

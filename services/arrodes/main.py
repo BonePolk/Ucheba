@@ -7,7 +7,7 @@ from collections import OrderedDict
 from contextlib import asynccontextmanager
 from pathlib import Path
 from common.identity import user_id
-from common.browser_client import browser_request, browser_run_id
+from common.browser_client import browser_request, browser_session_context
 
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
@@ -89,32 +89,26 @@ async def run(body: Run):
     if key in cancelled_runs or any(owner == user_id() for owner, _ in active_runs):
         raise HTTPException(409, 'Arrodes остановлен или уже работает')
     allow_browser = bool(body.options.get('allow_browser', True))
-    token = browser_run_id.set(body.run_id)
-    async def execute():
-        with Progress('Arrodes', body.task_id) as progress:
-            if allow_browser:
+    with browser_session_context(body.run_id, 'Arrodes', body.task_id):
+        async def execute():
+            with Progress('Arrodes', body.task_id) as progress:
                 try:
-                    await browser_request('/session/start', {})
-                except HTTPException as exc:
-                    logging.getLogger('uvicorn.error').warning('Arrodes browser start: HTTP %s', exc.status_code)
-            try:
-                payload = body.payload | {'run_id': body.run_id, 'task_id': body.task_id, '_progress': progress, '_auth': body.auth, '_options': body.options}
-                return await runner.execute_with_history(payload)
-            finally:
-                if allow_browser:
-                    try:
-                        await browser_request('/session/end', {})
-                    except HTTPException as exc:
-                        logging.getLogger('uvicorn.error').warning('Arrodes browser cleanup: HTTP %s', exc.status_code)
-    task = asyncio.create_task(execute())
-    active_runs[key] = task
-    try:
-        return await task
-    except asyncio.CancelledError:
-        raise HTTPException(409, 'Arrodes остановлен') from None
-    finally:
-        active_runs.pop(key, None)
-        browser_run_id.reset(token)
+                    payload = body.payload | {'run_id': body.run_id, 'task_id': body.task_id, '_progress': progress, '_auth': body.auth, '_options': body.options}
+                    return await runner.execute_with_history(payload)
+                finally:
+                    if allow_browser:
+                        try:
+                            await browser_request('/session/end', {})
+                        except HTTPException as exc:
+                            logging.getLogger('uvicorn.error').warning('Arrodes browser cleanup: HTTP %s', exc.status_code)
+        task = asyncio.create_task(execute())
+        active_runs[key] = task
+        try:
+            return await task
+        except asyncio.CancelledError:
+            raise HTTPException(409, 'Arrodes остановлен') from None
+        finally:
+            active_runs.pop(key, None)
 
 
 def result_root(run_id):

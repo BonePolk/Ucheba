@@ -3,6 +3,7 @@ import asyncio
 import base64
 from collections import OrderedDict
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import ipaddress
 import json
@@ -37,9 +38,12 @@ cancelled_actions = OrderedDict()
 browser_downloads = {}
 agent_runs = {}
 deferred_browser_close = set()
+browser_queues = {}
 playwright = None
 BROWSER_ACTION_TIMEOUT = 90
 BROWSER_CLOSE_TIMEOUT = 15
+BROWSER_ACQUIRE_POLL_SECONDS = 20
+BROWSER_WAITER_TTL = 45
 
 # Chromium не рисует системный курсор на screenshots. Маркер не перехватывает
 # события и не добавляет текст в представление страницы для агента.
@@ -786,6 +790,193 @@ async def agent_browser_lock(timeout=BROWSER_ACTION_TIMEOUT):
                     raise HTTPException(504, 'Действие браузера превысило время ожидания. Перечитайте текущую страницу перед повтором.') from None
 
 
+@dataclass
+class BrowserQueue:
+    owner_run: str | None = None
+    owner_agent: str = ''
+    owner_task_id: int = 0
+    last_owner_run: str | None = None
+    used_runs: set[str] = field(default_factory=set)
+    stale_runs: set[str] = field(default_factory=set)
+    waiters: list[dict] = field(default_factory=list)
+    condition: asyncio.Condition = field(default_factory=asyncio.Condition)
+
+
+def browser_queue(owner: int) -> BrowserQueue:
+    return browser_queues.setdefault(owner, BrowserQueue())
+
+
+def _agent_meta(request: Request) -> tuple[str, int]:
+    agent = (request.headers.get('x-agent-name') or '').strip()[:40]
+    raw_task = (request.headers.get('x-agent-task') or '').strip()
+    try:
+        task_id = max(0, int(raw_task)) if raw_task else 0
+    except ValueError:
+        task_id = 0
+    return agent, task_id
+
+
+def _holder_info(q: BrowserQueue) -> dict | None:
+    if not q.owner_run:
+        return None
+    return {'run_id': q.owner_run, 'agent': q.owner_agent, 'task_id': q.owner_task_id}
+
+
+def _public_waiters(q: BrowserQueue) -> list[dict]:
+    return [{'run_id': item['run_id'], 'agent': item['agent'], 'task_id': item['task_id']} for item in q.waiters]
+
+
+def _prune_waiters(owner: int, q: BrowserQueue) -> bool:
+    now = asyncio.get_running_loop().time()
+    before = len(q.waiters)
+    q.waiters[:] = [
+        item for item in q.waiters
+        if item['expires_at'] > now and (owner, item['run_id']) not in cancelled_actions
+    ]
+    return len(q.waiters) != before
+
+
+def _grant_next(owner: int, q: BrowserQueue) -> str | None:
+    _prune_waiters(owner, q)
+    if q.owner_run is not None or not q.waiters:
+        return None
+    next_waiter = q.waiters.pop(0)
+    run_id = next_waiter['run_id']
+    q.owner_run = run_id
+    q.owner_agent = next_waiter['agent']
+    q.owner_task_id = next_waiter['task_id']
+    if q.last_owner_run != run_id:
+        schedule_pages.pop(owner, None)
+        if run_id in q.used_runs:
+            q.stale_runs.add(run_id)
+    q.used_runs.add(run_id)
+    return run_id
+
+
+async def _release_lease(owner: int, q: BrowserQueue, run_id: str, *, end_session: bool = False) -> bool:
+    async with q.condition:
+        was_owner = q.owner_run == run_id
+        q.waiters[:] = [item for item in q.waiters if item['run_id'] != run_id]
+        if was_owner:
+            q.last_owner_run = run_id
+            q.owner_run = None
+            q.owner_agent = ''
+            q.owner_task_id = 0
+        if end_session:
+            q.used_runs.discard(run_id)
+            q.stale_runs.discard(run_id)
+        _grant_next(owner, q)
+        q.condition.notify_all()
+        return was_owner
+
+
+async def queue_snapshot(owner: int) -> dict:
+    q = browser_queue(owner)
+    async with q.condition:
+        changed = _prune_waiters(owner, q)
+        if _grant_next(owner, q) is not None or changed:
+            q.condition.notify_all()
+        return {'holder': _holder_info(q), 'waiting': _public_waiters(q)}
+
+
+async def _acquire_or_wait(owner: int, run_id: str, agent: str, task_id: int, poll_timeout: float, request: Request | None = None) -> dict:
+    q = browser_queue(owner)
+    async with q.condition:
+        if (owner, run_id) in cancelled_actions:
+            raise HTTPException(409, 'Действие остановлено')
+        if (
+            q.owner_run is not None
+            and q.owner_run != run_id
+            and agent
+            and q.owner_agent == agent
+            and (agent != 'Monocle' or q.owner_task_id == task_id)
+            and (owner, q.owner_run) not in active_actions
+        ):
+            stale_owner = q.owner_run
+            q.last_owner_run = stale_owner
+            q.owner_run = None
+            q.owner_agent = ''
+            q.owner_task_id = 0
+            q.used_runs.discard(stale_owner)
+            q.stale_runs.discard(stale_owner)
+            runs = agent_runs.get(owner)
+            if runs:
+                runs.discard(stale_owner)
+                if not runs:
+                    agent_runs.pop(owner, None)
+        _grant_next(owner, q)
+        if q.owner_run is None:
+            if q.last_owner_run != run_id:
+                schedule_pages.pop(owner, None)
+                if run_id in q.used_runs:
+                    q.stale_runs.add(run_id)
+            q.owner_run = run_id
+            q.owner_agent = agent
+            q.owner_task_id = task_id
+            q.used_runs.add(run_id)
+            q.condition.notify_all()
+        elif q.owner_run == run_id:
+            if agent:
+                q.owner_agent = agent
+            if task_id:
+                q.owner_task_id = task_id
+            q.used_runs.add(run_id)
+        if q.owner_run == run_id:
+            stale = run_id in q.stale_runs
+            q.stale_runs.discard(run_id)
+            return {'acquired': True, 'stale': stale, 'holder': _holder_info(q), 'waiting': _public_waiters(q)}
+        now = asyncio.get_running_loop().time()
+        expires_at = now + max(BROWSER_WAITER_TTL, poll_timeout + 15)
+        existing = next((item for item in q.waiters if item['run_id'] == run_id), None)
+        if existing is None:
+            existing = {'run_id': run_id, 'agent': agent, 'task_id': task_id, 'expires_at': expires_at}
+            q.waiters.append(existing)
+        else:
+            if agent:
+                existing['agent'] = agent
+            if task_id:
+                existing['task_id'] = task_id
+            existing['expires_at'] = expires_at
+        q.condition.notify_all()
+        position = next((i + 1 for i, item in enumerate(q.waiters) if item['run_id'] == run_id), len(q.waiters))
+        if poll_timeout <= 0:
+            return {'acquired': False, 'position': position, 'holder': _holder_info(q), 'waiting': _public_waiters(q)}
+        deadline = now + poll_timeout
+        try:
+            while True:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    existing['expires_at'] = asyncio.get_running_loop().time() + BROWSER_WAITER_TTL
+                    position = next((i + 1 for i, item in enumerate(q.waiters) if item['run_id'] == run_id), len(q.waiters))
+                    return {'acquired': False, 'position': position, 'holder': _holder_info(q), 'waiting': _public_waiters(q)}
+                try:
+                    await asyncio.wait_for(q.condition.wait(), timeout=min(1.0, remaining))
+                except TimeoutError:
+                    pass
+                if (owner, run_id) in cancelled_actions:
+                    q.waiters[:] = [item for item in q.waiters if item['run_id'] != run_id]
+                    _grant_next(owner, q)
+                    q.condition.notify_all()
+                    raise HTTPException(409, 'Действие остановлено')
+                _grant_next(owner, q)
+                if q.owner_run == run_id:
+                    stale = run_id in q.stale_runs
+                    q.stale_runs.discard(run_id)
+                    q.condition.notify_all()
+                    return {'acquired': True, 'stale': stale, 'holder': _holder_info(q), 'waiting': _public_waiters(q)}
+                if request is not None and await request.is_disconnected():
+                    q.waiters[:] = [item for item in q.waiters if item['run_id'] != run_id]
+                    _grant_next(owner, q)
+                    q.condition.notify_all()
+                    raise HTTPException(409, 'Клиент отключился')
+                existing['expires_at'] = asyncio.get_running_loop().time() + BROWSER_WAITER_TTL
+        except BaseException:
+            q.waiters[:] = [item for item in q.waiters if item['run_id'] != run_id]
+            _grant_next(owner, q)
+            q.condition.notify_all()
+            raise
+
+
 @app.post('/handoff')
 async def browser_handoff(body: dict):
     action = body.get('action', 'status')
@@ -806,8 +997,8 @@ async def browser_handoff(body: dict):
             raise HTTPException(409, 'Сначала возьмите управление браузером')
         if action not in ('click', 'type', 'press', 'scroll', 'state'):
             raise HTTPException(400, 'Недопустимое ручное действие')
-        return await manual(Action.model_validate({'site_id': '', **body}))
-    return {'paused': not browser_ready().is_set()}
+        return await _run_manual(Action.model_validate({'site_id': '', **body}))
+    return {'paused': not browser_ready().is_set()} | await queue_snapshot(user_id())
 
 
 @app.post('/wait-user')
@@ -828,15 +1019,22 @@ async def wait_for_browser_user(request: Request):
     return await tracked_action(request, wait)
 
 
-async def tracked_action(request, operation):
+async def tracked_action(request, operation, require_lease=True):
     run_id = request.headers.get('x-agent-run')
     if not run_id:
         return await operation()
-    key = (user_id(), run_id)
+    owner = user_id()
+    key = (owner, run_id)
     if key in cancelled_actions:
         raise HTTPException(409, 'Действие остановлено')
-    async with lock():
-        agent_runs.setdefault(key[0], set()).add(run_id)
+    if require_lease:
+        agent, task_id = _agent_meta(request)
+        while True:
+            lease = await _acquire_or_wait(owner, run_id, agent, task_id, BROWSER_ACQUIRE_POLL_SECONDS, request=request)
+            if lease['acquired']:
+                break
+        async with lock():
+            agent_runs.setdefault(owner, set()).add(run_id)
     task = asyncio.create_task(operation())
     active_actions[key] = task
     try:
@@ -849,34 +1047,52 @@ async def tracked_action(request, operation):
 
 @app.post('/cancel')
 async def cancel_action(body: dict):
-    key = (user_id(), body['run_id'])
+    owner = user_id()
+    run_id = body['run_id']
+    key = (owner, run_id)
     cancelled_actions[key] = True
     while len(cancelled_actions) > 256:
         cancelled_actions.popitem(last=False)
+    q = browser_queue(owner)
+    async with q.condition:
+        was_owner = q.owner_run == run_id
+        had_waiter = any(item['run_id'] == run_id for item in q.waiters)
+        if had_waiter:
+            q.waiters[:] = [item for item in q.waiters if item['run_id'] != run_id]
+        if had_waiter or was_owner:
+            q.condition.notify_all()
     task = active_actions.get(key)
     if task:
         if not task.cancelling():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
-        other_runs = agent_runs.get(user_id(), set()) - {body['run_id']}
-        for context in (contexts.get(user_id()) if not other_runs else None,):
-            if context:
-                for tab in context.pages:
-                    if not tab.is_closed():
-                        try:
-                            async with asyncio.timeout(5):
-                                session = await context.new_cdp_session(tab)
-                                try:
-                                    await session.send('Page.stopLoading')
-                                finally:
-                                    await session.detach()
-                        except Exception:
-                            pass
+    if was_owner:
+        context = contexts.get(owner)
+        if context:
+            for tab in context.pages:
+                if not tab.is_closed():
+                    try:
+                        async with asyncio.timeout(5):
+                            session = await context.new_cdp_session(tab)
+                            try:
+                                await session.send('Page.stopLoading')
+                            finally:
+                                await session.detach()
+                    except Exception:
+                        pass
+    await _release_lease(owner, q, run_id, end_session=True)
+    async with lock():
+        runs = agent_runs.get(owner)
+        if runs:
+            runs.discard(run_id)
+            if not runs:
+                agent_runs.pop(owner, None)
     return {'ok': True}
 
 
 async def close_browser_locked(owner):
-    if agent_runs.get(owner) or not browser_ready().is_set():
+    q = browser_queue(owner)
+    if q.owner_run is not None or q.waiters or agent_runs.get(owner) or not browser_ready().is_set():
         return False
     context = contexts.get(owner)
     if context is None:
@@ -887,7 +1103,11 @@ async def close_browser_locked(owner):
             await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=30)
         except asyncio.TimeoutError:
             logging.getLogger('uvicorn.error').warning('browser download did not finish before session cleanup')
-    contexts.pop(owner, None)
+    if q.owner_run is not None or q.waiters or agent_runs.get(owner) or not browser_ready().is_set():
+        return False
+    context = contexts.pop(owner, None)
+    if context is None:
+        return False
     screens.pop(owner, None)
     schedule_pages.pop(owner, None)
     try:
@@ -898,13 +1118,40 @@ async def close_browser_locked(owner):
     return True
 
 
+class SessionAcquire(BaseModel):
+    timeout: float = Field(default=BROWSER_ACQUIRE_POLL_SECONDS, ge=0, le=BROWSER_ACQUIRE_POLL_SECONDS)
+
+
+@app.get('/session/status')
+async def session_status():
+    return await queue_snapshot(user_id())
+
+
+@app.post('/session/acquire')
+async def acquire_agent_session(request: Request, body: SessionAcquire | None = None):
+    run_id = request.headers.get('x-agent-run')
+    if not run_id:
+        raise HTTPException(400, 'Не указан запуск агента')
+    agent, task_id = _agent_meta(request)
+    timeout = body.timeout if body is not None else BROWSER_ACQUIRE_POLL_SECONDS
+    return await _acquire_or_wait(user_id(), run_id, agent, task_id, timeout, request=request)
+
+
+@app.post('/session/release')
+async def release_agent_session(request: Request):
+    run_id = request.headers.get('x-agent-run')
+    if not run_id:
+        raise HTTPException(400, 'Не указан запуск агента')
+    owner = user_id()
+    await _release_lease(owner, browser_queue(owner), run_id, end_session=False)
+    return {'ok': True}
+
+
 @app.post('/session/start')
 async def start_agent_session(request: Request):
     run_id = request.headers.get('x-agent-run')
     if not run_id:
         raise HTTPException(400, 'Не указан запуск агента')
-    async with lock():
-        agent_runs.setdefault(user_id(), set()).add(run_id)
     return {'ok': True}
 
 
@@ -914,6 +1161,8 @@ async def end_agent_session(request: Request):
     if not run_id:
         raise HTTPException(400, 'Не указан запуск агента')
     owner = user_id()
+    q = browser_queue(owner)
+    await _release_lease(owner, q, run_id, end_session=True)
     async with lock():
         runs = agent_runs.get(owner)
         if runs:
@@ -921,7 +1170,10 @@ async def end_agent_session(request: Request):
             if not runs:
                 agent_runs.pop(owner, None)
         if not browser_ready().is_set():
-            deferred_browser_close.add(owner)
+            if q.owner_run is None and not q.waiters and not agent_runs.get(owner):
+                deferred_browser_close.add(owner)
+            closed = False
+        elif q.owner_run is not None or q.waiters:
             closed = False
         else:
             closed = await close_browser_locked(owner)
@@ -973,6 +1225,9 @@ async def read_schedule_page(body):
 
 @app.delete('/sites/{site_id}')
 async def delete_site(site_id: str):
+    q = browser_queue(user_id())
+    if q.owner_run is not None or q.waiters:
+        raise HTTPException(409, 'Дождитесь завершения работы агентов в браузере')
     async with lock():
         saved = vault()
         saved.pop(site_id, None)
@@ -1102,8 +1357,7 @@ async def download_link(tab, site, url, image_mode=False):
     raise HTTPException(502, 'Слишком много перенаправлений при скачивании файла')
 
 
-@app.post('/manual')
-async def manual(body: Action):
+async def _run_manual(body: Action):
     async with lock():
         site = get_site(body.site_id) if body.action in ('open', 'login') else None
         state = screens.get(user_id())
@@ -1131,6 +1385,14 @@ async def manual(body: Action):
         elif body.action != 'state':
             raise HTTPException(400, 'Неизвестное действие браузера')
         return await screenshot(tab) | {'notice': notice}
+
+
+@app.post('/manual')
+async def manual(body: Action):
+    q = browser_queue(user_id())
+    if q.owner_run is not None or q.waiters:
+        raise HTTPException(409, 'Дождитесь завершения работы агентов в браузере')
+    return await _run_manual(body)
 
 
 @app.post('/agent')
@@ -1272,55 +1534,69 @@ async def preview_file(body: dict):
 
 @app.post('/files')
 async def agent_files(body: dict, request: Request):
-    return await tracked_action(request, lambda: run_file_action(body))
+    return await tracked_action(request, lambda: run_file_action(body), require_lease=False)
+
+
+async def get_cookies(target_url: str):
+    owner = user_id()
+    async with lock():
+        context = contexts.get(owner)
+        if context is not None:
+            return await context.cookies(target_url)
+        await page()
+        try:
+            return await contexts[owner].cookies(target_url)
+        finally:
+            q = browser_queue(owner)
+            if q.owner_run is None and not q.waiters and not agent_runs.get(owner) and browser_ready().is_set():
+                await close_browser_locked(owner)
 
 
 async def run_file_action(body):
     import files
-    async with agent_browser_lock():
-        try:
-            action = body['action']
-            if action in ('download_file', 'python_http_request'):
-                result = await files.request_file(body, await page(), public_url, safe_url)
-            elif action == 'save_download':
-                content = base64.b64decode(body['content'], validate=True)
-                if not content or len(content) > files.LIMIT:
-                    raise ValueError('Размер файла должен быть от 1 байта до 10 МБ')
-                result = await asyncio.to_thread(files.save, body['name'], content)
-            elif action == 'list_downloads':
-                result = {'downloads': download_status(), 'files': await asyncio.to_thread(files.list_files)}
-            elif action == 'read_download':
-                info, content = await asyncio.to_thread(files.load, body['file_id'])
-                result = files.read_content(info['name'], content, body['page'], info)
-            elif action in ('search_table', 'inspect_table', 'summarize_table', 'export_table'):
-                from common.office import search_table, inspect_table, summarize_table, export_table
-                info, content = await asyncio.to_thread(files.load, body['file_id'])
-                if action == 'export_table':
-                    if not body['output_path'].lower().endswith('.csv'):
-                        raise ValueError('output_path должен оканчиваться .csv')
-                    data, count = await asyncio.to_thread(export_table, info['name'], content, body)
-                    result = {'content': base64.b64encode(data).decode(), 'rows': count}
-                else:
-                    operation = {'search_table': search_table, 'inspect_table': inspect_table, 'summarize_table': summarize_table}[action]
-                    result = await asyncio.to_thread(operation, info['name'], content, body)
-            elif action == 'export_download':
-                info, content = await asyncio.to_thread(files.load, body['file_id'])
-                result = {'name': info['name'], 'content': base64.b64encode(content).decode()}
-            elif action == 'python_binary':
-                result = await asyncio.to_thread(files.binary, body)
+    try:
+        action = body['action']
+        if action in ('download_file', 'python_http_request'):
+            result = await files.request_file(body, get_cookies, public_url, safe_url)
+        elif action == 'save_download':
+            content = base64.b64decode(body['content'], validate=True)
+            if not content or len(content) > files.LIMIT:
+                raise ValueError('Размер файла должен быть от 1 байта до 10 МБ')
+            result = await asyncio.to_thread(files.save, body['name'], content)
+        elif action == 'list_downloads':
+            result = {'downloads': download_status(), 'files': await asyncio.to_thread(files.list_files)}
+        elif action == 'read_download':
+            info, content = await asyncio.to_thread(files.load, body['file_id'])
+            result = files.read_content(info['name'], content, body['page'], info)
+        elif action in ('search_table', 'inspect_table', 'summarize_table', 'export_table'):
+            from common.office import search_table, inspect_table, summarize_table, export_table
+            info, content = await asyncio.to_thread(files.load, body['file_id'])
+            if action == 'export_table':
+                if not body['output_path'].lower().endswith('.csv'):
+                    raise ValueError('output_path должен оканчиваться .csv')
+                data, count = await asyncio.to_thread(export_table, info['name'], content, body)
+                result = {'content': base64.b64encode(data).decode(), 'rows': count}
             else:
-                raise ValueError('Неизвестное действие с файлом')
-            # Редактируем известные пароли в тексте/результатах, но не в изображении.
-            image = result.pop('image', None)
-            result = redact_result(result, [site['password'] for site in vault().values() if site['password']])
-            if image:
-                result['image'] = image
-            return result
-        except HTTPException:
-            raise
-        except ValueError as exc:
-            logging.getLogger('uvicorn.error').warning('browser files: %s', type(exc).__name__)
-            raise HTTPException(422, str(exc)[:500]) from None
-        except Exception as exc:
-            logging.getLogger('uvicorn.error').warning('browser files: %s', type(exc).__name__)
-            raise HTTPException(422, 'Не удалось прочитать файл или выполнить запрос. Проверьте ID, формат, страницу и доступность URL.') from None
+                operation = {'search_table': search_table, 'inspect_table': inspect_table, 'summarize_table': summarize_table}[action]
+                result = await asyncio.to_thread(operation, info['name'], content, body)
+        elif action == 'export_download':
+            info, content = await asyncio.to_thread(files.load, body['file_id'])
+            result = {'name': info['name'], 'content': base64.b64encode(content).decode()}
+        elif action == 'python_binary':
+            result = await asyncio.to_thread(files.binary, body)
+        else:
+            raise ValueError('Неизвестное действие с файлом')
+        # Редактируем известные пароли в тексте/результатах, но не в изображении.
+        image = result.pop('image', None)
+        result = redact_result(result, [site['password'] for site in vault().values() if site['password']])
+        if image:
+            result['image'] = image
+        return result
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        logging.getLogger('uvicorn.error').warning('browser files: %s', type(exc).__name__)
+        raise HTTPException(422, str(exc)[:500]) from None
+    except Exception as exc:
+        logging.getLogger('uvicorn.error').warning('browser files: %s', type(exc).__name__)
+        raise HTTPException(422, 'Не удалось прочитать файл или выполнить запрос. Проверьте ID, формат, страницу и доступность URL.') from None

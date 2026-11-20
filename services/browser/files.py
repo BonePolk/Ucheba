@@ -212,7 +212,7 @@ async def request_file(args, tab, validate_url, safe_url):
     async with httpx.AsyncClient(timeout=30, follow_redirects=False, transport=httpx.AsyncHTTPTransport(retries=1)) as client:
         for _ in range(6):
             await validate_url(url)
-            cookies = await tab.context.cookies(url)
+            cookies = await (tab(url) if callable(tab) else tab.context.cookies(url))
             headers = {'Cookie': '; '.join(f"{item['name']}={item['value']}" for item in cookies)}
             if mime:
                 headers['Content-Type'] = mime

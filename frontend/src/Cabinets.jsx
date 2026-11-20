@@ -197,10 +197,10 @@ export default function Cabinets() {
       <Modal opened={Boolean(viewing)} onClose={() => setViewing(null)} title={viewing?.name} size="xl">
         {viewing && (
           <div className="flex flex-col gap-2">
-            {queue.data?.busy && (
+            {Boolean(queue.data?.agents_busy ?? queue.data?.busy) && (
               <Notice tone="warning">Агенты используют браузер; ручное управление доступно после их завершения.</Notice>
             )}
-            <ContextBrowser key={viewing.id} initialSiteId={viewing.id} disabled={queue.data?.busy} />
+            <ContextBrowser key={viewing.id} initialSiteId={viewing.id} disabled={Boolean(queue.data?.agents_busy ?? queue.data?.busy)} />
           </div>
         )}
       </Modal>

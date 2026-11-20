@@ -1,4 +1,6 @@
-"""Одинаковые инструменты и вызовы браузера для Monocle и Straus."""
+"""Одинаковые инструменты и вызовы браузера для Monocle, Straus и Arrodes."""
+from common.progress import timestamp
+
 VISUAL_ACTIONS = {
     'browser_screenshot': 'screenshot', 'browser_move': 'move', 'browser_click': 'click',
     'browser_type': 'type', 'browser_press': 'press', 'browser_scroll': 'scroll',
@@ -57,12 +59,65 @@ BROWSER_TOOLS.append(visual_tool('read_page',
     'Прочитать компактный текст, заголовки и элементы URL либо перейти по index предыдущего ответа. Пустые site_id/url — текущий браузер. Для action=read index=0; для follow url пустой.',
     {'site_id': {'type': 'string'}, 'action': {'type': 'string', 'enum': ['read', 'follow']},
      'url': {'type': 'string'}, 'index': {'type': 'integer', 'minimum': 0, 'maximum': 99}}))
+BROWSER_TOOLS.append({
+    'type': 'function',
+    'name': 'browser_release',
+    'description': 'Освободить общий браузер для других агентов, когда нужные страницы уже прочитаны и скачивания выполнены. При необходимости позже можно снова открыть браузер.',
+    'parameters': {'type': 'object', 'properties': {}, 'required': [], 'additionalProperties': False},
+    'strict': True,
+})
 BROWSER_NAMES = {tool['name'] for tool in BROWSER_TOOLS}
 
 
+def _holder_label(holder):
+    if not isinstance(holder, dict):
+        return 'другой агент'
+    agent = holder.get('agent') or 'другой агент'
+    task_id = holder.get('task_id') or 0
+    return f'{agent} (#{task_id})' if task_id else agent
+
+
+async def acquire_browser(request, progress):
+    result = await request('/session/acquire', {'timeout': 0})
+    if not result.get('acquired'):
+        holder = result.get('holder')
+        label = _holder_label(holder)
+        position = result.get('position')
+        pos_suffix = f', позиция в очереди: {position}' if position else ''
+        progress.add(f'Ждёт освобождения браузера (сейчас использует {label}{pos_suffix})')
+        progress.update(browser_waiting=True, browser_holder=holder)
+        try:
+            while not result.get('acquired'):
+                result = await request('/session/acquire', {'timeout': 20})
+                if not result.get('acquired'):
+                    holder = result.get('holder')
+                    progress.update(browser_waiting=True, browser_holder=holder, last_activity_at=timestamp())
+            progress.add('Получил доступ к браузеру')
+        finally:
+            progress.update(browser_waiting=False, browser_holder=None)
+    progress.update(browser_used=True, browser_waiting=False, browser_holder=None)
+    return bool(result.get('stale'))
+
+
 async def run_browser_tool(name, args, request, progress, known_elements):
-    if name != 'browser_sites':
-        progress.update(browser_used=True)
+    if name == 'browser_sites':
+        progress.add('Выбирает сохранённый вход')
+        return await request('/sites', method='GET')
+    if name == 'browser_release':
+        await request('/session/release', {})
+        progress.add('Освободил браузер')
+        return {'status': 'released'}
+    stale = await acquire_browser(request, progress)
+    if stale:
+        known_elements.clear()
+
+    def finalize(output):
+        if stale and isinstance(output, dict):
+            warning = 'За время ожидания браузером пользовался другой агент; открытая вкладка могла измениться.'
+            existing = output.get('notice')
+            output['notice'] = f'{warning} {existing}'.strip() if existing else warning
+        return output
+
     if name == 'browser_wait_for_user':
         import json
         message = args.get('message')
@@ -70,15 +125,12 @@ async def run_browser_tool(name, args, request, progress, known_elements):
             raise ValueError('Укажите message: что нужно сделать владельцу, до 500 символов')
         progress.note(json.dumps({'text': message}, ensure_ascii=False))
         progress.add('Ждёт, пока владелец завершит CAPTCHA или вход в браузере')
-        return await request('/wait-user', {})
-    if name == 'browser_sites':
-        progress.add('Выбирает сохранённый вход')
-        return await request('/sites', method='GET')
+        return finalize(await request('/wait-user', {}))
     if name in ('browser_login', 'browser_read', 'browser_follow', 'browser_download'):
         action = {'browser_login': 'login', 'browser_read': 'read', 'browser_follow': 'follow', 'browser_download': 'download'}[name]
         progress.add({'login': 'Входит через сохранённый вход', 'read': 'Читает текущую страницу',
                       'follow': 'Переходит по выбранной ссылке', 'download': 'Скачивает документ из браузера'}[action])
-        return await request('/agent', {'site_id': args.get('site_id', ''), 'action': action, 'index': args.get('index', 0)})
+        return finalize(await request('/agent', {'site_id': args.get('site_id', ''), 'action': action, 'index': args.get('index', 0)}))
     if name == 'read_page':
         action = args['action']
         if action not in ('read', 'follow'):
@@ -86,11 +138,11 @@ async def run_browser_tool(name, args, request, progress, known_elements):
         values = {'site_id': args.get('site_id', '')}
         values.update({'url': args.get('url', '')} if action == 'read' else {'index': args['index']})
         progress.add('Читает страницу' if action == 'read' else 'Переходит по выбранной ссылке')
-        return await request('/schedule/read', values)
+        return finalize(await request('/schedule/read', values))
     if name in ('web_search', 'web_read'):
         progress.add('Ищет в Google' if name == 'web_search' else 'Читает страницу')
-        return await request('/web', {'action': 'search' if name == 'web_search' else 'read',
-                                     'query': args.get('query', ''), 'url': args.get('url', '')})
+        return finalize(await request('/web', {'action': 'search' if name == 'web_search' else 'read',
+                                              'query': args.get('query', ''), 'url': args.get('url', '')}))
     values = dict(args)
     action = values.pop('action', VISUAL_ACTIONS[name])
     if name == 'browser_press':
@@ -119,4 +171,4 @@ async def run_browser_tool(name, args, request, progress, known_elements):
         progress.add('Нажат элемент: ' + output['clicked'])
     if output.get('status') == 'choose_element':
         progress.add('Уточняет элемент: ' + output['reason'])
-    return output
+    return finalize(output)

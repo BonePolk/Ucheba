@@ -12,6 +12,7 @@ import { SelectField } from '@/components/ui/select';
 import { Badge, Notice, Spinner, StatusIndicator } from '@/components/ui/surface';
 
 const names = { monocle: 'Monocle', straus: 'Straus', context: 'Monocle', ameba: 'Ameba', arrodes: 'Arrodes' };
+const baseProviderName = (provider) => names[String(provider ?? '').split(':')[0]] ?? provider;
 const statuses = {
   running: 'Работает',
   completed: 'Завершено',
@@ -114,7 +115,7 @@ export function AgentLog({ run, provider, maxHeightClass = 'max-h-[280px]' }) {
             <div key={event.id} data-event-id={String(event.id)} className="agent-log-row border-b border-[#161616] last:border-b-0">
               <div className="font-mono text-[11px] max-md:text-[12px] leading-relaxed whitespace-pre-wrap text-[#DCDCDC]">
                 <span className="text-[#787878]">
-                  {new Date(event.at).toLocaleTimeString()} · {publicAgentName(run.agent) ?? names[provider]}{event.task_id ? ` #${event.task_id}` : ''} ·{' '}
+                  {new Date(event.at).toLocaleTimeString()} · {publicAgentName(run.agent) ?? baseProviderName(provider)}{event.task_id ? ` #${event.task_id}` : ''} ·{' '}
                 </span>
                 {event.id === events.at(-1)?.id && saved.current.follow
                   ? <AgentExplanation text={event.message} initialText={seen.current.get(event.id) ?? ''} />
@@ -138,6 +139,7 @@ export function isBrowserActiveInRun(entry) {
   if (!entry?.available || run?.status !== 'running') return false;
   return Boolean(
     run.browser_used
+    || run.browser_waiting
     || run.events?.some((event) => /^(Входит через сохранённый вход|Читает (текущую )?страницу|Переходит по выбранной ссылке|Скачивает документ из браузера|Ищет в Google|Смотрит снимок браузера|Перемещает курсор|Нажимает|Вводит текст|Прокручивает страницу|Открывает страницу|Возвращается назад|Переходит вперёд|Рассматривает изображение|Ждёт, пока владелец завершит CAPTCHA)/.test(event.message)),
   );
 }
@@ -274,31 +276,43 @@ export default function AgentProgress({
   }, [active, client, taskId, providerList]);
 
   const runs = entries.filter((entry) => entry.run);
+  const agentCounts = new Map();
+  for (const entry of runs) {
+    const label = publicAgentName(entry.run.agent) ?? baseProviderName(entry.provider);
+    agentCounts.set(label, (agentCounts.get(label) ?? 0) + 1);
+  }
+  const entryLabel = (entry) => {
+    const base = publicAgentName(entry.run.agent) ?? baseProviderName(entry.provider);
+    return (agentCounts.get(base) ?? 0) > 1 && entry.run.task_id ? `${base} #${entry.run.task_id}` : base;
+  };
   const current = runs.find((entry) => entry.provider === selected)
     ?? [...runs].sort((a, b) => Number(b.run.status === 'running') - Number(a.run.status === 'running') || (b.run.started_at ?? '').localeCompare(a.run.started_at ?? ''))[0];
   const run = current?.run;
   const queued = entries.some((entry) => entry.queued);
   const running = active || queued || runs.some((entry) => entry.run.status === 'running');
-  const displayAgent = publicAgentName(run?.agent) ?? providers.map((provider) => names[provider] ?? provider).join(' · ');
+  const displayAgent = current ? entryLabel(current) : providers.map((provider) => baseProviderName(provider)).join(' · ');
+  const browserWaiting = Boolean(run?.status === 'running' && run?.browser_waiting);
   const statusLabel = run?.pending_question
     ? 'Ждёт ответа'
-    : run
-      ? statuses[run.status] ?? run.status
-      : queued
-        ? 'В очереди'
-        : active
-          ? 'Запуск'
-          : 'Готов';
+    : browserWaiting
+      ? 'Ждёт браузер'
+      : run
+        ? statuses[run.status] ?? run.status
+        : queued
+          ? 'В очереди'
+          : active
+            ? 'Запуск'
+            : 'Готов';
   const statusBadgeVariant = run?.status === 'failed'
     ? 'danger'
-    : run?.status === 'blocked' || run?.pending_question
+    : run?.status === 'blocked' || run?.pending_question || browserWaiting
       ? 'warning'
       : (run ? run.status === 'running' : running)
         ? 'accent'
         : 'outline';
   const indicatorTone = run?.status === 'failed'
     ? 'danger'
-    : run?.status === 'blocked' || run?.pending_question
+    : run?.status === 'blocked' || run?.pending_question || browserWaiting
       ? 'warning'
       : running
         ? 'active'
@@ -314,7 +328,7 @@ export default function AgentProgress({
   const hasTokens = Boolean(run?.token_usage && (run.token_usage.input_tokens != null || run.token_usage.output_tokens != null));
   const hasQuestion = entries.some((entry) => entry.run?.pending_question);
   const hasFailure = run?.status === 'failed';
-  const horizonTone = hasFailure ? 'danger' : hasQuestion ? 'warning' : 'accent';
+  const horizonTone = hasFailure ? 'danger' : (hasQuestion || browserWaiting) ? 'warning' : 'accent';
 
   if (!providers.length) return null;
   if (hideSummaryWhenIdle && !running && !opened && !streamError && !hasQuestion && !hasFailure && entries.every((e) => e.available)) {
@@ -335,7 +349,7 @@ export default function AgentProgress({
               value={current.provider}
               options={runs.map((entry) => ({
                 value: entry.provider,
-                label: publicAgentName(entry.run.agent) ?? names[entry.provider] ?? entry.provider,
+                label: entryLabel(entry),
               }))}
               onChange={(value) => {
                 setSelected(value);
@@ -369,10 +383,14 @@ export default function AgentProgress({
 
       {run?.status === 'running' && (
         <div className="flex flex-col gap-1 border-t border-[#222222] pt-2" key={run.id}>
-          <StageSwap stageKey={run.pending_question ? 'q' : run.model_waiting ? 'wait' : (run.current_action ?? 'step')}>
+          <StageSwap stageKey={run.pending_question ? 'q' : run.browser_waiting ? 'browser-wait' : run.model_waiting ? 'wait' : (run.current_action ?? 'step')}>
             <div className="flex items-start gap-2 text-[13px]" role="status" aria-live="polite">
               {run.pending_question ? (
                 <span className="text-[#D4A24C]">Ждёт ответа</span>
+              ) : run.browser_waiting ? (
+                <span className="text-[#D4A24C]">
+                  <AgentExplanation text={run.current_action ?? 'Ждёт освобождения браузера'} />
+                </span>
               ) : run.model_waiting ? (
                 <span className="agent-thinking">Думает</span>
               ) : (

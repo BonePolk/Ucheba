@@ -117,7 +117,7 @@ export default function TaskBoard({ features = {} }) {
   const queue = useQuery({
     queryKey: ['agent-queue'],
     queryFn: () => request('/integrations/queue'),
-    enabled: !archived && (features.monocle !== false || features.ameba !== false),
+    enabled: !archived && (features.monocle !== false || features.straus !== false || features.arrodes !== false || features.ameba !== false),
     refetchInterval: (query) => (query.state.data?.busy ? 1500 : 5000),
   });
   const livePlan = useQuery({
@@ -202,7 +202,7 @@ export default function TaskBoard({ features = {} }) {
         count={rows.length}
         actions={(
           <>
-            {!archived && (features.monocle !== false || features.ameba !== false) && (
+            {!archived && (features.monocle !== false || features.straus !== false || features.arrodes !== false || features.ameba !== false) && (
               <AgentQueue queue={queue.data} error={queue.error} compact />
             )}
             <SegmentedControl

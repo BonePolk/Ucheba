@@ -47,7 +47,7 @@ from common.rpc import internal_token
 from memory import Memory
 import materials
 import workspace
-from browser_client import browser_request, browser_run_id
+from browser_client import browser_request, browser_session_context
 
 
 @asynccontextmanager
@@ -178,6 +178,7 @@ TOOL_MESSAGES = {
     'browser_read': 'Читает страницу личного кабинета',
     'browser_follow': 'Переходит по ссылке в личном кабинете',
     'browser_download': 'Скачивает документ из личного кабинета',
+    'browser_release': 'Освобождает браузер',
     'web_search': 'Ищет информацию в Google',
     'web_read': 'Читает найденную веб-страницу',
 }
@@ -516,6 +517,7 @@ MONOCLE_INSTRUCTIONS = QUESTION_INSTRUCTION + ISSUE_INSTRUCTION + MEMORY_INSTRUC
     'Нажимай и вводи текст по актуальному id из elements; при устаревшем ID обнови представление. '
     'Учитывай результат действия и не перечитывай неизменившуюся страницу. '
     'Не повторяй успешное нажатие; прекращай работу с браузером, когда нужные сведения найдены. '
+    'Когда браузер больше не нужен и скачивания выполнены, освободи его через browser_release. '
     'browser_screenshot нужен только если текста и элементов недостаточно; изображения смотри через browser_view_image. '
     'Не угадывай селекторы и не используй координаты, пока доступны ID или точная роль и название. '
     'При неоднозначности не нажимай случайный первый элемент — получи свежий список и уточни выбор. '
@@ -671,23 +673,17 @@ async def analyze(body: dict):
 async def analyze_task(auth, task_id, body, progress, options=None):
     opts = options or {}
     allow_browser = bool(opts.get('allow_browser', True))
-    token = browser_run_id.set(uuid4().hex)
-    if allow_browser:
+    with browser_session_context(uuid4().hex, 'Monocle', task_id):
         try:
-            await browser_request('/session/start', {})
-        except HTTPException as exc:
-            logging.getLogger('uvicorn.error').warning('Monocle browser session start failed: %s', exc.status_code)
-    try:
-        memory = await run_silo(Memory)
-        return await run_agent(auth, memory, task_id, body, progress, options=opts)
-    finally:
-        if allow_browser:
-            progress.update(current_action='Закрывает сессию браузера')
-            try:
-                await browser_request('/session/end', {})
-            except HTTPException as exc:
-                logging.getLogger('uvicorn.error').warning('Monocle browser session cleanup failed: %s', exc.status_code)
-        browser_run_id.reset(token)
+            memory = await run_silo(Memory)
+            return await run_agent(auth, memory, task_id, body, progress, options=opts)
+        finally:
+            if allow_browser:
+                progress.update(current_action='Закрывает сессию браузера')
+                try:
+                    await browser_request('/session/end', {})
+                except HTTPException as exc:
+                    logging.getLogger('uvicorn.error').warning('Monocle browser session cleanup failed: %s', exc.status_code)
 
 
 async def run_agent(auth, memory, task_id, body, progress, options=None):

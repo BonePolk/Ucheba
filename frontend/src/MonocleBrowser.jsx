@@ -9,6 +9,12 @@ import { Field, PasswordField } from '@/components/ui/input';
 import { Notice } from '@/components/ui/surface';
 import { CollapseSection } from '@/lib/motion';
 
+function formatBrowserAgent(item) {
+  if (!item) return '';
+  const name = item.agent || 'Агент';
+  return item.task_id ? `${name} #${item.task_id}` : name;
+}
+
 export default function MonocleBrowser({ active = false }) {
   const [opened, setOpened] = useState(() => new URLSearchParams(window.location.search).get('browser') === '1');
   const [expanded, setExpanded] = useState(false);
@@ -39,6 +45,8 @@ export default function MonocleBrowser({ active = false }) {
 
   const { frame, error } = useBrowserScreen(opened || expanded);
   const paused = controls.data?.paused;
+  const holder = controls.data?.holder ?? null;
+  const waiting = controls.data?.waiting ?? [];
   const busy = action.isPending;
   const image = frame ? `data:${frame.mime};base64,${frame.image}` : null;
 
@@ -58,6 +66,12 @@ export default function MonocleBrowser({ active = false }) {
         <Button size="xs" variant="subtle" onClick={() => setOpened(!opened)}>
           {opened ? 'Скрыть браузер' : 'Браузер агента'}
         </Button>
+        {holder && (
+          <span className="text-[11px] text-[#929292] truncate">
+            {formatBrowserAgent(holder)}
+            {waiting.length > 0 ? ` · ждут: ${waiting.map(formatBrowserAgent).join(', ')}` : ''}
+          </span>
+        )}
         <Button size="xs" variant={paused ? 'primary' : 'subtle'} leftIcon={<Expand className="h-3 w-3" />} onClick={() => setExpanded(true)}>
           {paused ? 'Пройти капчу / продолжить' : 'Увеличить'}
         </Button>
@@ -90,7 +104,12 @@ export default function MonocleBrowser({ active = false }) {
         </div>
       </CollapseSection>
 
-      <Modal opened={expanded} onClose={() => setExpanded(false)} title="Браузер агента" size="xl">
+      <Modal
+        opened={expanded}
+        onClose={() => setExpanded(false)}
+        title={holder ? `Браузер агента · ${formatBrowserAgent(holder)}` : 'Браузер агента'}
+        size="xl"
+      >
         <div className="flex flex-col gap-3">
           <div className="flex flex-wrap items-center gap-2">
             <Button
@@ -102,6 +121,19 @@ export default function MonocleBrowser({ active = false }) {
             </Button>
             {frame?.url && <span className="text-[11px] text-[#929292] break-all">{frame.url}</span>}
           </div>
+
+          {(holder || waiting.length > 0) && (
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[#929292]">
+              {holder && (
+                <span>
+                  Сейчас в браузере: <strong className="text-[#EAEAEA] font-medium">{formatBrowserAgent(holder)}</strong>
+                </span>
+              )}
+              {waiting.length > 0 && (
+                <span>Очередь браузера: {waiting.map(formatBrowserAgent).join(', ')}</span>
+              )}
+            </div>
+          )}
 
           {paused && (
             <Notice tone="warning">

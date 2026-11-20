@@ -244,6 +244,10 @@ def get_progress(task_id=0, namespace='agent'):
         return dict(record, events=list(record['events'])) if record else None
 
 
+def _public_work_run(run):
+    return dict(run, events=[dict(event, task_id=run['task_id']) for event in run['events']])
+
+
 def get_work_progress(namespace='agent'):
     owner = user_id()
     with records_lock:
@@ -251,5 +255,14 @@ def get_work_progress(namespace='agent'):
                 if account == owner and record_namespace == namespace]
         if not runs:
             return None
-        latest = max(runs, key=lambda run: (run['status'] == 'running', run['started_at']))
-        return dict(latest, events=[dict(event, task_id=latest['task_id']) for event in latest['events']])
+        latest = max(runs, key=lambda run: (
+            run['status'] == 'running',
+            bool(run.get('pending_question')),
+            run.get('last_activity_at') or run['started_at'],
+        ))
+        payload = _public_work_run(latest)
+        running_runs = [run for run in runs if run['status'] == 'running' and run is not latest]
+        if running_runs:
+            running_runs.sort(key=lambda run: (run['started_at'], run['task_id']))
+            payload['other_running'] = [_public_work_run(run) for run in running_runs]
+        return payload

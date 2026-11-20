@@ -170,7 +170,7 @@ export default function TaskAutomation({ task, features = {} }) {
   const queue = useQuery({
     queryKey: ['agent-queue'],
     queryFn: () => request('/integrations/queue'),
-    enabled: features.ameba !== false,
+    enabled: features.monocle !== false || features.straus !== false || features.arrodes !== false || features.ameba !== false,
     refetchInterval: (query) => (query.state.data?.busy ? 1500 : 5000),
   });
   const context = useQuery({

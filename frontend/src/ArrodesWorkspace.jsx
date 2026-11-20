@@ -231,7 +231,13 @@ export default function ArrodesWorkspace({ task: fixedTask = null, features = {}
     && (arrodesRunning || liveRun?.status === 'running' || liveRun?.pending_question || liveRun?.status === 'failed'),
   );
   const liveHasTokens = Boolean(liveRun?.token_usage && (liveRun.token_usage.input_tokens != null || liveRun.token_usage.output_tokens != null));
-  const stageKey = liveRun?.pending_question ? 'question' : liveRun?.model_waiting ? 'thinking' : (liveRun?.current_action ?? 'prep');
+  const stageKey = liveRun?.pending_question
+    ? 'question'
+    : liveRun?.browser_waiting
+      ? 'browser-wait'
+      : liveRun?.model_waiting
+        ? 'thinking'
+        : (liveRun?.current_action ?? 'prep');
 
   if (features.arrodes === false) {
     return <EmptyState title="Arrodes отключён" />;
@@ -394,16 +400,16 @@ export default function ArrodesWorkspace({ task: fixedTask = null, features = {}
           >
             <LiveHorizon
               active={Boolean((arrodesRunning || liveRun?.status === 'running') && !liveRun?.pending_question)}
-              tone={liveRun?.status === 'failed' ? 'danger' : liveRun?.pending_question ? 'warning' : 'accent'}
+              tone={liveRun?.status === 'failed' ? 'danger' : (liveRun?.pending_question || liveRun?.browser_waiting) ? 'warning' : 'accent'}
             />
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2 min-w-0">
-                <StatusIndicator tone={liveRun?.pending_question ? 'warning' : 'active'} pulse={!liveRun?.pending_question} />
+                <StatusIndicator tone={(liveRun?.pending_question || liveRun?.browser_waiting) ? 'warning' : 'active'} pulse={!liveRun?.pending_question} />
                 <span className="text-[13px] font-semibold text-[#EAEAEA] truncate">
                   {selectedTask.title}
                 </span>
-                <Badge variant={liveRun?.pending_question ? 'warning' : 'accent'}>
-                  {liveRun?.pending_question ? 'Ждёт ответа' : liveRun?.model_waiting ? 'Думает' : 'В работе'}
+                <Badge variant={(liveRun?.pending_question || liveRun?.browser_waiting) ? 'warning' : 'accent'}>
+                  {liveRun?.pending_question ? 'Ждёт ответа' : liveRun?.browser_waiting ? 'Ждёт браузер' : liveRun?.model_waiting ? 'Думает' : 'В работе'}
                 </Badge>
               </div>
               {liveHasTokens && (
@@ -415,8 +421,12 @@ export default function ArrodesWorkspace({ task: fixedTask = null, features = {}
 
             <StageSwap stageKey={stageKey}>
               <div className="border-l-2 border-[#7F49B4] pl-2.5 flex flex-col gap-1 text-[12px]">
-                <div className="text-[#EAEAEA] font-medium">
-                  {liveRun?.model_waiting ? 'Думает…' : (liveRun?.current_action ?? 'Подготовка среды')}
+                <div className={liveRun?.browser_waiting ? 'text-[#D4A24C] font-medium' : 'text-[#EAEAEA] font-medium'}>
+                  {liveRun?.browser_waiting
+                    ? (liveRun?.current_action ?? 'Ждёт освобождения браузера')
+                    : liveRun?.model_waiting
+                      ? 'Думает…'
+                      : (liveRun?.current_action ?? 'Подготовка среды')}
                 </div>
                 {liveRun?.action_description && !liveRun?.model_waiting && (
                   <div className="text-[#929292]">{liveRun.action_description}</div>
