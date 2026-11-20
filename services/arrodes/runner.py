@@ -274,7 +274,7 @@ async def execute(run_id, payload, progress, auth=None, options=None):
     if state().run_lock.locked():
         raise HTTPException(409, 'Arrodes уже обрабатывает задачу')
     async with state().run_lock:
-        progress.add('Проверяет доступность Linux sandbox', description='Проверяет, что материалы задачи можно готовить в изолированной рабочей области.')
+        progress.add('Проверяет доступность Linux sandbox')
         if not await sandbox_available():
             raise HTTPException(503, 'Linux sandbox недоступен. ' + state().sandbox_error)
         auth_data = auth or {}
@@ -299,7 +299,7 @@ async def execute(run_id, payload, progress, auth=None, options=None):
         previous = run_state(payload['resume_run_id']) if payload.get('resume_run_id') else {}
         workspace = previous.get('workspace', run_id)
         path = work() / workspace
-        progress.add('Готовит отдельную рабочую директорию', description='Выделяет место для файлов и результатов этой задачи.')
+        progress.add('Готовит отдельную рабочую директорию')
         uid = 10000 + user_id()
         path.mkdir(mode=0o700, exist_ok=bool(previous))
         try:
@@ -311,7 +311,7 @@ async def execute(run_id, payload, progress, auth=None, options=None):
             if auth_mode == 'oauth' and state().client is not None:
                 await state().client.close()
                 state().client = None
-            progress.add('Подключается к Arrodes и создаёт рабочую сессию', description='Передаёт поручение и разрешения рабочему агенту.')
+            progress.add('Подключается к Arrodes и создаёт рабочую сессию')
             instructions = """Ты Arrodes, универсальный исполнитель Ucheba. Выполняй поручение, а не объясняй, как его выполнить.
 Пиши и запускай код, создавай документы и проверяй результаты доступными средствами.
 Начни с полного условия, контекста и вложений; при необходимости найди другие задачи через list_tasks/read_task.
@@ -404,7 +404,7 @@ async def execute(run_id, payload, progress, auth=None, options=None):
             if not summary:
                 raise HTTPException(502, 'Arrodes не вернул результат')
 
-            progress.add('Сохраняет подготовленные материалы', description='Готовит результат и файлы для проверки владельцем.')
+            progress.add('Сохраняет подготовленные материалы')
             fd = open_local(path, 'result.md', os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
             with os.fdopen(fd, 'w') as output:
                 os.fchown(output.fileno(), uid, uid)

@@ -82,12 +82,7 @@ export default function AiConnections({ data, oauthState }) {
       {/* OpenAI OAuth */}
       <section className="border border-[#262626] bg-[#0D0D0D] p-3 flex flex-col gap-2.5">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex flex-col gap-0.5">
-            <span className="text-[13px] font-medium text-[#EAEAEA]">OpenAI OAuth</span>
-            <span className="text-[11px] text-[#929292]">
-              Общая авторизация ChatGPT / OpenAI для агентов в режиме OAuth
-            </span>
-          </div>
+          <span className="text-[13px] font-medium text-[#EAEAEA]">OpenAI OAuth</span>
           <Badge variant={oauthAuthorized ? 'success' : 'outline'}>
             {oauthAuthorized ? 'Вход выполнен' : 'Нет авторизации'}
           </Badge>
@@ -140,12 +135,7 @@ export default function AiConnections({ data, oauthState }) {
       {/* Shared API Key */}
       <section className="border border-[#262626] bg-[#0D0D0D] p-3 flex flex-col gap-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex flex-col gap-0.5">
-            <span className="text-[13px] font-medium text-[#EAEAEA]">API-ключ (OpenAI-совместимый шлюз)</span>
-            <span className="text-[11px] text-[#929292]">
-              Общий endpoint и ключ для всех агентов в режиме API-ключа
-            </span>
-          </div>
+          <span className="text-[13px] font-medium text-[#EAEAEA]">API-ключ</span>
           <Badge variant={keyConfigured ? 'success' : 'outline'}>
             {keyConfigured ? 'Сохранён' : 'Не задан'}
           </Badge>

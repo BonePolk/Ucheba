@@ -240,3 +240,36 @@ async def arrodes_tasks_internal(request: Request):
         return read_tasks(**(await request.json()))
     finally:
         current_user_id.reset(token)
+
+
+@router.post('/monocle/tasks/internal')
+async def monocle_tasks_internal(request: Request):
+    from common.rpc import require_service
+    from common.identity import current_user_id
+    from integrations.arrodes import read_tasks
+    token = current_user_id.set(require_service(request, 'monocle'))
+    try:
+        check_feature('monocle')
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(422, 'Некорректные параметры запроса задач')
+        allowed = {}
+        if 'task_id' in body and body['task_id'] is not None:
+            if type(body['task_id']) is not int or body['task_id'] < 1:
+                raise HTTPException(422, 'Некорректный номер задачи')
+            allowed['task_id'] = body['task_id']
+        if 'query' in body:
+            if not isinstance(body['query'], str):
+                raise HTTPException(422, 'Некорректный поисковый запрос')
+            allowed['query'] = body['query'][:200]
+        if 'status' in body:
+            if not isinstance(body['status'], str):
+                raise HTTPException(422, 'Некорректный статус')
+            allowed['status'] = body['status'][:40]
+        if 'offset' in body:
+            if type(body['offset']) is not int or body['offset'] < 0:
+                raise HTTPException(422, 'Некорректное смещение')
+            allowed['offset'] = body['offset']
+        return read_tasks(**allowed)
+    finally:
+        current_user_id.reset(token)

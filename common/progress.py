@@ -106,7 +106,7 @@ class Progress:
         self.record = {'id': uuid4().hex, 'agent': agent, 'task_id': task_id,
                        'status': 'running', 'started_at': timestamp(), 'events': [],
                        'current_action': 'Подготавливает поручение',
-                       'action_description': 'Собирает входные сведения и настройки для начала работы.'}
+                       'action_description': None}
         self.sequence = 0
         self.summary_key = None
         self.usage_totals = {'input_tokens': None, 'output_tokens': None}
@@ -179,7 +179,7 @@ class Progress:
                     self.usage_totals[name] = value if previous is None else previous + value
             if any(type(getattr(usage, name, None)) is int for name in self.usage_totals):
                 self.update(token_usage=dict(self.usage_totals), current_usage_known=True)
-        self.update(model_waiting=False, current_action='Обрабатывает ответ модели', action_description='Проверяет ответ и готовит следующий шаг или итог.', action_started_at=timestamp())
+        self.update(model_waiting=False, current_action='Обрабатывает ответ модели', action_description=None, action_started_at=timestamp())
 
     def reasoning_delta(self, delta, key):
         if not delta:

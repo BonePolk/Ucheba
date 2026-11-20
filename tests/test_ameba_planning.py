@@ -171,7 +171,6 @@ class PlanningScenarios(unittest.TestCase):
             for p in schedule['periods'] for d in p['days_summary']
         )
         self.assertTrue(has_recovery_or_light)
-        self.assertTrue(all(p['rest_note'] for p in schedule['periods']))
 
     def test_scenario_6_infeasible_deadline_protects_rest(self):
         week = planning.with_rest(empty_week(), NOW, rest_args())
@@ -188,7 +187,8 @@ class PlanningScenarios(unittest.TestCase):
         infeasible = [c for c in schedule['deadline_conflicts'] if c['infeasible']]
         self.assertEqual([c['task_id'] for c in infeasible], [1])
         self.assertGreater(infeasible[0]['deficit_minutes'], 0)
-        self.assertTrue(infeasible[0]['options'])
+        self.assertTrue(infeasible[0]['reason'])
+        self.assertEqual(infeasible[0]['options'], [])
         # Сон/отдых и достижимая задача 2 защищены.
         self.assertTrue(all(d['allocated_minutes'] <= d['realistic_capacity_minutes'] for d in schedule['daily_allocations']))
         t2_assigned = sum(t['minutes'] for d in schedule['daily_allocations'] for t in d['tasks'] if t['task_id'] == 2)

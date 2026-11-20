@@ -835,11 +835,7 @@ def check_feasibility(
                 'reason': (
                     f"{info['title']}: срок выполнения уже наступил или задача открывается позже дедлайна."
                 ),
-                'options': [
-                    'Согласовать перенос дедлайна или сдачи',
-                    'Оценить, есть ли смысл сдавать работу частично',
-                    'Пересмотреть приоритеты других задач',
-                ],
+                'options': [],
             })
         elif dl_local.date().isoformat() <= horizon_end:
             valid_hard.append(info)
@@ -888,11 +884,7 @@ def check_feasibility(
                     f"{info['title']}: объём ({format_hours(info['min_work'], info['max_work'])}) превышает "
                     f"реалистичную рабочую ёмкость до дедлайна без ущерба для сна и отдыха (не хватает ≈ {format_hours(solo_deficit)})."
                 ),
-                'options': [
-                    'Сократить объём работы или согласовать минимально достаточный результат',
-                    'Перенести мягкий/внешний срок при возможности',
-                    'Освободить дополнительные дни от необязательных дел',
-                ],
+                'options': [],
             })
             continue
 
@@ -913,11 +905,7 @@ def check_feasibility(
                     f"{info['title']}: при совместном учёте с другими обязательными дедлайнами не хватает "
                     f"≈ {format_hours(group_deficit)} реалистичной ёмкости (сон и базовый отдых защищены)."
                 ),
-                'options': [
-                    'Изменить приоритеты и перенести менее критичную задачу',
-                    'Снизить глубину проработки одной из конкурирующих работ',
-                    'Перенести необязательные задачи на более поздние периоды',
-                ],
+                'options': [],
             })
         else:
             accepted.append(info)
@@ -936,10 +924,7 @@ def check_feasibility(
                         f"{info['title']}: выполнимо к сроку только при использовании части резерва "
                         f"(запас времени на грани, ≈ {format_hours(tight_deficit)})."
                     ),
-                    'options': [
-                        'Не добавлять новые сложные дела до закрытия срока',
-                        'Начать задачу при первой возможности без откладывания',
-                    ],
+                    'options': [],
                 })
     return conflicts, infeasible_ids
 
@@ -1396,47 +1381,13 @@ def _build_periods(
         max_lvl = max((d['load_level'] for d in group), key=lambda v: levels_rank.get(v, 0))
         load_level = 'free' if (total_alloc == 0 and kind == 'free') else 'light' if (total_alloc == 0) else max_lvl
 
-        # Подсказки по распределению усилий между днями периода.
+        # Заметки по датам периода.
         day_hints = []
-        if len(group) >= 2 and total_alloc > 0:
-            busiest = max(group, key=lambda d: d['busy_minutes'])
-            lightest = min(group, key=lambda d: d['busy_minutes'])
-            heaviest_work = max(group, key=lambda d: d['allocated_minutes'])
-            if busiest['date'] != lightest['date'] and busiest['busy_minutes'] - lightest['busy_minutes'] >= 150 and heaviest_work['allocated_minutes'] > busiest['allocated_minutes']:
-                b_date = format_date_ru(calendar_date.fromisoformat(busiest['date']))
-                w_date = format_date_ru(calendar_date.fromisoformat(heaviest_work['date']))
-                day_hints.append(
-                    f"{b_date} плотное расписание ({format_hours(busiest['busy_minutes'])}), основную часть лучше оставить на {w_date}."
-                )
-            elif len(group) == 2 and abs(group[0]['allocated_minutes'] - group[1]['allocated_minutes']) >= 45:
-                first_d = format_date_ru(calendar_date.fromisoformat(group[0]['date']))
-                second_d = format_date_ru(calendar_date.fromisoformat(group[1]['date']))
-                if group[0]['allocated_minutes'] > group[1]['allocated_minutes']:
-                    day_hints.append(f'{first_d} — основной объём работы, {second_d} — завершение и проверка.')
-                else:
-                    day_hints.append(f'{first_d} — спокойный старт, {second_d} — основной рабочий день.')
-            else:
-                day_hints.append('Нагрузку можно распределять равномерно в удобное время внутри этих дней.')
-        elif len(group) == 1 and total_alloc > 0 and group[0]['busy_minutes'] >= 240:
-            day_hints.append(f"День насыщен обязательными делами ({format_hours(group[0]['busy_minutes'])}), планируйте только посильный минимум.")
-
         for d in group:
             if d['note']:
                 day_hints.append(f"{format_date_ru(calendar_date.fromisoformat(d['date']))}: {d['note']}")
 
-        # Рекомендации по отдыху.
-        if kind == 'free':
-            rest_note = 'Отдых, личные дела и необязательный резерв для незавершённых мелочей.'
-        elif kind == 'recovery':
-            rest_note = 'Сниженная нагрузка для восстановления после серии напряжённых дней; избегайте новых сложных задач.'
-        elif kind == 'light':
-            rest_note = 'Облегчённый режим: только лёгкое повторение и сохранение свободного времени.'
-        elif load_level in ('high', 'overload'):
-            rest_note = 'Высокая нагрузка: не добавляйте лишних сложных задач и защитите ночной сон и вечерний отдых.'
-        elif any(d['busy_day'] for d in group) and rest_cfg.get('prefer_free_evenings'):
-            rest_note = 'Вечера после плотных занятий желательно оставить свободными для восстановления.'
-        else:
-            rest_note = 'Работайте комфортными подходами в выбранное вами время с регулярными паузами.'
+        rest_note = None
 
         total_min = sum(t['min_minutes'] for t in period_tasks)
         total_max = sum(t['max_minutes'] for t in period_tasks)
@@ -1484,7 +1435,7 @@ def _build_periods(
 
 def _summarize_changes(previous_schedule: dict | None, periods: list[dict], replan_mode: str) -> list[str]:
     if not previous_schedule or previous_schedule.get('version') != 2:
-        return ['Сформирован первый адаптивный план периодов без жёстких почасовых слотов.']
+        return []
     changes = []
     old_map: dict[int, tuple[str, str]] = {}
     for p in previous_schedule.get('periods', []):
@@ -1619,12 +1570,9 @@ def reorder(
         'plan_changes': plan_changes,
         'timeline': timeline,
         'timeline_error': None,
-        'rest_assumption': rest_cfg.get('assumption') or (
-            f"Сон ~{rest_cfg.get('sleep_hours') or 8} ч, базовый быт и перерывы защищены; "
-            f"резерв ёмкости {round(adaptation['reserve_ratio'] * 100)}%."
-        ),
+        'rest_assumption': rest_cfg.get('assumption') or '',
         'adaptation_summary': adaptation.get('summary'),
-        'note': 'Гибкие периоды без жёсткого назначения часов. Выбирайте удобное время внутри периода.',
+        'note': '',
     }
 
 

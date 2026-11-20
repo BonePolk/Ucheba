@@ -206,16 +206,10 @@ class StrausTools:
                     }
                 return {'status': 'accepted'}, []
             elif name == 'report_tool_problem':
-                self.progress.add(
-                    'Сообщает администратору о технической проблеме',
-                    description='Передаёт категорию сбоя для диагностики; само поручение этим не завершается.',
-                )
+                self.progress.add('Сообщает администратору о технической проблеме')
                 output = await report_problem(args, 'Straus')
             elif name in MEMORY_NAMES:
-                self.progress.add(
-                    'Обновляет общую память' if name == 'remember_user_fact' else 'Читает общую память',
-                    description='Сохраняет или использует подтверждённые факты владельца для следующих поручений.',
-                )
+                self.progress.add('Обновляет общую память' if name == 'remember_user_fact' else 'Читает общую память')
                 output = await memory_tool(name, args, 'Straus')
             elif name == 'agent_note':
                 output = self.progress.note(raw_args)
@@ -226,10 +220,7 @@ class StrausTools:
                     'calendar_remove_events': 'Убирает события из рабочей копии',
                     'calendar_timezone': 'Меняет часовой пояс',
                 }
-                self.progress.add(
-                    labels.get(name, 'Проверяет календарь'),
-                    description='Готовит календарь по поручению владельца; изменения сохранятся после завершения и проверки.',
-                )
+                self.progress.add(labels.get(name, 'Проверяет календарь'))
                 output = edit_calendar(name, args, self.config, self.task_ids)
                 if name == 'calendar_list' and isinstance(output, dict):
                     output['now_local'] = datetime.now(ZoneInfo(self.config.timezone)).isoformat()

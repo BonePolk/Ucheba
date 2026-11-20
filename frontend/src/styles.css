@@ -525,6 +525,287 @@
   background: #7F49B414;
 }
 
+.glance-table-scroll {
+  max-height: none;
+  flex: 1 1 0%;
+  min-height: 0;
+}
+
+/* Glance Mode document preview (.md / .docx) */
+.glance-markdown,
+.glance-docx {
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  line-height: 1.68;
+  color: #EAEAEA;
+}
+
+.glance-markdown > *:first-child,
+.glance-docx > *:first-child {
+  margin-top: 0;
+}
+
+.glance-markdown > *:last-child,
+.glance-docx > *:last-child {
+  margin-bottom: 0;
+}
+
+.glance-markdown h1,
+.glance-markdown h2,
+.glance-markdown h3,
+.glance-markdown h4,
+.glance-markdown h5,
+.glance-markdown h6,
+.glance-docx h1,
+.glance-docx h2,
+.glance-docx h3,
+.glance-docx h4,
+.glance-docx h5,
+.glance-docx h6 {
+  margin: 22px 0 10px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: #F2F2F2;
+}
+
+.glance-markdown h1,
+.glance-docx h1 {
+  font-size: 22px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid #262626;
+}
+
+.glance-markdown h2,
+.glance-docx h2 {
+  font-size: 18px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid #222222;
+}
+
+.glance-markdown h3,
+.glance-docx h3 {
+  font-size: 16px;
+}
+
+.glance-markdown h4,
+.glance-markdown h5,
+.glance-markdown h6,
+.glance-docx h4,
+.glance-docx h5,
+.glance-docx h6 {
+  font-size: 14px;
+  color: #DCDCDC;
+}
+
+.glance-markdown p,
+.glance-markdown ul,
+.glance-markdown ol,
+.glance-markdown blockquote,
+.glance-docx p,
+.glance-docx ul,
+.glance-docx ol,
+.glance-docx blockquote {
+  margin: 10px 0;
+}
+
+.glance-empty-p {
+  margin: 0;
+  height: 10px;
+}
+
+.glance-markdown ul,
+.glance-markdown ol,
+.glance-docx ul,
+.glance-docx ol {
+  padding-left: 22px;
+}
+
+.glance-markdown ul,
+.glance-docx ul {
+  list-style: disc;
+}
+
+.glance-markdown ol,
+.glance-docx ol {
+  list-style: decimal;
+}
+
+.glance-markdown li,
+.glance-docx li {
+  margin: 4px 0;
+}
+
+.glance-task-item {
+  list-style: none;
+  margin-left: -18px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.glance-task-box {
+  display: inline-grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  margin-top: 5px;
+  border: 1px solid #404040;
+  background: #0D0D0D;
+  font-size: 10px;
+  line-height: 1;
+  color: #F5F0FA;
+  flex-shrink: 0;
+}
+
+.glance-task-box.is-checked {
+  border-color: #7F49B4;
+  background: #7F49B4;
+}
+
+.glance-markdown code,
+.glance-docx code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12.5px;
+  background: #191919;
+  border: 1px solid #2A2A2A;
+  padding: 1px 5px;
+}
+
+.glance-markdown pre {
+  max-width: 100%;
+  overflow-x: auto;
+  background: #0B0B0B;
+  border: 1px solid #303030;
+  padding: 12px 14px;
+  margin: 14px 0;
+  line-height: 1.5;
+}
+
+.glance-markdown pre code {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font-size: 12.5px;
+}
+
+.glance-markdown blockquote,
+.glance-docx blockquote {
+  border-left: 2px solid #7F49B4;
+  padding: 2px 0 2px 14px;
+  color: #B4B4B4;
+}
+
+.glance-markdown hr {
+  border: 0;
+  border-top: 1px solid #2A2A2A;
+  margin: 20px 0;
+}
+
+.glance-markdown a,
+.glance-docx a {
+  color: #CFA9F5;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.glance-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  margin: 14px 0;
+  border: 1px solid #303030;
+  background: #0D0D0D;
+}
+
+.glance-table-wrap table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.glance-table-wrap th,
+.glance-table-wrap td {
+  border-right: 1px solid #262626;
+  border-bottom: 1px solid #262626;
+  padding: 7px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.glance-table-wrap tr > *:last-child {
+  border-right: 0;
+}
+
+.glance-table-wrap tbody tr:last-child > * {
+  border-bottom: 0;
+}
+
+.glance-table-wrap th {
+  background: #161616;
+  color: #DFDFDF;
+  font-weight: 600;
+}
+
+.glance-table-wrap tbody tr:nth-child(even) td {
+  background: #101010;
+}
+
+.glance-table-wrap td p,
+.glance-table-wrap th p {
+  margin: 2px 0;
+}
+
+.glance-table-wrap td > *:first-child,
+.glance-table-wrap th > *:first-child {
+  margin-top: 0;
+}
+
+.glance-table-wrap td > *:last-child,
+.glance-table-wrap th > *:last-child {
+  margin-bottom: 0;
+}
+
+.glance-docx-figure {
+  margin: 14px 0;
+  display: flex;
+  justify-content: center;
+}
+
+.glance-docx-figure img {
+  max-width: 100%;
+  max-height: 70dvh;
+  height: auto;
+  object-fit: contain;
+  border: 1px solid #303030;
+  background: #FFFFFF;
+}
+
+.glance-inline-img {
+  display: inline-block;
+  vertical-align: middle;
+  max-width: 100%;
+  max-height: 360px;
+  height: auto;
+  border: 1px solid #303030;
+  background: #FFFFFF;
+}
+
+.glance-page-break {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 22px 0;
+  color: #787878;
+  font-size: 11px;
+}
+
+.glance-page-break::before,
+.glance-page-break::after {
+  content: "";
+  flex: 1;
+  border-top: 1px dashed #303030;
+}
+
 @media (max-width: 767px) {
   input,
   textarea,

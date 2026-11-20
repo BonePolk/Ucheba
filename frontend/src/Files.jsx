@@ -2,33 +2,24 @@ import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Archive,
-  ArrowLeft,
-  ChevronLeft,
-  ChevronRight,
-  Download,
-  File,
   FilePlus,
-  FileSpreadsheet,
-  FileText,
   Folder,
   FolderPlus,
-  Image as ImageIcon,
   RefreshCw,
   Search,
-  Trash2,
   Upload,
-  X,
 } from 'lucide-react';
 import { request } from './api';
 import { cancelStagedUpload, safeFileName, uploadTaskFiles, uploadWorkspaceFile } from './fileUpload';
+import FileGlance, { FileIcon, fileType, sizeLabel } from './FileGlance';
 import { useMediaQuery } from '@/lib/utils';
-import { CollapseSection, SlidePanel } from '@/lib/motion';
-import { Button, IconButton } from '@/components/ui/button';
+import { CollapseSection } from '@/lib/motion';
+import { Button } from '@/components/ui/button';
 import { Checkbox, FileTrigger } from '@/components/ui/controls';
 import { Modal } from '@/components/ui/dialog';
-import { Field, Input, Textarea } from '@/components/ui/input';
+import { Field, Input } from '@/components/ui/input';
 import { SelectField } from '@/components/ui/select';
-import { Badge, EmptyState, Notice, PageHeader, Spinner } from '@/components/ui/surface';
+import { EmptyState, Notice, PageHeader, Spinner } from '@/components/ui/surface';
 import { SegmentedControl } from '@/components/ui/tabs';
 
 function buildTree(files) {
@@ -51,31 +42,6 @@ function buildTree(files) {
     });
   }
   return root;
-}
-
-function fileType(file) {
-  if (file.folder) return 'folder';
-  const extension = file.name.split('.').at(-1).toLowerCase();
-  if (['xlsx', 'xls', 'ods', 'csv', 'tsv'].includes(extension)) return 'table';
-  if (['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(extension)) return 'image';
-  if (extension === 'pdf') return 'pdf';
-  return 'document';
-}
-
-function FileIcon({ file, size = 16 }) {
-  const type = fileType(file);
-  const props = { style: { width: size, height: size }, className: 'shrink-0', 'aria-hidden': true };
-  if (type === 'folder') return <Folder {...props} className="shrink-0 text-[#CFA9F5]" />;
-  if (type === 'table') return <FileSpreadsheet {...props} className="shrink-0 text-[#6EBE86]" />;
-  if (type === 'image') return <ImageIcon {...props} className="shrink-0 text-[#6FA3CC]" />;
-  if (type === 'pdf') return <FileText {...props} className="shrink-0 text-[#D46A6A]" />;
-  return <File {...props} className="shrink-0 text-[#929292]" />;
-}
-
-function sizeLabel(size) {
-  if (size == null) return '—';
-  if (size < 1024) return `${size} Б`;
-  return size < 1024 * 1024 ? `${(size / 1024).toFixed(1)} КБ` : `${(size / 1024 / 1024).toFixed(1)} МБ`;
 }
 
 function FolderTree({ node, current, onSelect }) {
@@ -130,7 +96,7 @@ export default function Files() {
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [archivePath, setArchivePath] = useState('');
 
-  const dirty = editor?.editable && editor.content !== editor.original;
+  const dirty = Boolean(editor?.editable && editor.content !== undefined && editor.content !== editor.original);
   useEffect(() => { client.setQueryData(['file-editor'], editor); }, [client, editor]);
   useEffect(() => {
     const warn = (event) => {
@@ -167,13 +133,20 @@ export default function Files() {
 
   const open = useMutation({
     mutationFn: (file) => request(`/integrations/monocle/workspace/file?path=${encodeURIComponent(file.path)}`),
-    onSuccess: (data, file) => setEditor({ ...file, ...data, original: data.content }),
+    onSuccess: (data, file) => setEditor((curr) => (curr?.path === file.path ? { ...curr, ...data, original: data.content } : curr)),
+    onError: (err, file) => {
+      if (err?.status === 415) {
+        setEditor((curr) => (curr?.path === file.path ? { ...curr, editable: false } : curr));
+      }
+    },
   });
 
+  const isTable = editor ? fileType(editor) === 'table' : false;
+  const useLocalText = Boolean(editor?.editable && !isTable && editor.content !== undefined);
   const preview = useQuery({
     queryKey: ['file-preview', editor?.path, editor?.version, page, sheet, offset],
     queryFn: () => request(`/integrations/monocle/workspace/preview?${new URLSearchParams({ path: editor.path, page, sheet, offset })}`),
-    enabled: Boolean(editor?.url) && mode === 'preview',
+    enabled: Boolean(editor?.url) && mode === 'preview' && !useLocalText && !(editor?.editable && !isTable && open.isPending),
     placeholderData: (previous, query) => (query?.queryKey[1] === editor?.path ? previous : undefined),
     retry: false,
   });
@@ -288,8 +261,24 @@ export default function Files() {
     setPage(1);
     setSheet('');
     setOffset(0);
+    setEditor({ ...file });
     if (file.editable) open.mutate(file);
-    else setEditor(file);
+  }
+
+  function closeGlance() {
+    if (busy) return;
+    if (!dirty || window.confirm('Закрыть без сохранения изменений?')) {
+      setEditor(null);
+    }
+  }
+
+  const fileRows = rows.filter((item) => !item.folder);
+  const activeFileIndex = editor ? fileRows.findIndex((item) => item.path === editor.path) : -1;
+
+  function navigateFile(delta) {
+    if (activeFileIndex < 0) return;
+    const target = fileRows[activeFileIndex + delta];
+    if (target) select(target);
   }
 
   function create() {
@@ -309,11 +298,8 @@ export default function Files() {
 
   const data = preview.data;
   const columns = [...new Set((data?.table?.rows ?? []).flatMap((row) => Object.keys(row.cells)))];
-  const error = tree.error || open.error || save.error || deleteFile.error || createFolder.error || upload.error || archive.error;
-
-  const gridClass = editor
-    ? 'grid-cols-1 lg:grid-cols-[190px_minmax(0,1fr)] xl:grid-cols-[190px_minmax(0,1fr)_minmax(340px,42%)]'
-    : 'grid-cols-1 lg:grid-cols-[190px_minmax(0,1fr)]';
+  const openError = open.error?.status === 415 ? null : open.error;
+  const error = tree.error || openError || save.error || deleteFile.error || createFolder.error || upload.error || archive.error;
 
   return (
     <div className="flex flex-col gap-3">
@@ -333,7 +319,7 @@ export default function Files() {
       {notice && <Notice tone="info" onClose={() => setNotice('')}>{notice}</Notice>}
 
       <div
-        className={`grid ${gridClass} border border-[#303030] bg-[#111111] min-h-[520px] ${dragging ? 'file-drop-active' : ''}`}
+        className={`grid grid-cols-1 lg:grid-cols-[190px_minmax(0,1fr)] border border-[#303030] bg-[#111111] min-h-[520px] ${dragging ? 'file-drop-active' : ''}`}
         onDragOver={(event) => {
           if (event.dataTransfer.types.includes('Files')) {
             event.preventDefault();
@@ -346,8 +332,7 @@ export default function Files() {
         onDrop={dropFiles}
       >
         {/* Left Folder Tree */}
-        {(!compact || !editor) && (
-          <aside className="border-b lg:border-b-0 lg:border-r border-[#242424] bg-[#0D0D0D] p-2.5 flex flex-col gap-1.5">
+        <aside className="border-b lg:border-b-0 lg:border-r border-[#242424] bg-[#0D0D0D] p-2.5 flex flex-col gap-1.5">
             {compact && (
               <Button size="sm" variant="default" className="w-full" onClick={() => setFoldersOpen(!foldersOpen)}>
                 {foldersOpen ? 'Скрыть папки' : 'Папки'}
@@ -383,11 +368,9 @@ export default function Files() {
               </>
             )}
           </aside>
-        )}
 
         {/* Center File Contents */}
-        {(!compact || !editor) && (
-          <section className="min-w-0 flex flex-col">
+        <section className="min-w-0 flex flex-col">
             {/* Toolbar */}
             <div className="border-b border-[#242424] p-2.5 flex flex-col gap-2">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -565,194 +548,46 @@ export default function Files() {
               )}
             </div>
           </section>
-        )}
-
-        {/* Right File Preview / Editor Panel */}
-        <SlidePanel
-          open={Boolean(editor)}
-          className="min-w-0 border-t xl:border-t-0 xl:border-l border-[#242424] bg-[#0E0E0E] p-3 flex flex-col gap-2.5 lg:col-span-2 xl:col-span-1"
-        >
-          {editor && (
-            <>
-              {compact && (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="w-fit"
-                  disabled={busy}
-                  leftIcon={<ArrowLeft className="h-3.5 w-3.5" />}
-                  onClick={() => {
-                    if (!dirty || window.confirm('Закрыть без сохранения изменений?')) setEditor(null);
-                  }}
-                >
-                  К файлам
-                </Button>
-              )}
-              <div className="flex items-start justify-between gap-2 border-b border-[#222222] pb-2">
-              <div className="flex items-start gap-2 min-w-0">
-                <FileIcon file={editor} size={16} />
-                <div className="min-w-0">
-                  <div className="text-[13px] font-semibold text-[#EAEAEA] break-words">{editor.name}</div>
-                  <div className="text-[11px] text-[#929292] break-all">{editor.path}</div>
-                </div>
-              </div>
-              <IconButton
-                size="icon-sm"
-                variant="ghost"
-                disabled={busy}
-                aria-label="Закрыть просмотр"
-                onClick={() => {
-                  if (!dirty || window.confirm('Закрыть без сохранения изменений?')) setEditor(null);
-                }}
-              >
-                <X className="h-4 w-4" />
-              </IconButton>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-1.5">
-              {editor.url && (
-                <Button size="sm" variant="default" leftIcon={<Download className="h-3 w-3" />} asChild>
-                  <a href={editor.url} download>Скачать</a>
-                </Button>
-              )}
-              {editor.url && !editor.path.startsWith('@tasks/') && (
-                <Button
-                  size="sm"
-                  variant="danger-ghost"
-                  leftIcon={<Trash2 className="h-3 w-3" />}
-                  loading={deleteFile.isPending}
-                  disabled={busy}
-                  onClick={() => {
-                    const changes = dirty ? ' Несохранённые изменения будут потеряны.' : '';
-                    if (window.confirm(`Удалить файл «${editor.name}» без возможности восстановления?${changes}`)) {
-                      deleteFile.mutate(editor);
-                    }
-                  }}
-                >
-                  Удалить
-                </Button>
-              )}
-              {editor.editable && (
-                <SegmentedControl
-                  size="sm"
-                  value={mode}
-                  onChange={setMode}
-                  options={[{ value: 'preview', label: 'Просмотр' }, { value: 'edit', label: 'Редактор' }]}
-                />
-              )}
-              {dirty && <Badge variant="warning">Не сохранено</Badge>}
-            </div>
-
-            {open.isPending ? (
-              <div className="py-8 flex justify-center"><Spinner label="Чтение файла…" /></div>
-            ) : mode === 'edit' && editor.editable ? (
-              <div className="flex flex-col gap-2">
-                <Textarea
-                  aria-label="Содержимое файла"
-                  rows={16}
-                  className="font-mono text-[12px] leading-relaxed"
-                  value={editor.content}
-                  onChange={(event) => {
-                    const content = event.currentTarget.value;
-                    setEditor((curr) => ({ ...curr, content }));
-                  }}
-                />
-                <Button variant="primary" loading={save.isPending} disabled={!dirty || open.isPending} onClick={() => save.mutate(editor)}>
-                  Сохранить файл
-                </Button>
-              </div>
-            ) : (
-              <div className="flex flex-col gap-2 relative">
-                {preview.isFetching && (
-                  <div className="flex items-center gap-1.5 text-[11px] text-[#929292]" role="status">
-                    <Spinner size={12} label="Загрузка предпросмотра…" />
-                  </div>
-                )}
-                {preview.error && <Notice tone="warning">{preview.error.message}</Notice>}
-                {data?.notice && <div className="text-[11px] text-[#929292]">{data.notice}</div>}
-                {data?.image && (
-                  <img
-                    className="block w-full max-h-[600px] object-contain bg-white border border-[#303030]"
-                    src={`data:${data.mime ?? 'image/jpeg'};base64,${data.image}`}
-                    alt={editor.name}
-                  />
-                )}
-                {data?.pages > 1 && (
-                  <div className="flex items-center justify-between gap-2">
-                    <Button size="sm" variant="default" disabled={page <= 1} onClick={() => setPage(page - 1)}>
-                      <ChevronLeft className="h-3.5 w-3.5" />
-                    </Button>
-                    <span className="text-[12px] text-[#929292] tabular-nums">Страница {page} из {data.pages}</span>
-                    <Button size="sm" variant="default" disabled={page >= data.pages} onClick={() => setPage(page + 1)}>
-                      <ChevronRight className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                )}
-                {data?.table && (
-                  <div className="flex flex-col gap-2">
-                    <SelectField
-                      size="sm"
-                      ariaLabel="Лист таблицы"
-                      value={sheet || data.table.sheets[0] || null}
-                      options={data.table.sheets}
-                      onChange={(value) => {
-                        setSheet(value ?? '');
-                        setOffset(0);
-                      }}
-                    />
-                    <div className="file-table-scroll">
-                      <table className="file-table">
-                        <thead>
-                          <tr>
-                            <th>№</th>
-                            {columns.map((column) => <th key={column}>{column}</th>)}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {data.table.rows.map((row) => (
-                            <tr key={`${row.sheet}:${row.row}`}>
-                              <th>{row.row}</th>
-                              {columns.map((column) => <td key={column}>{row.cells[column]}</td>)}
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                    <div className="flex items-center justify-between gap-2">
-                      <Button size="sm" variant="default" disabled={!offset} onClick={() => setOffset(Math.max(0, offset - 40))}>
-                        <ChevronLeft className="h-3.5 w-3.5" />
-                      </Button>
-                      <span className="text-[12px] text-[#929292] tabular-nums">
-                        {offset + 1}–{offset + data.table.rows.length} из {data.table.matched}
-                      </span>
-                      <Button size="sm" variant="default" disabled={data.table.next_offset == null} onClick={() => setOffset(data.table.next_offset)}>
-                        <ChevronRight className="h-3.5 w-3.5" />
-                      </Button>
-                    </div>
-                  </div>
-                )}
-                {data?.text && !data.image && (
-                  <pre className="m-0 p-3 bg-[#090909] border border-[#262626] font-mono text-[12px] leading-relaxed whitespace-pre-wrap break-words max-h-[600px] overflow-auto">
-                    {data.text}
-                  </pre>
-                )}
-                {!preview.isFetching && !preview.error && !data?.text && !data?.image && !data?.table && (
-                  <div className="text-[12px] text-[#929292] py-4">
-                    Предпросмотр недоступен. Файл можно скачать.
-                  </div>
-                )}
-              </div>
-            )}
-            </>
-          )}
-        </SlidePanel>
       </div>
+
+      {/* Fullscreen Glance Preview / Editor */}
+      <FileGlance
+        editor={editor}
+        onClose={closeGlance}
+        mode={mode}
+        onModeChange={setMode}
+        dirty={dirty}
+        busy={busy}
+        opening={open.isPending}
+        saving={save.isPending}
+        deleting={deleteFile.isPending}
+        onChangeContent={(content) => setEditor((curr) => (curr ? { ...curr, content } : curr))}
+        onSave={() => editor && save.mutate(editor)}
+        onDelete={() => {
+          if (!editor) return;
+          const changes = dirty ? ' Несохранённые изменения будут потеряны.' : '';
+          if (window.confirm(`Удалить файл «${editor.name}» без возможности восстановления?${changes}`)) {
+            deleteFile.mutate(editor);
+          }
+        }}
+        preview={preview}
+        page={page}
+        onPageChange={setPage}
+        sheet={sheet}
+        onSheetChange={setSheet}
+        offset={offset}
+        onOffsetChange={setOffset}
+        columns={columns}
+        fileIndex={activeFileIndex}
+        fileCount={fileRows.length}
+        onNavigate={navigateFile}
+      />
 
       {/* Create Archive Modal */}
       <Modal opened={archiveOpen} onClose={() => setArchiveOpen(false)} title="Создать ZIP-архив" size="sm">
         <div className="flex flex-col gap-3">
           <p className="text-[12px] text-[#929292] m-0">
-            Выбрано файлов: {selectedPaths.length}. Исходники останутся без изменений.
+            Выбрано файлов: {selectedPaths.length}
           </p>
           <Field label="Путь нового архива">
             <Input value={archivePath} onChange={(event) => setArchivePath(event.currentTarget.value)} maxLength={500} autoFocus />

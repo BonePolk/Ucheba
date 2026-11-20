@@ -18,7 +18,7 @@ import pypdfium2 as pdfium
 
 from common.identity import user_id
 from common.rpc import internal_token
-from common.office import spreadsheet_text, table_text
+from common.office import docx_document, docx_plain_text, spreadsheet_text, table_text
 
 LIMIT = 25 * 1024 * 1024
 migrated_files = set()
@@ -104,12 +104,29 @@ def archive(content):
 
 
 
+def _docx_image(raw):
+    try:
+        with Image.open(io.BytesIO(raw)) as image:
+            if image.format not in ('PNG', 'JPEG', 'WEBP', 'GIF', 'BMP', 'TIFF') or image.width * image.height > 20000000:
+                return None
+            image.thumbnail((1400, 1400))
+            has_alpha = image.mode in ('RGBA', 'LA') or (image.mode == 'P' and 'transparency' in image.info)
+            stream = io.BytesIO()
+            if image.format == 'PNG' or has_alpha:
+                (image if image.mode in ('RGB', 'RGBA') else image.convert('RGBA')).save(stream, format='PNG')
+                return 'image/png', base64.b64encode(stream.getvalue()).decode()
+            image.convert('RGB').save(stream, format='JPEG', quality=85)
+            return 'image/jpeg', base64.b64encode(stream.getvalue()).decode()
+    except Exception:
+        return None
+
+
 def read(file_id, page=1):
     info, content = load(file_id)
     return read_content(info['name'], content, page, info)
 
 
-def read_content(name, content, page=1, info=None):
+def read_content(name, content, page=1, info=None, include_document=False):
     if len(content) > LIMIT:
         raise ValueError('Файл больше 25 МБ')
     suffix = Path(name).suffix.lower()
@@ -154,6 +171,11 @@ def read_content(name, content, page=1, info=None):
             elif suffix == '.xlsx' or 'xl/workbook.xml' in zipped.namelist():
                 result['text'] = spreadsheet_text(zipped)
                 result['notice'] = 'Формулы не выполняются; показаны сохранённые значения. Числа дат/времени могут быть в исходном представлении Excel.'
+            elif suffix == '.docx' or 'word/document.xml' in zipped.namelist():
+                doc = docx_document(zipped, image_converter=_docx_image if include_document else None)
+                result['text'] = docx_plain_text(doc)[:40000]
+                if include_document:
+                    result['document'] = doc
             else:
                 texts = []
                 for member in zipped.namelist():

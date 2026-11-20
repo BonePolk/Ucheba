@@ -47,6 +47,24 @@ const MONTHS_SHORT = ['янв', 'фев', 'мар', 'апр', 'мая', 'июн'
 const MONTHS_LONG = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
 const WEEKDAYS = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
 
+const LEGACY_BOILERPLATE = new Set([
+  'Нагрузку можно распределять равномерно в удобное время внутри этих дней.',
+  'Отдых, личные дела и необязательный резерв для незавершённых мелочей.',
+  'Сниженная нагрузка для восстановления после серии напряжённых дней; избегайте новых сложных задач.',
+  'Облегчённый режим: только лёгкое повторение и сохранение свободного времени.',
+  'Высокая нагрузка: не добавляйте лишних сложных задач и защитите ночной сон и вечерний отдых.',
+  'Вечера после плотных занятий желательно оставить свободными для восстановления.',
+  'Работайте комфортными подходами в выбранное вами время с регулярными паузами.',
+  'Сформирован первый адаптивный план периодов без жёстких почасовых слотов.',
+]);
+
+function isLegacyBoilerplate(text) {
+  if (!text) return false;
+  const trimmed = String(text).trim();
+  return LEGACY_BOILERPLATE.has(trimmed)
+    || /^День насыщен обязательными делами \([^)]+\), планируйте только посильный минимум\.$/.test(trimmed);
+}
+
 export function parseIsoDate(iso) {
   const [y, m, d] = iso.split('-').map(Number);
   return new Date(Date.UTC(y, m - 1, d));
@@ -147,12 +165,7 @@ export default function AgentTimeline({
         {previewDays.length > 0 ? (
           <div className="border border-[#303030] bg-[#111111] p-3 flex flex-col gap-2.5">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex flex-col gap-0.5">
-                <span className="text-[12px] font-medium text-[#EAEAEA]">Ближайшие дни по календарю</span>
-                <span className="text-[11px] text-[#929292]">
-                  План Ameba ещё не построен — при запуске она оценит задачи, учтёт календарь и память и распределит работу по дням.
-                </span>
-              </div>
+              <span className="text-[12px] font-medium text-[#EAEAEA]">Ближайшие дни по календарю</span>
               {finished && onRefresh && (
                 <Button size="sm" variant="primary" onClick={onRefresh}>Построить план</Button>
               )}
@@ -177,9 +190,6 @@ export default function AgentTimeline({
           <EmptyState
             icon={<CalendarDays className="h-5 w-5" />}
             title={finished ? 'План ещё не построен' : 'Ameba оценивает задачи…'}
-            description={finished
-              ? 'Ameba оценит задачи, учтёт ваш календарь и память и соберёт гибкий план по дням.'
-              : 'Изучает задачи, календарь и сохранённые предпочтения, чтобы составить план по дням.'}
             action={finished && onRefresh ? <Button variant="primary" onClick={onRefresh}>Построить план</Button> : undefined}
           />
         )}
@@ -188,7 +198,7 @@ export default function AgentTimeline({
   }
 
   const visiblePeriods = expanded ? periods : periods.slice(0, 6);
-  const planChanges = schedule.plan_changes ?? [];
+  const planChanges = (schedule.plan_changes ?? []).filter((change) => !isLegacyBoilerplate(change));
 
   function openFeedback(taskId, periodId, outcome) {
     setEstimateDraft(null);
@@ -233,9 +243,6 @@ export default function AgentTimeline({
             {infeasibleConflicts.map((item) => (
               <div key={item.task_id}>
                 <div className="font-medium text-[#EAEAEA]">{item.reason}</div>
-                {item.options?.length > 0 && (
-                  <div className="text-[11px] text-[#929292]">{item.options.join('; ')}</div>
-                )}
               </div>
             ))}
           </div>
@@ -294,7 +301,9 @@ export default function AgentTimeline({
           );
           const accent = period.kind === 'free' ? LOAD_META.free.accent : period.kind !== 'work' ? LOAD_META.light.accent : load.accent;
           const detailsVisible = Boolean(openDetails[period.id]);
-          const hasHiddenHints = !isCurrent && Boolean(period.day_hints?.length || period.rest_note);
+          const dayHints = (period.day_hints ?? []).filter((hint) => !isLegacyBoilerplate(hint));
+          const restNote = isLegacyBoilerplate(period.rest_note) ? null : period.rest_note;
+          const hasHiddenHints = !isCurrent && Boolean(dayHints.length || restNote);
           const hasDetails = Boolean(hasHiddenHints || markers.length || commitments.length);
 
           return (
@@ -342,7 +351,7 @@ export default function AgentTimeline({
                         onClick={() => toggleDetails(period.id)}
                       >
                         {detailsVisible ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-                        <span>{detailsVisible ? 'Свернуть' : 'Расписание и подсказки'}</span>
+                        <span>{detailsVisible ? 'Свернуть' : (hasHiddenHints ? 'Подробности' : 'Календарь')}</span>
                       </Button>
                     )}
                     {onAdjust && (
@@ -353,7 +362,7 @@ export default function AgentTimeline({
                           </Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent>
-                          <DropdownMenuLabel>Режим дней (пересчёт без ИИ)</DropdownMenuLabel>
+                          <DropdownMenuLabel>Режим дней</DropdownMenuLabel>
                           <DropdownMenuLabel className="text-[#EAEAEA]">{formatDateRange(period.start_date, period.end_date)}</DropdownMenuLabel>
                           <DropdownMenuSeparator />
                           <DropdownMenuItem
@@ -512,7 +521,7 @@ export default function AgentTimeline({
                           <CollapseSection open={editingEstThis}>
                             {editingEstThis && (
                               <div className="flex flex-wrap items-center gap-1.5 border-t border-dashed border-[#303030] pt-1.5">
-                                <span className="text-[12px] text-[#929292]">Сколько минут осталось (для пересчёта):</span>
+                                <span className="text-[12px] text-[#929292]">Осталось минут:</span>
                                 <Input
                                   type="number"
                                   min={0}
@@ -552,24 +561,24 @@ export default function AgentTimeline({
                   </div>
                 )}
 
-                {isCurrent && (period.day_hints?.length > 0 || period.rest_note) && (
+                {isCurrent && (dayHints.length > 0 || restNote) && (
                   <div className="flex flex-col gap-1 text-[12px]">
-                    {period.day_hints?.map((hint, idx) => (
+                    {dayHints.map((hint, idx) => (
                       <div key={idx} className="text-[#B8B8B8]">• {hint}</div>
                     ))}
-                    {period.rest_note && (
-                      <div className="text-[#6EBE86]">{period.rest_note}</div>
+                    {restNote && (
+                      <div className="text-[#6EBE86]">{restNote}</div>
                     )}
                   </div>
                 )}
 
                 <CollapseSection open={detailsVisible}>
                   <div className="border-t border-[#242424] pt-2 flex flex-col gap-1.5 text-[12px]">
-                    {!isCurrent && period.day_hints?.map((hint, idx) => (
+                    {!isCurrent && dayHints.map((hint, idx) => (
                       <div key={idx} className="text-[#B8B8B8]">• {hint}</div>
                     ))}
-                    {!isCurrent && period.rest_note && (
-                      <div className="text-[#6EBE86]">{period.rest_note}</div>
+                    {!isCurrent && restNote && (
+                      <div className="text-[#6EBE86]">{restNote}</div>
                     )}
                     {markers.length > 0 && (
                       <div className="text-[#D4A24C]">

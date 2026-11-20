@@ -1264,7 +1264,7 @@ async def preview_file(body: dict):
             result['table'] = await asyncio.to_thread(search_table, body['name'], content,
                 {'sheet': selected_sheet, 'offset': body.get('offset', 0), 'limit': 40})
         else:
-            result = files.read_content(body['name'], content, body.get('page', 1))
+            result = files.read_content(body['name'], content, body.get('page', 1), include_document=True)
         return result
     except (ValueError, KeyError):
         raise HTTPException(422, 'Не удалось открыть файл. Проверьте формат и номер страницы') from None

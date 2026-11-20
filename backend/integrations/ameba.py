@@ -309,7 +309,7 @@ def calendar_schedule():
         'start_at': datetime.now(timezone.utc).isoformat(),
         'timezone': config['timezone'],
         'days_summary': list(by_day.values()),
-        'rest_assumption': 'Постоянное расписание. Ameba учитывает его при оценке рабочей ёмкости дней.',
+        'rest_assumption': '',
     }
 
 

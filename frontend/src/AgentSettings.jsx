@@ -192,11 +192,11 @@ export default function AgentSettings({ name, title, data, provider, oauthState,
                 ? (selectedReady ? 'Вход выполнен' : 'Нет входа')
                 : (selectedReady ? 'Ключ настроен' : 'Нет ключа')}
             </Badge>
-            <span className="text-[11px] text-[#929292] truncate">
-              {authMode === 'oauth'
-                ? 'Общая сессия OpenAI OAuth'
-                : (provider?.base_url || 'https://lenec.tech/v1')}
-            </span>
+            {authMode !== 'oauth' && (
+              <span className="text-[11px] text-[#929292] truncate">
+                {provider?.base_url || 'https://lenec.tech/v1'}
+              </span>
+            )}
           </div>
           {onOpenProvider && (
             <Button size="xs" variant="subtle" onClick={onOpenProvider}>

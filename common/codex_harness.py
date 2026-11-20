@@ -655,10 +655,7 @@ async def run_codex_turn(
                                 'fileChange': 'Изменяет файлы',
                                 'webSearch': 'Ищет информацию',
                             }
-                            progress.add(
-                                labels[item_type],
-                                description='Работает над материалами поручения; цель шага агент поясняет в комментариях.',
-                            )
+                            progress.add(labels[item_type])
                         if item_type == 'agentMessage' and phase == 'commentary':
                             commentary.add(item.id)
                     else:

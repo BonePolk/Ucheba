@@ -200,7 +200,7 @@ export default function ContextBrowser({ taskId, disabled, initialSiteId = null 
                     </Button>
                   </div>
                   {screenImage(false)}
-                  <div className="text-[11px] text-[#7D7D7D]">Клик по снимку — нажатие; поле ниже — ввод 2FA/кода.</div>
+                  <div className="text-[11px] text-[#7D7D7D]">Клик по снимку — нажатие.</div>
                   <Modal opened={expanded} onClose={() => setExpanded(false)} title="Личный кабинет" size="xl">
                     {screenImage(true)}
                   </Modal>

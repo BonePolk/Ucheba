@@ -104,7 +104,7 @@ export default function BotSettings({ name, data }) {
           <p className="text-[11px] text-[#929292] m-0 mt-1 border-l border-[#303030] pl-2">
             {collector
               ? 'Добавьте бота в группы и отключите Privacy Mode у BotFather; после сообщения в группе загрузите чаты.'
-              : 'Напишите /start этому боту, чтобы получать напоминания о сроках, входящих предложениях и результатах Arrodes.'}
+              : 'Отправьте боту команду /start.'}
           </p>
         </CollapseSection>
       </div>
