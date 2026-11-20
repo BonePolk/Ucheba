@@ -1,24 +1,14 @@
 import Markdown from 'react-markdown';
+import { buildMathComponents, extractMarkdownMath } from './MathFormula';
 
 export default function TaskMarkdown({ children }) {
+  const raw = typeof children === 'string' ? children : '';
+  const { text, formulas } = extractMarkdownMath(raw);
+  const components = buildMathComponents(formulas);
   return (
     <div className="task-markdown">
-      <Markdown
-        skipHtml
-        components={{
-          a: ({ href, children: linkChildren }) => (
-            <a href={href} target="_blank" rel="noreferrer">
-              {linkChildren}
-            </a>
-          ),
-          img: ({ src, alt }) => (
-            <a href={src} target="_blank" rel="noreferrer">
-              {alt || 'Открыть изображение'}
-            </a>
-          ),
-        }}
-      >
-        {children}
+      <Markdown skipHtml components={components}>
+        {text}
       </Markdown>
     </div>
   );

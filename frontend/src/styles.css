@@ -806,6 +806,28 @@
   border-top: 1px dashed #303030;
 }
 
+.katex,
+.katex * {
+  border-color: currentColor;
+}
+
+.ucheba-math-inline {
+  display: inline;
+}
+
+.ucheba-math-block {
+  display: block;
+  overflow-x: auto;
+  overflow-y: hidden;
+  margin: 12px 0;
+  padding: 4px 0;
+  text-align: center;
+}
+
+.ucheba-math-block .katex-display {
+  margin: 0;
+}
+
 @media (max-width: 767px) {
   input,
   textarea,

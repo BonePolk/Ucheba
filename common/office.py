@@ -314,6 +314,7 @@ _R_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
 _A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
 _WP_NS = 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'
 _V_NS = 'urn:schemas-microsoft-com:vml'
+_M_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/math'
 _REL_NS = 'http://schemas.openxmlformats.org/package/2006/relationships'
 
 _DOCX_NS = {
@@ -322,6 +323,7 @@ _DOCX_NS = {
     'a': _A_NS,
     'wp': _WP_NS,
     'v': _V_NS,
+    'm': _M_NS,
     'rel': _REL_NS,
 }
 
@@ -343,6 +345,183 @@ def _w_tag(element):
     if tag.startswith(f'{{{_W_NS}}}'):
         return tag[len(_W_NS) + 2:]
     return tag
+
+
+def _m_attr(element, name, default=None):
+    if element is None:
+        return default
+    return element.get(f'{{{_M_NS}}}{name}', default)
+
+
+def _m_tag(element):
+    tag = element.tag
+    if tag.startswith(f'{{{_M_NS}}}'):
+        return tag[len(_M_NS) + 2:]
+    return ''
+
+
+_OMML_UNICODE_MAP = str.maketrans({
+    '\u2212': '-',
+    '×': r'\times ',
+    '·': r'\cdot ',
+    '±': r'\pm ',
+    '∓': r'\mp ',
+    '≤': r'\le ',
+    '≥': r'\ge ',
+    '≠': r'\neq ',
+    '≈': r'\approx ',
+    '∞': r'\infty ',
+    '→': r'\to ',
+    '∑': r'\sum ',
+    '∫': r'\int ',
+    '∏': r'\prod ',
+    '∮': r'\oint ',
+    '∂': r'\partial ',
+})
+
+_OMML_NARY_MAP = {
+    '∑': r'\sum',
+    '∏': r'\prod',
+    '∐': r'\coprod',
+    '∫': r'\int',
+    '∬': r'\iint',
+    '∭': r'\iiint',
+    '∮': r'\oint',
+    '⋃': r'\bigcup',
+    '⋂': r'\bigcap',
+}
+
+_OMML_KATEX_FUNCS = {
+    'sin', 'cos', 'tan', 'cot', 'sec', 'csc',
+    'arcsin', 'arccos', 'arctan', 'sinh', 'cosh', 'tanh',
+    'ln', 'log', 'lg', 'exp', 'lim', 'max', 'min', 'sup', 'inf', 'det', 'gcd', 'dim',
+}
+
+_OMML_ACC_MAP = {
+    '\u20d7': r'\vec',
+    '→': r'\vec',
+    '^': r'\hat',
+    '\u0302': r'\hat',
+    '\u0304': r'\bar',
+    '¯': r'\bar',
+    '~': r'\tilde',
+    '\u0303': r'\tilde',
+    '\u0307': r'\dot',
+    '.': r'\dot',
+}
+
+
+def _escape_omml_delim(delim):
+    if not delim:
+        return '.'
+    if delim in ('{', '}'):
+        return '\\' + delim
+    if delim == '⟨':
+        return r'\langle '
+    if delim == '⟩':
+        return r'\rangle '
+    return delim
+
+
+def _omml_child_latex(parent, name):
+    child = parent.find(f'm:{name}', _DOCX_NS)
+    return _omml_to_latex(child) if child is not None else ''
+
+
+def _omml_to_latex(element):
+    if element is None:
+        return ''
+    tag = _m_tag(element)
+    if tag.endswith('Pr') or tag == 'ctrlPr':
+        return ''
+    if tag == 'r':
+        parts = []
+        for child in element:
+            ctag = _m_tag(child)
+            if ctag == 't' and child.text:
+                parts.append(child.text.translate(_OMML_UNICODE_MAP))
+            elif child.tag == f'{{{_W_NS}}}t' and child.text:
+                parts.append(child.text.translate(_OMML_UNICODE_MAP))
+        return ''.join(parts)
+    if tag == 'f':
+        fpr = element.find('m:fPr', _DOCX_NS)
+        ftype = _m_attr(fpr.find('m:type', _DOCX_NS) if fpr is not None else None, 'val')
+        num = _omml_child_latex(element, 'num')
+        den = _omml_child_latex(element, 'den')
+        if ftype == 'lin':
+            return f'({num})/({den})'
+        return rf'\frac{{{num}}}{{{den}}}'
+    if tag == 'rad':
+        rpr = element.find('m:radPr', _DOCX_NS)
+        deg_hide = _m_attr(rpr.find('m:degHide', _DOCX_NS) if rpr is not None else None, 'val')
+        base = _omml_child_latex(element, 'e')
+        deg = _omml_child_latex(element, 'deg').strip()
+        if deg and deg_hide not in ('1', 'true', 'on'):
+            return rf'\sqrt[{deg}]{{{base}}}'
+        return rf'\sqrt{{{base}}}'
+    if tag == 'sSup':
+        return f'{{{_omml_child_latex(element, "e")}}}^{{{_omml_child_latex(element, "sup")}}}'
+    if tag == 'sSub':
+        return f'{{{_omml_child_latex(element, "e")}}}_{{{_omml_child_latex(element, "sub")}}}'
+    if tag == 'sSubSup':
+        return f'{{{_omml_child_latex(element, "e")}}}_{{{_omml_child_latex(element, "sub")}}}^{{{_omml_child_latex(element, "sup")}}}'
+    if tag == 'sPre':
+        return f'{{}}_{{{_omml_child_latex(element, "sub")}}}^{{{_omml_child_latex(element, "sup")}}}{{{_omml_child_latex(element, "e")}}}'
+    if tag == 'd':
+        dpr = element.find('m:dPr', _DOCX_NS)
+        beg = _m_attr(dpr.find('m:begChr', _DOCX_NS) if dpr is not None else None, 'val', '(')
+        end = _m_attr(dpr.find('m:endChr', _DOCX_NS) if dpr is not None else None, 'val', ')')
+        sep = _m_attr(dpr.find('m:sepChr', _DOCX_NS) if dpr is not None else None, 'val', ',')
+        items = [_omml_to_latex(child) for child in element.findall('m:e', _DOCX_NS)]
+        return rf'\left{_escape_omml_delim(beg)}{sep.join(items)}\right{_escape_omml_delim(end)}'
+    if tag == 'nary':
+        npr = element.find('m:naryPr', _DOCX_NS)
+        chr_val = _m_attr(npr.find('m:chr', _DOCX_NS) if npr is not None else None, 'val', '∫')
+        op = _OMML_NARY_MAP.get(chr_val, r'\int')
+        sub = _omml_child_latex(element, 'sub').strip()
+        sup = _omml_child_latex(element, 'sup').strip()
+        base = _omml_child_latex(element, 'e')
+        res = op
+        if sub:
+            res += f'_{{{sub}}}'
+        if sup:
+            res += f'^{{{sup}}}'
+        return f'{res} {base}'.strip()
+    if tag == 'func':
+        fname = _omml_child_latex(element, 'fName').strip()
+        base = _omml_child_latex(element, 'e')
+        op = rf'\{fname}' if fname in _OMML_KATEX_FUNCS else rf'\operatorname{{{fname or "f"}}}'
+        return f'{op} {base}'.strip()
+    if tag == 'limLow':
+        return rf'\underset{{{_omml_child_latex(element, "lim")}}}{{{_omml_child_latex(element, "e")}}}'
+    if tag == 'limUpp':
+        return rf'\overset{{{_omml_child_latex(element, "lim")}}}{{{_omml_child_latex(element, "e")}}}'
+    if tag == 'acc':
+        apr = element.find('m:accPr', _DOCX_NS)
+        chr_val = _m_attr(apr.find('m:chr', _DOCX_NS) if apr is not None else None, 'val', '^')
+        cmd = _OMML_ACC_MAP.get(chr_val, r'\hat')
+        return rf'{cmd}{{{_omml_child_latex(element, "e")}}}'
+    if tag == 'bar':
+        bpr = element.find('m:barPr', _DOCX_NS)
+        pos = _m_attr(bpr.find('m:pos', _DOCX_NS) if bpr is not None else None, 'val', 'top')
+        cmd = r'\underline' if pos == 'bot' else r'\overline'
+        return rf'{cmd}{{{_omml_child_latex(element, "e")}}}'
+    if tag == 'm':
+        rows = [
+            ' & '.join(_omml_to_latex(cell) for cell in row.findall('m:e', _DOCX_NS))
+            for row in element.findall('m:mr', _DOCX_NS)
+        ]
+        return r'\begin{matrix}' + r' \\ '.join(rows) + r'\end{matrix}'
+    if tag == 'eqArr':
+        rows = [_omml_to_latex(cell) for cell in element.findall('m:e', _DOCX_NS)]
+        return r'\begin{aligned}' + r' \\ '.join(rows) + r'\end{aligned}'
+    if tag == 'oMathPara':
+        children_tex = [_omml_to_latex(child) for child in element if not _m_tag(child).endswith('Pr')]
+        non_empty = [item for item in children_tex if item.strip()]
+        if len(non_empty) > 1:
+            return r' \\ '.join(non_empty)
+        return ''.join(non_empty)
+    return ''.join(_omml_to_latex(child) for child in element)
 
 
 def _bool_prop(rpr, tag_name):
@@ -648,6 +827,19 @@ class _DocxParser:
                 sdt_content = child.find('w:sdtContent', _DOCX_NS)
                 if sdt_content is not None:
                     self._collect_inline(sdt_content, segments, current_runs, href=href)
+            elif child.tag == f'{{{_M_NS}}}oMathPara':
+                tex = _omml_to_latex(child).strip()
+                if tex:
+                    self.char_count += len(tex)
+                    if current_runs:
+                        segments.append(('runs', list(current_runs)))
+                        current_runs.clear()
+                    segments.append(('math_block', tex))
+            elif child.tag == f'{{{_M_NS}}}oMath':
+                tex = _omml_to_latex(child).strip()
+                if tex:
+                    self.char_count += len(tex)
+                    current_runs.append({'math': tex})
             elif tag == 'r':
                 props = self._run_props(child, href)
                 for node in child:
@@ -717,27 +909,33 @@ class _DocxParser:
             if seg_type == 'page_break':
                 blocks.append({'type': 'page_break'})
                 continue
+            if seg_type == 'math_block':
+                blocks.append({'type': 'math', 'tex': seg_val})
+                continue
             runs = seg_val
             image_runs = [item['image'] for item in runs if 'image' in item]
+            math_runs = [item['math'] for item in runs if 'math' in item]
             has_text = any(item.get('text', '').strip() for item in runs if 'text' in item)
-            if len(image_runs) == 1 and not has_text and not any(item.get('br') for item in runs):
+            if len(image_runs) == 1 and not has_text and not math_runs and not any(item.get('br') for item in runs):
                 img = dict(image_runs[0])
                 block = {'type': 'image', 'mime': img['mime'], 'data': img['data']}
                 if 'alt' in img:
                     block['alt'] = img['alt']
                 blocks.append(block)
-            elif heading_level is not None and (has_text or image_runs):
+            elif heading_level is not None and (has_text or image_runs or math_runs):
                 block = {'type': 'heading', 'level': heading_level, 'runs': runs}
                 if align and align != 'left':
                     block['align'] = align
                 blocks.append(block)
-            elif list_info is not None and (has_text or image_runs):
+            elif list_info is not None and (has_text or image_runs or math_runs):
                 blocks.append({
                     'type': 'list_item',
                     'ordered': list_info['ordered'],
                     'level': list_info['level'],
                     'runs': runs,
                 })
+            elif len(math_runs) == 1 and not has_text and not image_runs and not any(item.get('br') for item in runs):
+                blocks.append({'type': 'math', 'tex': math_runs[0]})
             else:
                 block = {'type': 'paragraph', 'runs': runs}
                 if align and align != 'left':
@@ -854,6 +1052,11 @@ class _DocxParser:
                     self._emit_merged_block(out_blocks, blk)
             elif tag == 'tbl':
                 out_blocks.append(self._parse_table(child))
+            elif child.tag in (f'{{{_M_NS}}}oMathPara', f'{{{_M_NS}}}oMath'):
+                tex = _omml_to_latex(child).strip()
+                if tex:
+                    self.char_count += len(tex)
+                    self._emit_merged_block(out_blocks, {'type': 'math', 'tex': tex})
 
     def _parse_container_blocks(self, container):
         blocks = []
@@ -883,6 +1086,8 @@ def _runs_plain_text(runs):
     for run in runs:
         if 'text' in run:
             parts.append(run['text'])
+        elif 'math' in run:
+            parts.append(run['math'])
         elif run.get('br'):
             parts.append('\n')
     return ''.join(parts)
@@ -896,6 +1101,9 @@ def docx_plain_text(doc):
             text = _runs_plain_text(block.get('runs', [])).strip()
             if text:
                 lines.append(text)
+        elif btype == 'math':
+            if block.get('tex'):
+                lines.append(block['tex'])
         elif btype == 'list':
             for item in block.get('items', []):
                 text = _runs_plain_text(item.get('runs', [])).strip()

@@ -20,6 +20,7 @@ import { Textarea } from '@/components/ui/input';
 import { SelectField } from '@/components/ui/select';
 import { Badge, Notice, Spinner } from '@/components/ui/surface';
 import { SegmentedControl } from '@/components/ui/tabs';
+import { MathFormula, buildMathComponents, extractMarkdownMath, hydrateMathChildren } from './MathFormula';
 
 const INSTANT_TRANSITION = { duration: 0.01 };
 
@@ -71,12 +72,6 @@ function clearStuckBodyPointerLock() {
       document.body.style.pointerEvents = '';
     }
   }
-}
-
-function isSafeHref(href) {
-  if (!href || typeof href !== 'string') return false;
-  const trimmed = href.trim();
-  return /^(https?:|mailto:|#)/i.test(trimmed);
 }
 
 function splitPipeRow(line) {
@@ -205,7 +200,7 @@ function extractTaskCheckbox(children) {
     return { checked: firstDirect.checked, content: rest };
   }
 
-  if (isValidElement(arr[0]) && arr[0].type === 'p') {
+  if (isValidElement(arr[0]) && (arr[0].type === 'p' || typeof arr[0].type === 'function')) {
     const pChildren = Children.toArray(arr[0].props.children);
     const firstNested = matchText(pChildren[0]);
     if (firstNested) {
@@ -218,45 +213,33 @@ function extractTaskCheckbox(children) {
   return null;
 }
 
-const inlineComponents = {
-  p: ({ children }) => <>{children}</>,
-  a: ({ href, children }) => (
-    isSafeHref(href)
-      ? <a href={href} target="_blank" rel="noreferrer">{children}</a>
-      : <span>{children}</span>
-  ),
-  img: ({ src, alt }) => (
-    isSafeHref(src)
-      ? <a href={src} target="_blank" rel="noreferrer">{alt || 'Открыть изображение'}</a>
-      : <span>{alt || 'Изображение'}</span>
-  ),
-};
-
-const mdComponents = {
-  a: inlineComponents.a,
-  img: inlineComponents.img,
-  li: ({ children }) => {
-    const task = extractTaskCheckbox(children);
-    if (!task) return <li>{children}</li>;
-    return (
-      <li className="glance-task-item">
-        <span aria-hidden="true" className={task.checked ? 'glance-task-box is-checked' : 'glance-task-box'}>
-          {task.checked ? '✓' : ''}
-        </span>
-        <span className="min-w-0 flex-1">{task.content}</span>
-      </li>
-    );
-  },
-};
-
 function MarkdownDocument({ content }) {
-  const segments = splitMarkdownSegments(content);
+  const { text: mathReadyText, formulas } = extractMarkdownMath(content);
+  const segments = splitMarkdownSegments(mathReadyText);
+  const cellComponents = buildMathComponents(formulas, {
+    p: ({ children }) => <>{hydrateMathChildren(children, formulas)}</>,
+  });
+  const blockComponents = buildMathComponents(formulas, {
+    li: ({ children }) => {
+      const task = extractTaskCheckbox(children);
+      if (!task) return <li>{hydrateMathChildren(children, formulas)}</li>;
+      return (
+        <li className="glance-task-item">
+          <span aria-hidden="true" className={task.checked ? 'glance-task-box is-checked' : 'glance-task-box'}>
+            {task.checked ? '✓' : ''}
+          </span>
+          <span className="min-w-0 flex-1">{hydrateMathChildren(task.content, formulas)}</span>
+        </li>
+      );
+    },
+  });
+
   return (
     <article className="glance-markdown">
       {segments.map((seg, idx) => {
         if (seg.type === 'md') {
           return (
-            <Markdown key={idx} skipHtml components={mdComponents}>
+            <Markdown key={idx} skipHtml components={blockComponents}>
               {seg.text}
             </Markdown>
           );
@@ -268,7 +251,7 @@ function MarkdownDocument({ content }) {
                 <tr>
                   {seg.headers.map((header, colIdx) => (
                     <th key={colIdx} style={seg.alignments[colIdx] ? { textAlign: seg.alignments[colIdx] } : undefined}>
-                      <Markdown skipHtml components={inlineComponents}>{header}</Markdown>
+                      <Markdown skipHtml components={cellComponents}>{header}</Markdown>
                     </th>
                   ))}
                 </tr>
@@ -279,7 +262,7 @@ function MarkdownDocument({ content }) {
                     <tr key={rowIdx}>
                       {row.map((cell, colIdx) => (
                         <td key={colIdx} style={seg.alignments[colIdx] ? { textAlign: seg.alignments[colIdx] } : undefined}>
-                          <Markdown skipHtml components={inlineComponents}>{cell}</Markdown>
+                          <Markdown skipHtml components={cellComponents}>{cell}</Markdown>
                         </td>
                       ))}
                     </tr>
@@ -297,6 +280,7 @@ function MarkdownDocument({ content }) {
 function DocxRuns({ runs = [] }) {
   return runs.map((run, idx) => {
     if (run.br) return <br key={idx} />;
+    if (run.math) return <MathFormula key={idx} tex={run.math} />;
     if (run.image) {
       return (
         <img
@@ -407,6 +391,9 @@ function DocxBlocks({ blocks = [], compact = false }) {
           <img src={`data:${block.mime};base64,${block.data}`} alt={block.alt || ''} />
         </figure>
       );
+    }
+    if (block.type === 'math') {
+      return <MathFormula key={idx} tex={block.tex} display />;
     }
     if (block.type === 'page_break') {
       return (
