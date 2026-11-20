@@ -517,8 +517,6 @@ export default function TaskAutomation({ task, features = {} }) {
 
           <TaskSubtasks
             task={task}
-            amebaSteps={assessment?.plan?.steps ?? []}
-            amebaEnabled={features.ameba !== false}
             monocleEnabled={monocleEnabled}
             onChanged={invalidateAll}
           />

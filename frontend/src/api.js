@@ -90,8 +90,4 @@ export function reorderSubtasks({ taskId, subtaskIds }) {
   });
 }
 
-export function importAmebaSubtasks({ taskId }) {
-  return request(`/tasks/${taskId}/subtasks/from-ameba`, { method: 'POST' });
-}
-
 export const agentName = (name) => ({ Lucheba: 'Monocle', Codex: 'Arrodes', '\u0410\u0440\u0440\u043e\u0434\u0435\u0441': 'Arrodes' })[name] ?? name;

@@ -679,31 +679,16 @@ async def rank_all(force=False, task_id=0):
                 adj['text'] = ''
                 save_adjustments(adj, session=session)
                 session.flush()
-            plans_by_id = {item['id']: item.get('plan') for item in result.get('timeline', []) if item.get('plan')}
-            subtasks_changed = False
+            saved = session.get(TaskRanking, 1) or TaskRanking()
+            final_signature = task_state(session)[0] if (consumed_feedback or task_state(session)[0] != signature) else signature
+            saved.snapshot = final_signature
+            saved.result = json.dumps(result, ensure_ascii=False)
+            session.add(saved)
             for tid in ids:
                 task = session.get(Task, tid)
                 task.ai_details = json.dumps({'version': 42, 'status': 'ranked'})
                 task.ai_scored_at = datetime.now(timezone.utc)
                 session.add(task)
-                plan = plans_by_id.get(tid) or {}
-                if plan.get('steps'):
-                    step_items = [
-                        {
-                            'title': step.get('title', ''),
-                            'estimated_minutes': subtasks_service.ameba_step_minutes(step),
-                        }
-                        for step in plan['steps']
-                    ]
-                    if subtasks_service.sync_agent_subtasks(session, task, step_items, source='ameba'):
-                        subtasks_changed = True
-            if subtasks_changed:
-                session.flush()
-            saved = session.get(TaskRanking, 1) or TaskRanking()
-            final_signature = task_state(session)[0] if (consumed_feedback or subtasks_changed or task_state(session)[0] != signature) else signature
-            saved.snapshot = final_signature
-            saved.result = json.dumps(result, ensure_ascii=False)
-            session.add(saved)
             if result.get('plan_run_id'):
                 save_ameba_plan(result['plan_run_id'], result, result['calendar_revision'], session)
             elif not ids:

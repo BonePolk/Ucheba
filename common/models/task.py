@@ -8,7 +8,7 @@ from common.dates import normalize_utc
 
 Priority = Literal["low", "medium", "high"]
 TaskStatus = Literal["todo", "in_progress", "review", "done"]
-SubtaskSource = Literal["user", "monocle", "ameba"]
+SubtaskSource = Literal["user", "monocle"]
 
 
 class TaskCreate(SQLModel):

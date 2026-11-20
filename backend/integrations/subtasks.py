@@ -48,14 +48,6 @@ def normalize_minutes(value) -> int | None:
     return None
 
 
-def ameba_step_minutes(step: dict) -> int | None:
-    low = max(0, int(step.get('min_minutes') or 0))
-    high = max(low, int(step.get('max_minutes') or 0))
-    if high <= 0:
-        return None
-    return max(5, int(round((0.35 * low + 0.65 * high) / 5) * 5))
-
-
 def clean_items(items: list[dict], max_items: int = 15) -> list[dict]:
     cleaned: list[dict] = []
     seen: set[str] = set()
@@ -89,22 +81,18 @@ def sync_agent_subtasks(
     session: Session,
     task: Task,
     items: list[dict],
-    source: Literal['monocle', 'ameba'],
+    source: Literal['monocle'] = 'monocle',
 ) -> bool:
     cleaned = clean_items(items)
     if not cleaned:
         return False
-    if source == 'ameba' and len(cleaned) < 2:
-        return False
-    if source == 'monocle' and len(cleaned) == 1 and cleaned[0]['title'].casefold() == task.title.strip().casefold():
+    if len(cleaned) == 1 and cleaned[0]['title'].casefold() == task.title.strip().casefold():
         return False
     if task.subtasks_locked:
         return False
 
     existing = list_for_task(session, task.id)
     if any(row.source == 'user' or row.user_edited or row.done for row in existing):
-        return False
-    if source == 'ameba' and any(row.source == 'monocle' for row in existing):
         return False
 
     current_shape = [(row.title, row.estimated_minutes, row.source) for row in existing]

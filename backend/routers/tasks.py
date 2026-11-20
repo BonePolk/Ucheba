@@ -13,7 +13,7 @@ from common.settings import read_config
 from common.accounts import features
 from integrations import ameba as ameba_order, subtasks as subtasks_service
 from integrations.context import context_status
-from common.models.integration import TaskAction, TaskContext, TaskRanking
+from common.models.integration import TaskAction, TaskContext
 from common.models.task import (
     SubtaskCreate,
     SubtaskReorder,
@@ -255,74 +255,6 @@ def reorder_subtasks(task_id: int, data: SubtaskReorder):
         for row in ordered:
             session.refresh(row)
         return [TaskSubtaskRead.model_validate(row) for row in ordered]
-
-
-@router.post("/{task_id}/subtasks/from-ameba", response_model=list[TaskSubtaskRead])
-def import_ameba_subtasks(task_id: int):
-    with Session(get_engine()) as session:
-        task = _require_active_task(session, task_id)
-        saved = session.get(TaskRanking, 1)
-        ranking = json.loads(saved.result) if saved and saved.result else {}
-        plan = next(
-            (item.get('plan') for item in ranking.get('timeline', []) if item.get('id') == task_id and item.get('plan')),
-            None,
-        )
-        if not plan:
-            plan = next(
-                (item.get('plan') for item in ranking.get('reasons', []) if item.get('task_id') == task_id and item.get('plan')),
-                None,
-            )
-        steps = (plan or {}).get('steps') or []
-        step_items = subtasks_service.clean_items([
-            {
-                'title': step.get('title', ''),
-                'estimated_minutes': subtasks_service.ameba_step_minutes(step),
-            }
-            for step in steps
-        ])
-        if not step_items:
-            raise HTTPException(404, "У Ameba пока нет этапов для этой задачи")
-
-        existing = subtasks_service.list_for_task(session, task_id)
-        now = datetime.now(timezone.utc)
-        if not existing:
-            for idx, item in enumerate(step_items):
-                session.add(TaskSubtask(
-                    task_id=task_id,
-                    title=item['title'],
-                    done=False,
-                    estimated_minutes=item['estimated_minutes'],
-                    position=idx,
-                    source='ameba',
-                    user_edited=False,
-                    created_at=now,
-                    updated_at=now,
-                ))
-            task.subtasks_locked = False
-        else:
-            seen = {row.title.strip().casefold() for row in existing}
-            pos = max((row.position for row in existing), default=-1) + 1
-            for item in step_items:
-                key = item['title'].casefold()
-                if key in seen:
-                    continue
-                seen.add(key)
-                session.add(TaskSubtask(
-                    task_id=task_id,
-                    title=item['title'],
-                    done=False,
-                    estimated_minutes=item['estimated_minutes'],
-                    position=pos,
-                    source='ameba',
-                    user_edited=False,
-                    created_at=now,
-                    updated_at=now,
-                ))
-                pos += 1
-            task.subtasks_locked = True
-        session.add(task)
-        session.commit()
-        return [TaskSubtaskRead.model_validate(row) for row in subtasks_service.list_for_task(session, task_id)]
 
 
 @router.patch("/{task_id}/subtasks/{subtask_id}", response_model=TaskSubtaskRead)

@@ -4,7 +4,6 @@ import { Check, ChevronDown, ChevronUp, Pencil, Plus, Trash2, X } from 'lucide-r
 import {
   createSubtask,
   deleteSubtask,
-  importAmebaSubtasks,
   reorderSubtasks,
   saveTask,
   updateSubtask,
@@ -24,8 +23,6 @@ function parseEstimatedMinutes(raw) {
 
 export default function TaskSubtasks({
   task,
-  amebaSteps = [],
-  amebaEnabled = false,
   monocleEnabled = false,
   onChanged,
 }) {
@@ -75,14 +72,7 @@ export default function TaskSubtasks({
     },
   });
 
-  const importAmeba = useMutation({
-    mutationFn: () => importAmebaSubtasks({ taskId: task.id }),
-    onSuccess: async () => {
-      await onChanged?.();
-    },
-  });
-
-  const unlockAgents = useMutation({
+  const unlockMonocle = useMutation({
     mutationFn: () => saveTask({ id: task.id, data: { subtasks_locked: false } }),
     onSuccess: async () => {
       await onChanged?.();
@@ -93,15 +83,13 @@ export default function TaskSubtasks({
     || update.isPending
     || remove.isPending
     || reorder.isPending
-    || importAmeba.isPending
-    || unlockAgents.isPending;
+    || unlockMonocle.isPending;
 
   const error = create.error
     || update.error
     || remove.error
     || reorder.error
-    || importAmeba.error
-    || unlockAgents.error;
+    || unlockMonocle.error;
 
   function startEdit(item) {
     if (task.archived) return;
@@ -136,26 +124,15 @@ export default function TaskSubtasks({
       {remainingMinutes > 0 && (
         <span className="text-[11px] text-[#929292] tabular-nums">ост. ~{remainingMinutes} мин</span>
       )}
-      {total === 0 && !task.archived && amebaSteps.length > 0 && (
-        <Button
-          size="xs"
-          variant="outline"
-          loading={importAmeba.isPending}
-          disabled={busy}
-          onClick={() => importAmeba.mutate()}
-        >
-          Из этапов Ameba
-        </Button>
-      )}
-      {total === 0 && !task.archived && task.subtasks_locked && (amebaEnabled || monocleEnabled) && (
+      {total === 0 && !task.archived && task.subtasks_locked && monocleEnabled && (
         <Button
           size="xs"
           variant="ghost"
-          loading={unlockAgents.isPending}
+          loading={unlockMonocle.isPending}
           disabled={busy}
-          onClick={() => unlockAgents.mutate()}
+          onClick={() => unlockMonocle.mutate()}
         >
-          Разрешить агентам
+          Разрешить Monocle
         </Button>
       )}
     </div>
@@ -177,7 +154,7 @@ export default function TaskSubtasks({
         <div className="flex flex-col divide-y divide-[#1B1B1B] border border-[#242424] bg-[#0E0E0E]">
           {subtasks.map((item, index) => {
             const isEditing = editingId === item.id;
-            const showSource = item.source !== 'user' && !item.user_edited;
+            const showSource = item.source === 'monocle' && !item.user_edited;
 
             if (isEditing) {
               return (
@@ -271,7 +248,7 @@ export default function TaskSubtasks({
                   )}
                   {showSource && (
                     <Badge variant="outline" className="h-4 px-1 text-[10px]">
-                      {item.source === 'monocle' ? 'Monocle' : 'Ameba'}
+                      Monocle
                     </Badge>
                   )}
                 </div>
@@ -324,9 +301,9 @@ export default function TaskSubtasks({
       ) : (
         <div className="text-[12px] text-[#7D7D7D]">
           {task.subtasks_locked
-            ? 'Автоподзадачи отключены после ручных правок.'
-            : monocleEnabled || amebaEnabled
-              ? 'Подзадачи пока не созданы — Monocle и Ameba могут добавить их автоматически для многошаговых задач, либо добавьте вручную.'
+            ? 'Автоподзадачи Monocle отключены после ручных правок.'
+            : monocleEnabled
+              ? 'Подзадачи пока не созданы — Monocle может добавить их автоматически для многошаговых задач, либо добавьте вручную.'
               : 'Подзадач пока нет.'}
         </div>
       )}
