@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ArrowUpRight, Bot, CalendarPlus, ExternalLink, MoreHorizontal, Pencil, Trash2 } from 'lucide-react';
+import { ArrowUpRight, Bot, CalendarPlus, ExternalLink, ListChecks, MoreHorizontal, Pencil, Trash2 } from 'lucide-react';
 import dayjs from 'dayjs';
 import { priorities, statuses } from './TaskForm';
 import { DeadlineRisk } from './RankingAssessment';
@@ -44,6 +44,8 @@ export default function TaskCard({
   const completedMin = task.completed_work_minutes || 0;
   const remainingMin = plan?.planned_work_minutes ?? plan?.work_max_minutes ?? 0;
   const totalMin = completedMin + remainingMin;
+  const subtasks = task.subtasks ?? [];
+  const subDone = subtasks.filter((item) => item.done).length;
 
   return (
     <motion.article
@@ -80,6 +82,12 @@ export default function TaskCard({
           {task.category && (
             <Badge variant="outline" className="max-w-[140px] truncate">
               {task.category}
+            </Badge>
+          )}
+          {subtasks.length > 0 && (
+            <Badge variant={subDone === subtasks.length ? 'success' : 'outline'} className="tabular-nums gap-1">
+              <ListChecks className="h-3 w-3" />
+              {subDone}/{subtasks.length}
             </Badge>
           )}
         </div>

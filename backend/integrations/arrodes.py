@@ -4,7 +4,7 @@ import json
 import logging
 from common.identity import user_id
 from common.models.integration import TaskContext
-from integrations import scheduler
+from integrations import scheduler, subtasks as subtasks_service
 
 from fastapi import HTTPException
 from sqlmodel import Session, select
@@ -147,11 +147,15 @@ async def close():
 
 def task_data(session, task):
     context = session.get(TaskContext, task.id)
-    return task.model_dump(mode='json') | {'context': {
-        'subject': context.subject, 'owner_notes': context.owner_notes, 'status': context.status,
-        'questions': json.loads(context.questions), 'full_context': json.loads(context.usage).get('full_markdown'),
-        'sources': json.loads(context.usage).get('sources', []),
-    } if context else None}
+    subtasks = subtasks_service.serialize_for_agent(subtasks_service.list_for_task(session, task.id))
+    return task.model_dump(mode='json') | {
+        'subtasks': subtasks,
+        'context': {
+            'subject': context.subject, 'owner_notes': context.owner_notes, 'status': context.status,
+            'questions': json.loads(context.questions), 'full_context': json.loads(context.usage).get('full_markdown'),
+            'sources': json.loads(context.usage).get('sources', []),
+        } if context else None,
+    }
 
 
 def read_tasks(task_id=None, query='', status='', offset=0):

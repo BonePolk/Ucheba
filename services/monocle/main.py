@@ -352,7 +352,7 @@ async def provider_error(request: Request, exc):
         detail = 'Monocle: не удалось подключиться к шлюзу. Проверьте endpoint провайдера и доступ к нему из контейнера.'
     elif isinstance(exc, ValidationError):
         # Не выводим str(exc): Pydantic включает туда содержимое ответа модели.
-        known = ('status', 'summary', 'time_estimate', 'effort', 'impact', 'full_markdown', 'task_update', 'questions')
+        known = ('status', 'summary', 'time_estimate', 'effort', 'impact', 'full_markdown', 'task_update', 'subtasks', 'questions')
         errors = []
         for error in exc.errors(include_input=False, include_context=False, include_url=False)[:5]:
             field = next((part for part in error['loc'] if part in known), 'JSON')
@@ -371,6 +371,12 @@ async def provider_error(request: Request, exc):
     return JSONResponse(status_code=502, content={'detail': detail})
 
 
+class SuggestedSubtask(BaseModel):
+    model_config = {'extra': 'forbid'}
+    title: str = Field(min_length=1, max_length=300)
+    estimated_minutes: int | None = Field(ge=0, le=10080)
+
+
 class ContextResult(BaseModel):
     model_config = {'extra': 'forbid'}
     status: Literal['ready', 'needs_context']
@@ -380,6 +386,7 @@ class ContextResult(BaseModel):
     impact: str = Field(min_length=1, max_length=400)
     full_markdown: str = Field(min_length=1, max_length=24000)
     task_update: ContextTaskUpdate
+    subtasks: list[SuggestedSubtask] = Field(max_length=15)
     questions: list[str]
 
 
@@ -389,7 +396,7 @@ RETRY_JSON_PROMPT = (
     '"questions":[],"time_estimate":"примерная длительность или недостаточно данных",'
     '"effort":"оценка нагрузки или недостаточно данных",'
     '"impact":"ожидаемый эффект или недостаточно данных",'
-    '"full_markdown":"полная версия задачи в Markdown","task_update":{"title":null}}. '
+    '"full_markdown":"полная версия задачи в Markdown","task_update":{"title":null},"subtasks":[]}. '
     'Допустимый status: ready или needs_context. Для needs_context обязательно заполни questions.'
 )
 
@@ -435,6 +442,29 @@ def read_context(text: str) -> ContextResult:
         if isinstance(title, str):
             title = title.strip()[:300] or None
         data['task_update'] = {'title': title}
+    raw_subtasks = data.get('subtasks')
+    if raw_subtasks is None:
+        data['subtasks'] = []
+    elif isinstance(raw_subtasks, list):
+        normalized_subtasks = []
+        for item in raw_subtasks:
+            if isinstance(item, str):
+                title = item.strip()[:300]
+                if title:
+                    normalized_subtasks.append({'title': title, 'estimated_minutes': None})
+            elif isinstance(item, dict):
+                title = item.get('title').strip()[:300] if isinstance(item.get('title'), str) else ''
+                if not title:
+                    continue
+                est = item.get('estimated_minutes')
+                if isinstance(est, (int, float)) and not isinstance(est, bool):
+                    est = max(0, min(10080, int(round(est))))
+                else:
+                    est = None
+                normalized_subtasks.append({'title': title, 'estimated_minutes': est})
+            if len(normalized_subtasks) >= 15:
+                break
+        data['subtasks'] = normalized_subtasks
     if data.get('questions') is None:
         data['questions'] = []
     elif isinstance(data.get('questions'), list):
@@ -450,7 +480,7 @@ MONOCLE_INSTRUCTIONS = QUESTION_INSTRUCTION + ISSUE_INSTRUCTION + MEMORY_INSTRUC
     'owner_notes — единое поле владельца: дополнительные поручения по сбору контекста, сведения и ответы на твои вопросы. Учитывай всё вместе с задачей. '
     'Ты Monocle, агент сбора минимально достаточного контекста для последующей общей сортировки задач. Отвечай по-русски. '
     'Твоя единственная цель — понять, что влияет на порядок выполнения: смысл задачи, срок, '
-    'последствия откладывания, обязательства и зависимости. Не выполняй задачу и не готовь план её решения. '
+    'последствия откладывания, обязательства и зависимости. Не выполняй задачу за владельца. '
     'Обычно названия, описания и уже известных фактов достаточно: тогда сразу status=ready и questions=[]. '
     'Отсутствие срока, предмета, точного объёма, критериев сдачи или технических деталей само по себе не мешает ready. '
     'Не требуй цель, желаемую оценку, полный текст лабораторной, формат отчёта, список шагов или ответы на задание. '
@@ -483,6 +513,11 @@ MONOCLE_INSTRUCTIONS = QUESTION_INSTRUCTION + ISSUE_INSTRUCTION + MEMORY_INSTRUC
     'Полная версия будет показана при открытии задачи и передана на сортировку вместе с исходными полями. '
     'В task_update только title: краткое уточнение названия до 300 символов, '
     'и только если allow_title_rewrite=true. Иначе title=null. '
+    'subtasks — список редактируемых подзадач для владельца ({title до 300 символов, estimated_minutes — целые минуты или null}). '
+    'Если по описанию, вложениям, ЛК или заметкам задача естественно распадается на 2–8 конкретных самостоятельных шагов, перечисли их в subtasks. '
+    'Для простых одношаговых задач или при нехватке конкретики верни subtasks=[]. '
+    'Никогда не задавай вопросы (questions/ask_user) ради придумывания подзадач. '
+    'Если во входных данных задачи уже переданы subtasks (особенно при subtasks_locked=true), учитывай их (в том числе done=true) в контексте и не требуй их переписывания. '
     'Ты агент со своей папкой памяти пользователя. При необходимости используй list_memory и read_memory. '
     'Для поиска и чтения любых других задач владельца (включая архивные и ещё не проверенные) используй list_tasks и read_task. '
     'Владелец может создавать и редактировать личные файлы: ищи их через list_user_files и read_user_file. '
@@ -530,7 +565,7 @@ MONOCLE_INSTRUCTIONS = QUESTION_INSTRUCTION + ISSUE_INSTRUCTION + MEMORY_INSTRUC
     'Не меняй данные ЛК, не удаляй их, не оплачивай, не сдавай работы и не отправляй сообщения. '
     'При подтверждённой CAPTCHA/2FA используй browser_wait_for_user с понятной просьбой в message. '
     'Ответ browser_wait_for_user уже содержит актуальную страницу и elements; продолжи с них. '
-    'Итог — только JSON с полями status, summary, time_estimate, effort, impact, full_markdown, questions и task_update. Не оборачивай JSON в Markdown; Markdown используй только внутри full_markdown.'
+    'Итог — только JSON с полями status, summary, time_estimate, effort, impact, full_markdown, questions, task_update и subtasks. Не оборачивай JSON в Markdown; Markdown используй только внутри full_markdown.'
 )
 ALL_MONOCLE_TOOLS = [QUESTION_TOOL] + TOOLS + BROWSER_TOOLS + FILE_TOOLS + MEMORY_TOOLS + [NOTE_TOOL, ISSUE_TOOL]
 

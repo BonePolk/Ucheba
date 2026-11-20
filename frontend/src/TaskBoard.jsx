@@ -8,6 +8,7 @@ import {
   CalendarPlus,
   ExternalLink,
   Filter,
+  ListChecks,
   MoreHorizontal,
   Pencil,
   Plus,
@@ -187,7 +188,10 @@ export default function TaskBoard({ features = {} }) {
   const rows = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return rawRows;
-    return rawRows.filter((t) => `${t.title} ${t.description ?? ''} ${t.category ?? ''}`.toLowerCase().includes(q));
+    return rawRows.filter((t) => {
+      const subText = (t.subtasks ?? []).map((item) => item.title).join(' ');
+      return `${t.title} ${t.description ?? ''} ${t.category ?? ''} ${subText}`.toLowerCase().includes(q);
+    });
   }, [rawRows, search]);
 
   const error = tasks.error || update.error || remove.error || ranking.error || rank.error;
@@ -482,6 +486,8 @@ export default function TaskBoard({ features = {} }) {
                   }
                   const pMeta = priorityIndicator[task.priority] ?? priorityIndicator.medium;
                   const deadlineLabel = formatCompactDeadline(task.deadline);
+                  const subtasks = task.subtasks ?? [];
+                  const subDone = subtasks.filter((item) => item.done).length;
 
                   return (
                     <motion.tr
@@ -522,6 +528,12 @@ export default function TaskBoard({ features = {} }) {
                         {!archived && !done && features.ameba !== false && <DeadlineRisk reason={assessment?.deadline_risk} />}
                         {task.category && (
                           <Badge variant="outline" className="max-w-[140px] truncate">{task.category}</Badge>
+                        )}
+                        {subtasks.length > 0 && (
+                          <Badge variant={subDone === subtasks.length ? 'success' : 'outline'} className="tabular-nums gap-1">
+                            <ListChecks className="h-3 w-3" />
+                            {subDone}/{subtasks.length}
+                          </Badge>
                         )}
                         {aiState?.status === 'needs_context' && (
                           <HintTooltip label={aiState.reason}>

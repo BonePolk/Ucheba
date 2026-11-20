@@ -25,6 +25,7 @@ import ContextFiles from './ContextFiles';
 import RankingAssessment, { DeadlineRisk } from './RankingAssessment';
 import TaskForm, { priorities, statuses } from './TaskForm';
 import TaskMarkdown from './TaskMarkdown';
+import TaskSubtasks from './TaskSubtasks';
 import { Button, IconButton } from '@/components/ui/button';
 import {
   DropdownMenu,
@@ -128,7 +129,7 @@ function ContextForm({ taskId, context }) {
       )}
       {usage?.updated_fields?.length > 0 && (
         <div className="text-[12px] text-[#929292]">
-          Обновлено: {usage.updated_fields.map((name) => ({ title: 'название', description: 'описание', category: 'категория' })[name]).join(', ')}.
+          Обновлено: {usage.updated_fields.map((name) => ({ title: 'название', description: 'описание', category: 'категория', subtasks: 'подзадачи' }[name])).filter(Boolean).join(', ')}.
         </div>
       )}
       {save.data?.metrics?.status === 'needs_context' && (
@@ -513,6 +514,14 @@ export default function TaskAutomation({ task, features = {} }) {
               </div>
             )}
           </section>
+
+          <TaskSubtasks
+            task={task}
+            amebaSteps={assessment?.plan?.steps ?? []}
+            amebaEnabled={features.ameba !== false}
+            monocleEnabled={monocleEnabled}
+            onChanged={invalidateAll}
+          />
 
           {/* Ameba Assessment & Planned Periods */}
           {features.ameba !== false && assessment && (

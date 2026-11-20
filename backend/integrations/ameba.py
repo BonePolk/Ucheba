@@ -17,7 +17,7 @@ from common.models.integration import IntegrationSetting, TaskContext, TaskRanki
 from common.models.task import Task
 from common.rpc import call
 from common.settings import read_config, read_settings, report, resolve_agent_auth
-from integrations import scheduler
+from integrations import scheduler, subtasks as subtasks_service
 from integrations.context import context_status, prepare, snapshot
 
 ranking_locks = {}
@@ -184,11 +184,13 @@ def record_task_completion(session: Session, task: Task) -> None:
 
 def _collect_task_state(session):
     tasks = session.exec(select(Task).where(Task.archived == False, Task.status != 'done').order_by(Task.id)).all()
+    subtasks_map = subtasks_service.list_for_tasks(session, [task.id for task in tasks])
     ready, waiting, state = [], [], []
     for task in tasks:
         context = session.get(TaskContext, task.id)
         usage = json.loads(context.usage) if context else {}
         valid = context_status(task, context) == 'ready'
+        task_subs = subtasks_service.serialize_for_agent(subtasks_map.get(task.id, []))
         state.append({
             'task': snapshot(task),
             'id': task.id,
@@ -200,6 +202,10 @@ def _collect_task_state(session):
             } if context else None,
             'ready': valid,
             'completed_work_minutes': task.completed_work_minutes,
+            'subtasks': [
+                {'title': s['title'], 'done': s['done'], 'estimated_minutes': s['estimated_minutes']}
+                for s in task_subs
+            ],
         })
         if valid:
             ready.append({
@@ -211,6 +217,7 @@ def _collect_task_state(session):
                 'effort': usage.get('effort'), 'impact': usage.get('impact'),
                 'deadline': normalize_utc(task.deadline), 'priority': task.priority,
                 'completed_work_minutes': task.completed_work_minutes,
+                'subtasks': task_subs,
             })
         else:
             waiting.append(task.id)
@@ -228,7 +235,7 @@ def _build_signature(session, state, include_ameba_facts: bool = True) -> str:
     provider_base = read_settings('ai_provider', apply_feature=False)[0].get('base_url')
     allowed_agents = ('Владелец', 'user', 'Ameba') if include_ameba_facts else ('Владелец', 'user')
     return json.dumps({
-        'version': 41,
+        'version': 42,
         'tasks': state,
         'calendar': {'events': sorted(calendar['events'], key=lambda event: event['id']), 'timezone': calendar['timezone']},
         'facts': sorted(({'key': fact['key'], 'text': fact['text']} for fact in read_facts() if fact['agent'] in allowed_agents), key=lambda fact: fact['key']),
@@ -672,16 +679,31 @@ async def rank_all(force=False, task_id=0):
                 adj['text'] = ''
                 save_adjustments(adj, session=session)
                 session.flush()
+            plans_by_id = {item['id']: item.get('plan') for item in result.get('timeline', []) if item.get('plan')}
+            subtasks_changed = False
+            for tid in ids:
+                task = session.get(Task, tid)
+                task.ai_details = json.dumps({'version': 42, 'status': 'ranked'})
+                task.ai_scored_at = datetime.now(timezone.utc)
+                session.add(task)
+                plan = plans_by_id.get(tid) or {}
+                if plan.get('steps'):
+                    step_items = [
+                        {
+                            'title': step.get('title', ''),
+                            'estimated_minutes': subtasks_service.ameba_step_minutes(step),
+                        }
+                        for step in plan['steps']
+                    ]
+                    if subtasks_service.sync_agent_subtasks(session, task, step_items, source='ameba'):
+                        subtasks_changed = True
+            if subtasks_changed:
+                session.flush()
             saved = session.get(TaskRanking, 1) or TaskRanking()
-            final_signature = task_state(session)[0] if (consumed_feedback or task_state(session)[0] != signature) else signature
+            final_signature = task_state(session)[0] if (consumed_feedback or subtasks_changed or task_state(session)[0] != signature) else signature
             saved.snapshot = final_signature
             saved.result = json.dumps(result, ensure_ascii=False)
             session.add(saved)
-            for tid in ids:
-                task = session.get(Task, tid)
-                task.ai_details = json.dumps({'version': 41, 'status': 'ranked'})
-                task.ai_scored_at = datetime.now(timezone.utc)
-                session.add(task)
             if result.get('plan_run_id'):
                 save_ameba_plan(result['plan_run_id'], result, result['calendar_revision'], session)
             elif not ids:
@@ -715,7 +737,7 @@ async def evaluate_task(task_id):
     context = await prepare(task_id)
     original = context['task_snapshot']
     if context['status'] != 'ready':
-        metrics = {'version': 41, 'status': 'needs_context', 'reason': ' '.join(context['questions'])}
+        metrics = {'version': 42, 'status': 'needs_context', 'reason': ' '.join(context['questions'])}
         with Session(get_engine()) as session:
             task = session.get(Task, task_id)
             if not task:
@@ -730,4 +752,4 @@ async def evaluate_task(task_id):
     result = await rank_all(task_id=task_id)
     ids = result['task_ids']
     return result | {'rank': ids.index(task_id) + 1 if task_id in ids else None,
-                     'metrics': {'status': 'ranked', 'version': 41}}
+                     'metrics': {'status': 'ranked', 'version': 42}}

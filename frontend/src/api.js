@@ -65,4 +65,33 @@ export function deleteTask({ id, permanent = false }) {
   return request(`/tasks/${id}?permanent=${permanent}`, { method: 'DELETE' });
 }
 
+export function createSubtask({ taskId, data }) {
+  return request(`/tasks/${taskId}/subtasks`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export function updateSubtask({ taskId, subtaskId, data }) {
+  return request(`/tasks/${taskId}/subtasks/${subtaskId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  });
+}
+
+export function deleteSubtask({ taskId, subtaskId }) {
+  return request(`/tasks/${taskId}/subtasks/${subtaskId}`, { method: 'DELETE' });
+}
+
+export function reorderSubtasks({ taskId, subtaskIds }) {
+  return request(`/tasks/${taskId}/subtasks/reorder`, {
+    method: 'PUT',
+    body: JSON.stringify({ subtask_ids: subtaskIds }),
+  });
+}
+
+export function importAmebaSubtasks({ taskId }) {
+  return request(`/tasks/${taskId}/subtasks/from-ameba`, { method: 'POST' });
+}
+
 export const agentName = (name) => ({ Lucheba: 'Monocle', Codex: 'Arrodes', '\u0410\u0440\u0440\u043e\u0434\u0435\u0441': 'Arrodes' })[name] ?? name;

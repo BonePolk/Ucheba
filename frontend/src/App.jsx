@@ -128,7 +128,11 @@ function Login() {
 }
 
 function TaskPanel({ id, features }) {
-  const task = useQuery({ queryKey: ['tasks', id], queryFn: () => request(`/tasks/${id}`) });
+  const task = useQuery({
+    queryKey: ['tasks', id],
+    queryFn: () => request(`/tasks/${id}`),
+    refetchInterval: 15000,
+  });
   if (task.isPending) return <PageLoader label="Загрузка задачи…" />;
   if (task.error) return <Notice tone="error">{task.error.message}</Notice>;
   return <TaskAutomation key={id} task={task.data} features={features} />;

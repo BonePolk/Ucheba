@@ -11,7 +11,7 @@ from common.models.context import ContextTaskUpdate
 from common.models.task import Task
 from common.rpc import call
 from common.settings import read_config, resolve_agent_auth
-from integrations import scheduler
+from integrations import scheduler, subtasks as subtasks_service
 
 
 def snapshot(task):
@@ -130,6 +130,8 @@ async def prepare_task(task_id, force=False, review_request=""):
             return {'status': row.status, 'summary': row.summary, 'questions': json.loads(row.questions),
                     'task_snapshot': task_state}
         subject, notes = row.subject, row.owner_notes
+        current_subtasks = subtasks_service.serialize_for_agent(subtasks_service.list_for_task(session, task_id))
+        subtasks_locked = bool(task.subtasks_locked)
         memory = []
         query = select(TaskContext).where(TaskContext.task_id != task_id)
         if subject:
@@ -145,6 +147,7 @@ async def prepare_task(task_id, force=False, review_request=""):
     result = await call('monocle', '/analyze', {
         'config': config, 'api_key': api_key,
         'task_id': task_id, 'task': json.loads(task_state), 'subject': subject,
+        'subtasks': current_subtasks, 'subtasks_locked': subtasks_locked,
         'current_clock': deadline_facts(task.deadline),
         'owner_notes': notes, 'past_tasks': memory,
         'review_request': review_request,
@@ -171,6 +174,8 @@ async def prepare_task(task_id, force=False, review_request=""):
             task.updated_at = datetime.now(timezone.utc)
             task.ai_score = task.ai_details = task.ai_scored_at = None
             session.add(task)
+        if subtasks_service.sync_agent_subtasks(session, task, result.get('subtasks') or [], source='monocle'):
+            changed_fields.append('subtasks')
         result['updated_fields'] = changed_fields
         result['task_snapshot'] = snapshot(task)
         row.status = result['status']
