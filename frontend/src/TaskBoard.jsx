@@ -76,7 +76,7 @@ export default function TaskBoard({ features = {} }) {
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 1000);
+    const timer = setInterval(() => setNow(Date.now()), 30000);
     return () => clearInterval(timer);
   }, []);
 
@@ -118,7 +118,7 @@ export default function TaskBoard({ features = {} }) {
     queryKey: ['agent-queue'],
     queryFn: () => request('/integrations/queue'),
     enabled: !archived && (features.monocle !== false || features.ameba !== false),
-    refetchInterval: 1000,
+    refetchInterval: (query) => (query.state.data?.busy ? 1500 : 5000),
   });
   const livePlan = useQuery({
     queryKey: ['ameba-live-plan'],

@@ -154,6 +154,18 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    const id = requestAnimationFrame(() => {
+      if (
+        document.body.style.pointerEvents === 'none'
+        && !document.querySelector('[role="dialog"][data-state="open"], [role="menu"][data-state="open"], [role="listbox"][data-state="open"]')
+      ) {
+        document.body.style.pointerEvents = '';
+      }
+    });
+    return () => cancelAnimationFrame(id);
+  }, [location]);
+
   function toggleMenu() {
     setMenuCollapsed((prev) => {
       const next = !prev;

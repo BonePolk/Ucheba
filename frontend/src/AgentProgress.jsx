@@ -48,22 +48,27 @@ export function AgentLog({ run, provider, maxHeightClass = 'max-h-[280px]' }) {
     client.setQueryData(key, saved.current);
   }
 
-  useLayoutEffect(() => {
+  function restore() {
     const element = viewport.current;
     if (!element) return;
-    function restore() {
-      if (saved.current.follow) element.scrollTop = element.scrollHeight;
-      else {
-        const anchor = [...element.querySelectorAll('[data-event-id]')].find((node) => node.dataset.eventId === saved.current.anchor?.id);
-        if (anchor) element.scrollTop += anchor.getBoundingClientRect().top - element.getBoundingClientRect().top - saved.current.anchor.offset;
-        else element.scrollTop = saved.current.top;
-      }
+    if (saved.current.follow) element.scrollTop = element.scrollHeight;
+    else {
+      const anchor = [...element.querySelectorAll('[data-event-id]')].find((node) => node.dataset.eventId === saved.current.anchor?.id);
+      if (anchor) element.scrollTop += anchor.getBoundingClientRect().top - element.getBoundingClientRect().top - saved.current.anchor.offset;
+      else element.scrollTop = saved.current.top;
     }
-    restore();
-    for (const event of events) seen.current.set(event.id, event.message);
+  }
+
+  useLayoutEffect(() => {
+    if (!content.current) return undefined;
     const observer = new ResizeObserver(restore);
     observer.observe(content.current);
     return () => observer.disconnect();
+  }, []);
+
+  useLayoutEffect(() => {
+    restore();
+    for (const event of events) seen.current.set(event.id, event.message);
   }, [events, start]);
 
   useLayoutEffect(() => () => save(), []);
@@ -159,43 +164,74 @@ export function useAgentProgressStream(taskId = 0, providers = []) {
   useEffect(() => {
     if (!providerList) return undefined;
     const key = ['agent-progress', taskId, providerList];
-    const stream = new EventSource(`/api/integrations/progress/stream?task_id=${taskId}&providers=${encodeURIComponent(providerList)}`);
-    setStreamError(false);
-    stream.onmessage = (event) => {
-      try {
-        const entries = JSON.parse(event.data);
-        const amebaEntry = entries.find((item) => item.provider === 'ameba')?.run;
-        if (amebaEntry) {
-          client.setQueryData(['ameba-live-plan'], {
-            running: amebaEntry.status === 'running',
-            started_at: amebaEntry.started_at,
-            schedule: amebaEntry.schedule ?? null,
-            timeline: amebaEntry.timeline ?? [],
-          });
-          if (amebaEntry.status !== 'running') client.invalidateQueries({ queryKey: ['ameba-ranking'] });
-        }
-        client.setQueryData(key, (previous = []) => entries.map((entry) => {
-          const previousRun = previous.find((item) => item.provider === entry.provider)?.run;
-          const runId = entry.run?.id ?? previousRun?.id;
-          const oldRun = (runId && client.getQueryData(['agent-run', runId])) ?? previousRun;
-          let run = entry.run ?? (entry.available && oldRun?.status === 'running'
-            ? { ...oldRun, status: 'interrupted', model_waiting: false, pending_question: null }
-            : oldRun ?? null);
-          if (run && oldRun?.id === run.id) {
-            const merged = new Map((oldRun.events ?? []).map((item) => [item.id, item]));
-            for (const item of run.events ?? []) merged.set(item.id, item);
-            run = { ...run, events: [...merged.values()], browser_used: run.browser_used || oldRun.browser_used };
+    const url = `/api/integrations/progress/stream?task_id=${taskId}&providers=${encodeURIComponent(providerList)}`;
+    let stream = null;
+    let lastAmebaStatus = null;
+    let lastInvalidatedAmebaRun = null;
+
+    function connect() {
+      if (stream || document.hidden) return;
+      stream = new EventSource(url);
+      setStreamError(false);
+      stream.onmessage = (event) => {
+        try {
+          const entries = JSON.parse(event.data);
+          const amebaEntry = entries.find((item) => item.provider === 'ameba')?.run;
+          if (amebaEntry) {
+            client.setQueryData(['ameba-live-plan'], {
+              running: amebaEntry.status === 'running',
+              started_at: amebaEntry.started_at,
+              schedule: amebaEntry.schedule ?? null,
+              timeline: amebaEntry.timeline ?? [],
+            });
+            if (amebaEntry.status !== 'running' && lastAmebaStatus === 'running' && lastInvalidatedAmebaRun !== amebaEntry.id) {
+              lastInvalidatedAmebaRun = amebaEntry.id;
+              client.invalidateQueries({ queryKey: ['ameba-ranking'] });
+            }
+            lastAmebaStatus = amebaEntry.status;
           }
-          if (run) client.setQueryData(['agent-run', run.id], run);
-          return { ...entry, run, receivedAt: performance.now() };
-        }));
-        setStreamError(false);
-      } catch {
-        setStreamError(true);
-      }
+          client.setQueryData(key, (previous = []) => entries.map((entry) => {
+            const previousRun = previous.find((item) => item.provider === entry.provider)?.run;
+            const runId = entry.run?.id ?? previousRun?.id;
+            const oldRun = (runId && client.getQueryData(['agent-run', runId])) ?? previousRun;
+            let run = entry.run ?? (entry.available && oldRun?.status === 'running'
+              ? { ...oldRun, status: 'interrupted', model_waiting: false, pending_question: null }
+              : oldRun ?? null);
+            if (run && oldRun?.id === run.id) {
+              const merged = new Map((oldRun.events ?? []).map((item) => [item.id, item]));
+              for (const item of run.events ?? []) merged.set(item.id, item);
+              run = { ...run, events: [...merged.values()], browser_used: run.browser_used || oldRun.browser_used };
+            }
+            if (run) client.setQueryData(['agent-run', run.id], run);
+            return { ...entry, run, receivedAt: performance.now() };
+          }));
+          setStreamError(false);
+        } catch {
+          setStreamError(true);
+        }
+      };
+      stream.onerror = () => setStreamError(true);
+    }
+
+    function disconnect() {
+      if (!stream) return;
+      stream.close();
+      stream = null;
+    }
+
+    function handleVisibility() {
+      if (document.hidden) disconnect();
+      else connect();
+    }
+
+    connect();
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('pagehide', disconnect);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('pagehide', disconnect);
+      disconnect();
     };
-    stream.onerror = () => setStreamError(true);
-    return () => stream.close();
   }, [client, taskId, providerList]);
 
   return { entries: query.data ?? [], streamError, providerList };

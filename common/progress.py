@@ -75,7 +75,7 @@ def notify(owner):
         loop.call_soon_threadsafe(wake)
 
 
-async def stream_progress(task_id=0, namespace='agent', work=False):
+async def stream_progress(task_id=0, namespace='agent', work=False, request=None):
     owner = user_id()
     queue = asyncio.Queue(maxsize=1)
     listener = (asyncio.get_running_loop(), queue)
@@ -83,11 +83,15 @@ async def stream_progress(task_id=0, namespace='agent', work=False):
         subscribers.setdefault(owner, set()).add(listener)
     try:
         while True:
+            if request is not None and await request.is_disconnected():
+                break
             record = get_work_progress(namespace) if work else get_progress(task_id, namespace)
             yield 'data: ' + json.dumps(record, ensure_ascii=False) + '\n\n'
             try:
                 await asyncio.wait_for(queue.get(), timeout=15)
             except TimeoutError:
+                if request is not None and await request.is_disconnected():
+                    break
                 yield ': keepalive\n\n'
     finally:
         with records_lock:
@@ -178,6 +182,8 @@ class Progress:
         self.update(model_waiting=False, current_action='Обрабатывает ответ модели', action_description='Проверяет ответ и готовит следующий шаг или итог.', action_started_at=timestamp())
 
     def reasoning_delta(self, delta, key):
+        if not delta:
+            return
         with records_lock:
             text = self.record.get('reasoning_text', '')
             if self.reasoning_key != key and text:
@@ -198,14 +204,21 @@ class Progress:
         with records_lock:
             events = self.record['events']
             if self.summary_key == key and events and events[-1].get('kind') == 'summary':
+                if not text:
+                    return events[-1]['message']
                 events[-1] = dict(events[-1], message=events[-1]['message'] + text)
             else:
+                cleaned = (text or '').lstrip('\r\n')
+                if not cleaned.strip():
+                    return ''
                 self.sequence += 1
-                events.append({'id': self.sequence, 'at': timestamp(), 'message': text, 'kind': 'summary'})
+                events.append({'id': self.sequence, 'at': timestamp(), 'message': cleaned, 'kind': 'summary'})
                 self.record['events'] = events[-100:]
             self.summary_key = key
             self.record['last_activity_at'] = timestamp()
+            current_message = events[-1]['message']
         notify(self.key[0])
+        return current_message
 
     def __exit__(self, kind, error, traceback):
         status = self.record.get('outcome', 'completed') if kind is None else 'failed' if isinstance(error, Exception) else 'interrupted'

@@ -29,7 +29,11 @@ API_PROVIDER_ID = 'ucheba_api'
 CLIENT_CLOSE_TIMEOUT = 15
 MCP_SHUTDOWN_TIMEOUT = 5
 TURN_START_TIMEOUT = 60
-TURN_IDLE_TIMEOUT = 600
+TURN_IDLE_TIMEOUT = 300
+BUSY_IDLE_TIMEOUT = 600
+MCP_TOOL_TIMEOUT = 180
+USER_WAIT_TOOLS = frozenset({'ask_user', 'browser_wait_for_user'})
+UNBOUNDED_TOOLS = frozenset({'ask_user', 'browser_wait_for_user', 'delete_silo_file'})
 
 
 def user_home() -> Path:
@@ -187,15 +191,34 @@ async def open_codex(
         cwd=cwd,
     )
     client = AsyncCodex(config)
-    await client.__aenter__()
+    try:
+        async with asyncio.timeout(TURN_START_TIMEOUT):
+            await client.__aenter__()
+    except TimeoutError:
+        await _close_client(label, client)
+        raise HTTPException(502, f'{label}: не удалось запустить процесс агента') from None
     try:
         if auth_mode == 'oauth':
-            account = await client.account()
+            try:
+                async with asyncio.timeout(TURN_START_TIMEOUT):
+                    account = await client.account()
+            except TimeoutError:
+                raise HTTPException(502, f'{label}: не удалось проверить OpenAI OAuth') from None
             if account.account is None:
                 raise HTTPException(400, f'Подключите OpenAI OAuth в профиле для {label}')
         yield client, thread_provider
     finally:
         await _close_client(label, client)
+
+
+async def start_codex_thread(client, label: str, *, resume_id: str | None = None, **kwargs):
+    try:
+        async with asyncio.timeout(TURN_START_TIMEOUT):
+            if resume_id:
+                return await client.thread_resume(resume_id, **kwargs)
+            return await client.thread_start(**kwargs)
+    except TimeoutError:
+        raise HTTPException(502, f'{label}: не удалось инициализировать сессию агента') from None
 
 
 @asynccontextmanager
@@ -240,8 +263,13 @@ class McpToolAdapter:
         self.turn = None
         self.lock = asyncio.Lock()
         self.active_calls = 0
+        self.active_tools: list[str] = []
         self.terminal_result = None
         self.fatal_error = None
+
+    @property
+    def waiting_for_user(self) -> bool:
+        return any(name in USER_WAIT_TOOLS for name in self.active_tools)
 
     async def respond(self, message):
         method = message['method']
@@ -271,9 +299,14 @@ class McpToolAdapter:
             raise ValueError('Неизвестный инструмент')
         args = message['params'].get('arguments', {})
         self.active_calls += 1
+        self.active_tools.append(name)
         try:
             async with self.lock:
-                output, extra_content = await self.handler(name, args)
+                if name in UNBOUNDED_TOOLS:
+                    output, extra_content = await self.handler(name, args)
+                else:
+                    async with asyncio.timeout(MCP_TOOL_TIMEOUT):
+                        output, extra_content = await self.handler(name, args)
             content = [{'type': 'text', 'text': json.dumps(output, ensure_ascii=False, default=str)}]
             for item in extra_content or ():
                 if item.get('type') == 'input_text':
@@ -283,6 +316,12 @@ class McpToolAdapter:
                     header, data = url.split(',', 1)
                     content.append({'type': 'image', 'data': data, 'mimeType': header[5:].split(';')[0]})
             return {'content': content, 'isError': False}
+        except TimeoutError:
+            logging.getLogger('uvicorn.error').warning('Codex MCP tool timeout: %s', name)
+            detail = 'Инструмент превысил время ожидания. Проверь состояние и попробуй другой шаг.'
+            if self.progress is not None and self.fatal_error is None:
+                self.progress.add('Инструмент превысил время ожидания')
+            return {'content': [{'type': 'text', 'text': detail}], 'isError': True}
         except (HTTPException, httpx.HTTPError, ValueError, OSError, KeyError, TypeError) as exc:
             detail = str(exc.detail) if isinstance(exc, HTTPException) else 'Ошибка инструмента: ' + type(exc).__name__
             if self.progress is not None and self.fatal_error is None:
@@ -290,6 +329,8 @@ class McpToolAdapter:
             return {'content': [{'type': 'text', 'text': detail}], 'isError': True}
         finally:
             self.active_calls -= 1
+            if name in self.active_tools:
+                self.active_tools.remove(name)
 
 
 @asynccontextmanager
@@ -309,8 +350,21 @@ async def serve_mcp(adapter: McpToolAdapter):
             credentials = writer.get_extra_info('socket').getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
             if struct.unpack('3i', credentials)[1] != 10000 + owner:
                 return
-            while line := await reader.readline():
-                message = json.loads(line)
+            while True:
+                try:
+                    line = await reader.readline()
+                except (asyncio.IncompleteReadError, ConnectionError, BrokenPipeError):
+                    break
+                except ValueError as exc:
+                    logging.getLogger('uvicorn.error').warning('Codex MCP read error: %s', type(exc).__name__)
+                    break
+                if not line:
+                    break
+                try:
+                    message = json.loads(line)
+                except (ValueError, json.JSONDecodeError) as exc:
+                    logging.getLogger('uvicorn.error').warning('Codex MCP decode error: %s', type(exc).__name__)
+                    break
                 if 'id' not in message:
                     continue
                 try:
@@ -321,8 +375,11 @@ async def serve_mcp(adapter: McpToolAdapter):
                     # Keep the connection usable; expose no arguments or private exception text.
                     logging.getLogger('uvicorn.error').error('Codex MCP handler: %s', type(exc).__name__)
                     result = {'error': {'code': -32603, 'message': 'Внутренняя ошибка инструмента: ' + type(exc).__name__}}
-                writer.write((json.dumps({'jsonrpc': '2.0', 'id': message['id'], **result}, ensure_ascii=False) + '\n').encode())
-                await writer.drain()
+                try:
+                    writer.write((json.dumps({'jsonrpc': '2.0', 'id': message['id'], **result}, ensure_ascii=False) + '\n').encode())
+                    await writer.drain()
+                except (ConnectionError, BrokenPipeError):
+                    break
         finally:
             try:
                 writer.close()
@@ -340,7 +397,7 @@ async def serve_mcp(adapter: McpToolAdapter):
     with tempfile.TemporaryDirectory(prefix='codex-mcp-') as directory:
         os.chmod(directory, 0o711)
         path = str(Path(directory) / 'tools.sock')
-        server = await asyncio.start_unix_server(handle, path, limit=4 * 1024 * 1024)
+        server = await asyncio.start_unix_server(handle, path, limit=16 * 1024 * 1024)
         os.chown(path, 10000 + owner, 10000 + owner)
         os.chmod(path, 0o600)
         try:
@@ -493,38 +550,47 @@ async def run_codex_turn(
 
         loop = asyncio.get_running_loop()
         idle_since = loop.time()
-        in_flight_items: set[str] = set()
+        timeout_limit = idle_timeout
+        active_commands: set[str] = set()
 
         async def consume():
             nonlocal summary_text, fallback_text, last_delta_id, completed, turn_status, error_detail, usage, idle_since
             async for event in turn.stream():
-                idle_since = loop.time()
-                progress.update(last_activity_at=timestamp())
+                method = event.method
                 data = event.payload
-                if event.method in ('item/started', 'item/completed'):
+                meaningful = True
+                if method in ('item/agentMessage/delta', 'item/reasoning/summaryTextDelta'):
+                    meaningful = bool(getattr(data, 'delta', ''))
+                elif method == 'error':
+                    meaningful = False
+                if meaningful:
+                    idle_since = loop.time()
+                    progress.update(last_activity_at=timestamp())
+                if method in ('item/started', 'item/completed'):
                     item = data.item.root if hasattr(data.item, 'root') else data.item
-                    phase = getattr(getattr(item, 'phase', None), 'value', None)
+                    item_type = getattr(getattr(item, 'type', None), 'value', getattr(item, 'type', None))
+                    phase = getattr(getattr(item, 'phase', None), 'value', getattr(item, 'phase', None))
                     item_id = getattr(item, 'id', None)
-                    if event.method == 'item/started':
-                        progress.update(model_waiting=item.type in ('reasoning', 'agentMessage'))
-                        if item.type not in ('reasoning', 'agentMessage') and item_id:
-                            in_flight_items.add(item_id)
-                        if item.type in ('commandExecution', 'fileChange', 'webSearch'):
+                    if method == 'item/started':
+                        progress.update(model_waiting=item_type in ('reasoning', 'agentMessage'))
+                        if item_type == 'commandExecution' and item_id:
+                            active_commands.add(item_id)
+                        if item_type in ('commandExecution', 'fileChange', 'webSearch'):
                             labels = {
                                 'commandExecution': 'Выполняет команду',
                                 'fileChange': 'Изменяет файлы',
                                 'webSearch': 'Ищет информацию',
                             }
                             progress.add(
-                                labels[item.type],
+                                labels[item_type],
                                 description='Работает над материалами поручения; цель шага агент поясняет в комментариях.',
                             )
-                        if item.type == 'agentMessage' and phase == 'commentary':
+                        if item_type == 'agentMessage' and phase == 'commentary':
                             commentary.add(item.id)
                     else:
                         if item_id:
-                            in_flight_items.discard(item_id)
-                        if item.type == 'agentMessage':
+                            active_commands.discard(item_id)
+                        if item_type == 'agentMessage':
                             if phase == 'final_answer':
                                 summary_text = item.text
                             elif phase is None:
@@ -538,37 +604,53 @@ async def run_codex_turn(
                             except Exception:
                                 pass
                             break
-                elif event.method == 'item/agentMessage/delta':
+                elif method == 'item/agentMessage/delta':
                     if data.item_id in commentary:
-                        progress.summary(data.delta, ('commentary', data.item_id))
-                        progress.update(agent_comment=progress.record['events'][-1]['message'])
+                        comment = progress.summary(data.delta, ('commentary', data.item_id))
+                        if comment:
+                            progress.update(agent_comment=comment)
                     else:
                         delta_buffers[data.item_id] = delta_buffers.get(data.item_id, '') + data.delta
                         last_delta_id = data.item_id
-                elif event.method == 'item/reasoning/summaryTextDelta':
+                elif method == 'item/reasoning/summaryTextDelta':
                     progress.reasoning_delta(data.delta, (data.item_id, data.summary_index))
-                elif event.method == 'thread/tokenUsage/updated':
+                elif method == 'thread/tokenUsage/updated':
                     usage_obj = data.token_usage.total
                     usage = {'input_tokens': usage_obj.input_tokens, 'output_tokens': usage_obj.output_tokens}
                     progress.update(token_usage=dict(usage), current_usage_known=True)
-                elif event.method == 'turn/completed':
+                elif method == 'error':
+                    kind, status_code = _extract_error_info(getattr(data, 'error', None))
+                    will_retry = getattr(data, 'will_retry', getattr(data, 'willRetry', None))
+                    logging.getLogger('uvicorn.error').warning(
+                        '%s: codex stream error (kind=%s, status=%s, retry=%s)',
+                        label, kind, status_code, will_retry,
+                    )
+                    if will_retry is False and not error_detail:
+                        error_detail = format_turn_error(label, data)
+                elif method == 'turn/completed':
                     turn_status = getattr(getattr(data.turn, 'status', None), 'value', None) or str(getattr(data.turn, 'status', ''))
                     completed = turn_status == 'completed'
                     if not completed:
                         error_detail = format_turn_error(label, data.turn)
 
         async def watchdog():
-            nonlocal idle_since
+            nonlocal idle_since, timeout_limit
             while True:
                 await asyncio.sleep(5)
-                busy = bool(
-                    in_flight_items
-                    or (adapter is not None and adapter.active_calls > 0)
-                    or progress.record.get('pending_question')
+                waiting_user = bool(
+                    progress.record.get('pending_question')
+                    or (adapter is not None and adapter.waiting_for_user)
                 )
-                if busy:
+                if waiting_user:
                     idle_since = loop.time()
-                elif loop.time() - idle_since >= idle_timeout:
+                    continue
+                busy = bool(
+                    active_commands
+                    or (adapter is not None and adapter.active_calls > 0)
+                )
+                limit = max(idle_timeout, BUSY_IDLE_TIMEOUT) if busy else idle_timeout
+                if loop.time() - idle_since >= limit:
+                    timeout_limit = limit
                     return
 
         consume_task = asyncio.create_task(consume())
@@ -579,8 +661,15 @@ async def run_codex_turn(
             else:
                 done, _ = await asyncio.wait({consume_task, watch_task}, return_when=asyncio.FIRST_COMPLETED)
                 if watch_task in done and not consume_task.done():
-                    logging.getLogger('uvicorn.error').warning('%s: turn stream idle timeout after %ss', label, idle_timeout)
-                    progress.add(f'Модель не передавала новых данных {max(1, int(idle_timeout // 60))} мин — запуск остановлен')
+                    active_tools = list(adapter.active_tools) if adapter is not None else []
+                    logging.getLogger('uvicorn.error').warning(
+                        '%s: turn stream idle timeout after %ss (active_tools=%s, active_commands=%d)',
+                        label,
+                        timeout_limit,
+                        active_tools,
+                        len(active_commands),
+                    )
+                    progress.add(f'Модель не передавала новых данных {max(1, int(timeout_limit // 60))} мин — запуск остановлен')
                     await _stop_turn(label, turn, client, consume_task)
                     raise HTTPException(502, f'{label}: модель не передавала новых данных слишком долго')
                 await consume_task
@@ -621,7 +710,9 @@ async def check_connection(label: str, *, config: dict | None, api_key: str = ''
             allow_shell=False,
             web_search='disabled',
         ) as (client, thread_provider):
-            thread = await client.thread_start(
+            thread = await start_codex_thread(
+                client,
+                label,
                 cwd=str(work_dir),
                 sandbox=sandbox,
                 ephemeral=True,

@@ -106,7 +106,7 @@ export default function TaskCard({
               </DropdownMenuItem>
             )}
             {!archived && (
-              <DropdownMenuItem onClick={onEdit}>
+              <DropdownMenuItem onClick={() => setTimeout(onEdit, 0)}>
                 <Pencil className="h-3.5 w-3.5" />
                 Изменить
               </DropdownMenuItem>

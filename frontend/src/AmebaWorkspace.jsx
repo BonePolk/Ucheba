@@ -562,7 +562,7 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
     queryKey: ['agent-queue'],
     queryFn: () => request('/integrations/queue'),
     enabled: features.monocle !== false || features.ameba !== false,
-    refetchInterval: 1000,
+    refetchInterval: (query) => (query.state.data?.busy ? 1500 : 5000),
   });
   const livePlan = useQuery({
     queryKey: ['ameba-live-plan'],

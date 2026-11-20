@@ -4,6 +4,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import time
 
 from fastapi import HTTPException
 from openai_codex import ApprovalMode, AsyncCodex, ExternalMessage, Sandbox
@@ -27,6 +28,7 @@ from common.codex_harness import (
     run_codex_turn,
     scratch_env,
     serve_mcp,
+    start_codex_thread,
 )
 from common.file_tools import FILE_INSTRUCTION
 from common.identity import user_id
@@ -40,6 +42,8 @@ WORK = Path('/work')
 class Connection:
     run_lock: object = field(default_factory=asyncio.Lock)
     sandbox_error: str = ''
+    sandbox_ok: bool | None = None
+    sandbox_checked_at: float = 0.0
     client: object = None
     login_task: object = None
     login_info: dict = field(default_factory=lambda: {'state': 'idle'})
@@ -80,7 +84,13 @@ async def get_client():
     return state().client
 
 
-async def sandbox_available():
+async def sandbox_available(force: bool = False):
+    conn = state()
+    now = time.monotonic()
+    if not force and conn.sandbox_ok is not None:
+        ttl = 300 if conn.sandbox_ok else 30
+        if now - conn.sandbox_checked_at < ttl:
+            return conn.sandbox_ok
     prepare_user()
     args = ('--version',) if CONTAINER_SANDBOX else ('sandbox', '--', '/bin/true')
     process = await asyncio.create_subprocess_exec(
@@ -100,10 +110,14 @@ async def sandbox_available():
                 detail = 'Окружение контейнера блокирует bubblewrap. Задайте ARRODES_SANDBOX=container в .env и пересоберите arrodes.'
             else:
                 detail = 'Не удалось запустить рабочее окружение Arrodes; код завершения ' + str(process.returncode)
-        state().sandbox_error = detail
-        return process.returncode == 0
+        conn.sandbox_error = detail
+        conn.sandbox_ok = process.returncode == 0
+        conn.sandbox_checked_at = time.monotonic()
+        return conn.sandbox_ok
     except TimeoutError:
-        state().sandbox_error = 'Проверка Linux sandbox не завершилась за 10 секунд'
+        conn.sandbox_error = 'Проверка Linux sandbox не завершилась за 10 секунд'
+        conn.sandbox_ok = False
+        conn.sandbox_checked_at = time.monotonic()
         return False
     finally:
         if process.returncode is None:
@@ -113,7 +127,11 @@ async def sandbox_available():
 
 async def status():
     current = await get_client()
-    account = await current.account()
+    try:
+        async with asyncio.timeout(10):
+            account = await current.account()
+    except TimeoutError:
+        raise HTTPException(502, 'Arrodes не ответил на проверку статуса авторизации') from None
     return {
         'authorized': account.account is not None,
         'device': state().login_info,
@@ -184,7 +202,9 @@ async def check(body=None):
             account = await current.account()
             if account.account is None:
                 raise HTTPException(400, 'Подключите OpenAI OAuth в профиле для Arrodes')
-            thread = await current.thread_start(
+            thread = await start_codex_thread(
+                current,
+                'Arrodes',
                 cwd=str(home()),
                 sandbox=sandbox,
                 ephemeral=True,
@@ -204,7 +224,9 @@ async def check(body=None):
             web_search='disabled',
             cwd=home(),
         ) as (current, thread_provider):
-            thread = await current.thread_start(
+            thread = await start_codex_thread(
+                current,
+                'Arrodes',
                 cwd=str(work_dir),
                 sandbox=sandbox,
                 ephemeral=True,
@@ -355,9 +377,9 @@ async def execute(run_id, payload, progress, auth=None, options=None):
                     config=mcp_config | shell_policy,
                 )
                 if can_resume:
-                    thread = await current.thread_resume(previous['thread_id'], **options)
+                    thread = await start_codex_thread(current, 'Arrodes', resume_id=previous['thread_id'], **options)
                 else:
-                    thread = await current.thread_start(ephemeral=False, **options)
+                    thread = await start_codex_thread(current, 'Arrodes', ephemeral=False, **options)
                 record = metadata(run_id)
                 record.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                 record.write_text(json.dumps({

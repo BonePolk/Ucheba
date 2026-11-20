@@ -16,6 +16,7 @@ from common.codex_harness import (
     run_codex_turn,
     scratch_env,
     serve_mcp,
+    start_codex_thread,
 )
 import asyncio
 import base64
@@ -661,7 +662,9 @@ async def run_agent(auth, memory, task_id, body, progress, options=None):
         allow_shell=False,
         web_search='disabled',
     ) as (client, thread_provider):
-        thread = await client.thread_start(
+        thread = await start_codex_thread(
+            client,
+            'Monocle',
             cwd=str(work_dir),
             sandbox=sandbox,
             ephemeral=True,

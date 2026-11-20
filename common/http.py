@@ -23,31 +23,52 @@ def hide_health_logs():
         logger.addFilter(HealthLogFilter())
 
 
-def private_app(name, lifespan=None):
-    hide_health_logs()
-    app = FastAPI(title=f'{name} integration', lifespan=lifespan, docs_url=None, openapi_url=None)
+class PrivateApiMiddleware:
+    def __init__(self, app, *, name: str):
+        self.app = app
+        self.name = name
 
-    @app.middleware('http')
-    async def private_api(request: Request, call_next):
+    async def __call__(self, scope, receive, send):
+        if scope['type'] != 'http':
+            await self.app(scope, receive, send)
+            return
         token = None
+        started = False
+
+        async def tracked_send(message):
+            nonlocal started
+            if message['type'] == 'http.response.start':
+                started = True
+            await send(message)
+
         try:
+            request = Request(scope)
             if request.url.path != '/health':
-                token = current_user_id.set(require_service(request, name))
-            return await call_next(request)
+                token = current_user_id.set(require_service(request, self.name))
+            await self.app(scope, receive, tracked_send)
         except HTTPException as exc:
-            return JSONResponse(status_code=exc.status_code, content={'detail': exc.detail})
+            if started:
+                raise
+            await JSONResponse(status_code=exc.status_code, content={'detail': exc.detail})(scope, receive, send)
         except Exception as exc:
             code = getattr(exc, 'status_code', None) or getattr(exc, 'code', None)
-            logging.getLogger('uvicorn.error').error('%s: %s (API %s)', name, type(exc).__name__, code if isinstance(code, int) else 'unknown')
-            label = {'arrodes': 'Arrodes', 'monocle': 'Monocle'}.get(name, name)
+            logging.getLogger('uvicorn.error').error('%s: %s (API %s)', self.name, type(exc).__name__, code if isinstance(code, int) else 'unknown')
+            if started:
+                raise
+            label = {'arrodes': 'Arrodes', 'monocle': 'Monocle'}.get(self.name, self.name)
             detail = f'{label}: запрос отклонён или сервис недоступен'
             if isinstance(code, int):
                 detail += f' (API {code})'
-            return JSONResponse(status_code=502, content={'detail': detail})
-
+            await JSONResponse(status_code=502, content={'detail': detail})(scope, receive, send)
         finally:
             if token is not None:
                 current_user_id.reset(token)
+
+
+def private_app(name, lifespan=None):
+    hide_health_logs()
+    app = FastAPI(title=f'{name} integration', lifespan=lifespan, docs_url=None, openapi_url=None)
+    app.add_middleware(PrivateApiMiddleware, name=name)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request, exc):
@@ -62,10 +83,10 @@ def private_app(name, lifespan=None):
         return {'ok': True}
 
     @app.get('/progress/stream')
-    async def progress_stream(task_id: int = 0, namespace: str = 'agent', work: bool = False):
+    async def progress_stream(request: Request, task_id: int = 0, namespace: str = 'agent', work: bool = False):
         if task_id < 0 or namespace not in ('agent', 'ranking'):
             raise HTTPException(422, 'Некорректный журнал')
-        return StreamingResponse(stream_progress(task_id, namespace, work), media_type='text/event-stream',
+        return StreamingResponse(stream_progress(task_id, namespace, work, request=request), media_type='text/event-stream',
                                  headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
     @app.get('/progress')

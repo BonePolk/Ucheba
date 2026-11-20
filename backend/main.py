@@ -38,37 +38,58 @@ async def lifespan(app):
         await arrodes.close()
 
 
+class UserSessionMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope['type'] != 'http':
+            await self.app(scope, receive, send)
+            return
+
+        # Normalize only the service segment; never rewrite user file paths or payloads.
+        parts = scope['path'].split('/')
+        index = None
+        if parts[:3] == ['', 'api', 'integrations'] and len(parts) > 3:
+            index = 5 if parts[3] == 'tasks' and len(parts) > 5 else 4 if parts[3] in ('agents', 'services') and len(parts) > 4 else 3
+        elif parts[:3] == ['', 'api', 'auth'] and len(parts) > 3 and parts[3] == 'codex':
+            index = 3
+        if index is not None:
+            parts[index] = service_name(parts[index])
+            scope['path'] = '/'.join(parts)
+            scope['raw_path'] = scope['path'].encode()
+
+        token = None
+        started = False
+
+        async def tracked_send(message):
+            nonlocal started
+            if message['type'] == 'http.response.start':
+                started = True
+            await send(message)
+
+        try:
+            request = Request(scope, receive)
+            if request.method not in ('GET', 'HEAD', 'OPTIONS'):
+                # JSON API + strict cookie: чужой сайт не может отправить авторизованную форму.
+                if request.headers.get('content-type', '').split(';')[0] != 'application/json':
+                    raise HTTPException(415, 'Используйте application/json')
+            user = await asyncio.to_thread(session_user, request) if request.cookies.get('user_session') else None
+            scope.setdefault('state', {})['user'] = user
+            if user:
+                token = current_user_id.set(user.id)
+            await self.app(scope, receive, tracked_send)
+        except HTTPException as exc:
+            if started:
+                raise
+            await JSONResponse(status_code=exc.status_code, content={'detail': exc.detail})(scope, receive, send)
+        finally:
+            if token is not None:
+                current_user_id.reset(token)
+
+
 app = FastAPI(title='Task Manager', lifespan=lifespan)
-
-
-@app.middleware('http')
-async def user_session(request: Request, call_next):
-    token = None
-    # Normalize only the service segment; never rewrite user file paths or payloads.
-    parts = request.scope['path'].split('/')
-    index = None
-    if parts[:3] == ['', 'api', 'integrations'] and len(parts) > 3:
-        index = 5 if parts[3] == 'tasks' and len(parts) > 5 else 4 if parts[3] in ('agents', 'services') and len(parts) > 4 else 3
-    elif parts[:3] == ['', 'api', 'auth'] and len(parts) > 3 and parts[3] == 'codex':
-        index = 3
-    if index is not None:
-        parts[index] = service_name(parts[index])
-        request.scope['path'] = '/'.join(parts)
-        request.scope['raw_path'] = request.scope['path'].encode()
-    try:
-        if request.method not in ('GET', 'HEAD', 'OPTIONS'):
-            # JSON API + strict cookie: чужой сайт не может отправить авторизованную форму.
-            if request.headers.get('content-type', '').split(';')[0] != 'application/json':
-                raise HTTPException(415, 'Используйте application/json')
-        request.state.user = session_user(request) if request.cookies.get('user_session') else None
-        if request.state.user:
-            token = current_user_id.set(request.state.user.id)
-        return await call_next(request)
-    except HTTPException as exc:
-        return JSONResponse(status_code=exc.status_code, content={'detail': exc.detail})
-    finally:
-        if token is not None:
-            current_user_id.reset(token)
+app.add_middleware(UserSessionMiddleware)
 
 
 app.include_router(users)

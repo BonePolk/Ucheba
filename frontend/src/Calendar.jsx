@@ -113,7 +113,7 @@ export default function Calendar({ features = {} }) {
     queryKey: ['straus-status'],
     queryFn: () => request('/integrations/monocle/schedule/import/status'),
     enabled: features.straus !== false,
-    refetchInterval: 1000,
+    refetchInterval: (query) => (query.state.data?.running ? 1500 : 8000),
   });
 
   const refresh = () => Promise.all([
@@ -183,12 +183,21 @@ export default function Calendar({ features = {} }) {
     });
   }, [config, tasks.data]);
 
+  function openEditor(nextEditor) {
+    if (!wideDesktop && dayPanelOpen) {
+      setDayPanelOpen(false);
+      setTimeout(() => setEditor(nextEditor), 0);
+    } else {
+      setEditor(nextEditor);
+    }
+  }
+
   function create(day, minute = 9 * 60) {
     if (!config) return;
     save.reset();
     setError('');
     setSelectedDay(day);
-    setEditor({
+    openEditor({
       id: eventId(),
       date: day,
       start: clock(minute),
@@ -208,7 +217,7 @@ export default function Calendar({ features = {} }) {
     save.reset();
     const original = config.events.find((item) => item.id === event.id);
     const duration = minutes(event.end) - minutes(event.start);
-    setEditor(
+    openEditor(
       original
         ? { ...original, date: day === event.date ? original.date : day, start: startTime, end: clock(Math.min(1439, minutes(startTime) + duration)) }
         : {

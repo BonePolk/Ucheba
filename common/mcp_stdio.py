@@ -7,6 +7,8 @@ with socket.socket(socket.AF_UNIX) as connection:
     connection.connect(sys.argv[1])
     stream = connection.makefile('rwb')
     for line in sys.stdin.buffer:
+        if not line.strip():
+            continue
         stream.write(line)
         stream.flush()
         # Notifications have no JSON-RPC response.

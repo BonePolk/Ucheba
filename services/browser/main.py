@@ -38,6 +38,8 @@ browser_downloads = {}
 agent_runs = {}
 deferred_browser_close = set()
 playwright = None
+BROWSER_ACTION_TIMEOUT = 90
+BROWSER_CLOSE_TIMEOUT = 15
 
 # Chromium не рисует системный курсор на screenshots. Маркер не перехватывает
 # события и не добавляет текст в представление страницы для агента.
@@ -396,15 +398,16 @@ async def capture_screen(state):
         async with state['capture_lock']:
             if asyncio.get_running_loop().time() - state['frame_time'] >= 0.25:
                 try:
-                    await tab.evaluate(CURSOR_SCRIPT)
-                    image = await tab.screenshot(type='jpeg', quality=65, timeout=1500,
-                                                 mask=[tab.locator('input[type="password"]')])
-                    state['frame'] = {'image': base64.b64encode(image).decode(), 'mime': 'image/jpeg',
-                                      'url': safe_url(tab.url), 'at': datetime.now(timezone.utc).isoformat(),
-                                      'width': 1100, 'height': 750,
-                                      'cursor': await tab.evaluate('window.__uchebaCursor')}
-                    state['frame_time'] = asyncio.get_running_loop().time()
-                except BrowserError:
+                    async with asyncio.timeout(3):
+                        await tab.evaluate(CURSOR_SCRIPT)
+                        image = await tab.screenshot(type='jpeg', quality=65, timeout=1500,
+                                                     mask=[tab.locator('input[type="password"]')])
+                        state['frame'] = {'image': base64.b64encode(image).decode(), 'mime': 'image/jpeg',
+                                          'url': safe_url(tab.url), 'at': datetime.now(timezone.utc).isoformat(),
+                                          'width': 1100, 'height': 750,
+                                          'cursor': await tab.evaluate('window.__uchebaCursor')}
+                        state['frame_time'] = asyncio.get_running_loop().time()
+                except (BrowserError, TimeoutError):
                     pass
     return state['frame']
 
@@ -765,14 +768,22 @@ def browser_ready():
 
 
 @asynccontextmanager
-async def agent_browser_lock():
+async def agent_browser_lock(timeout=BROWSER_ACTION_TIMEOUT):
     # Ручной режим не держит lock: пользователь может нажимать, агент ждёт.
     while True:
         await browser_ready().wait()
         async with lock():
             if browser_ready().is_set():
-                yield
-                return
+                if timeout is None:
+                    yield
+                    return
+                try:
+                    async with asyncio.timeout(timeout):
+                        yield
+                        return
+                except TimeoutError:
+                    logging.getLogger('uvicorn.error').warning('browser: action timed out after %ss', timeout)
+                    raise HTTPException(504, 'Действие браузера превысило время ожидания. Перечитайте текущую страницу перед повтором.') from None
 
 
 @app.post('/handoff')
@@ -803,7 +814,11 @@ async def browser_handoff(body: dict):
 async def wait_for_browser_user(request: Request):
     async def wait():
         browser_ready().clear()
-        await browser_ready().wait()
+        try:
+            await browser_ready().wait()
+        except asyncio.CancelledError:
+            browser_ready().set()
+            raise
         async with agent_browser_lock():
             tab = await page()
             result = {'status': 'resumed', 'notice': 'Пользователь вернул управление. Проверь актуальную страницу и продолжи с неё.',
@@ -848,11 +863,15 @@ async def cancel_action(body: dict):
             if context:
                 for tab in context.pages:
                     if not tab.is_closed():
-                        session = await context.new_cdp_session(tab)
                         try:
-                            await session.send('Page.stopLoading')
-                        finally:
-                            await session.detach()
+                            async with asyncio.timeout(5):
+                                session = await context.new_cdp_session(tab)
+                                try:
+                                    await session.send('Page.stopLoading')
+                                finally:
+                                    await session.detach()
+                        except Exception:
+                            pass
     return {'ok': True}
 
 
@@ -871,7 +890,11 @@ async def close_browser_locked(owner):
     contexts.pop(owner, None)
     screens.pop(owner, None)
     schedule_pages.pop(owner, None)
-    await context.close()
+    try:
+        async with asyncio.timeout(BROWSER_CLOSE_TIMEOUT):
+            await context.close()
+    except Exception as exc:
+        logging.getLogger('uvicorn.error').warning('browser context close failed: %s', type(exc).__name__)
     return True
 
 
@@ -957,8 +980,12 @@ async def delete_site(site_id: str):
         context = contexts.pop(user_id(), None)
         screens.pop(user_id(), None)
         if context:
-            await context.clear_cookies()
-            await context.close()
+            try:
+                async with asyncio.timeout(BROWSER_CLOSE_TIMEOUT):
+                    await context.clear_cookies()
+                    await context.close()
+            except Exception as exc:
+                logging.getLogger('uvicorn.error').warning('browser context close failed: %s', type(exc).__name__)
         # Удаляем только профиль браузера: в нём могут оставаться localStorage/токены.
         import shutil
         shutil.rmtree(root() / 'profile', ignore_errors=True)

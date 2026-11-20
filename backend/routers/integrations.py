@@ -160,7 +160,7 @@ async def answer_agent(name: Literal['monocle', 'ameba', 'straus', 'arrodes'], q
 
 
 @router.get('/queue')
-async def agent_queue():
+def agent_queue():
     state = scheduler.queue_state()
     enabled = features()
     with Session(get_engine()) as session:
@@ -220,7 +220,7 @@ async def agent_progress(task_id: int = 0, providers: str = 'context,arrodes'):
 
 
 @router.get('/progress/stream')
-async def agent_progress_stream(task_id: int = 0, providers: str = 'context,arrodes'):
+async def agent_progress_stream(request: Request, task_id: int = 0, providers: str = 'context,arrodes'):
     if task_id < 0:
         raise HTTPException(422, 'Некорректный номер задачи')
     if task_id:
@@ -243,6 +243,8 @@ async def agent_progress_stream(task_id: int = 0, providers: str = 'context,arro
         if provider in requested and enabled['arrodes']:
             sources.append((provider, 'arrodes', 'agent', task_id == 0))
 
+    owner = user_id()
+
     async def events():
         changes = asyncio.Queue(maxsize=8)
         states = {}
@@ -250,7 +252,7 @@ async def agent_progress_stream(task_id: int = 0, providers: str = 'context,arro
         async def listen(provider, service, namespace, work):
             host = service_name(service)
             url = f'http://{host}:8000/progress/stream'
-            headers = {'X-Service-Token': internal_token(service), 'X-User-ID': str(user_id())}
+            headers = {'X-Service-Token': internal_token(service, owner), 'X-User-ID': str(owner)}
             while True:
                 try:
                     async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=8)) as client:
@@ -268,7 +270,13 @@ async def agent_progress_stream(task_id: int = 0, providers: str = 'context,arro
         tasks = [asyncio.create_task(listen(*source)) for source in sources]
         try:
             yield ': connected\n\n'
-            while sources:
+            if not sources:
+                yield 'data: []\n\n'
+                while not await request.is_disconnected():
+                    await asyncio.sleep(15)
+                    yield ': keepalive\n\n'
+                return
+            while not await request.is_disconnected():
                 try:
                     provider, service, run, available = await asyncio.wait_for(changes.get(), timeout=15)
                     states[service] = {'run': run, 'available': available}
@@ -284,7 +292,6 @@ async def agent_progress_stream(task_id: int = 0, providers: str = 'context,arro
                     yield 'data: ' + json.dumps(entries, ensure_ascii=False) + '\n\n'
                 except TimeoutError:
                     yield ': keepalive\n\n'
-            yield 'data: []\n\n'
         finally:
             for task in tasks:
                 task.cancel()
@@ -1085,7 +1092,7 @@ async def luna_screen(response: Response):
 
 
 @router.get('/monocle/browser/stream')
-async def luna_browser_stream():
+async def luna_browser_stream(request: Request):
     if not (features()['context'] or features()['straus'] or features()['arrodes']):
         check_feature('monocle')
     client = httpx.AsyncClient(timeout=httpx.Timeout(None, connect=8))
@@ -1103,6 +1110,8 @@ async def luna_browser_stream():
     async def frames():
         try:
             async for chunk in upstream.aiter_bytes():
+                if await request.is_disconnected():
+                    break
                 yield chunk
         finally:
             await upstream.aclose()

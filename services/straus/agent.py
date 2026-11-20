@@ -14,6 +14,7 @@ from common.codex_harness import (
     run_codex_turn,
     scratch_env,
     serve_mcp,
+    start_codex_thread,
 )
 """Straus исследует источники и редактирует календарь инструментами."""
 import json
@@ -307,7 +308,9 @@ async def run(body):
             allow_shell=False,
             web_search='disabled',
         ) as (client, thread_provider):
-            thread = await client.thread_start(
+            thread = await start_codex_thread(
+                client,
+                'Straus',
                 cwd=str(work_dir),
                 sandbox=sandbox,
                 ephemeral=True,
