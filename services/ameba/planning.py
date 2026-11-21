@@ -305,7 +305,14 @@ def validate_proposal(
             issues.append({'code': 'date_in_past', 'period_index': idx, 'message': f'Период #{idx} ({p.start_date}) начинается в прошлом.'})
             continue
         if p.end_date > horizon_end:
-            issues.append({'code': 'outside_horizon', 'period_index': idx, 'message': f'Период #{idx} до {p.end_date} выходит за горизонт {horizon_end}.'})
+            issues.append({
+                'code': 'outside_horizon',
+                'period_index': idx,
+                'task_id': p.task_id,
+                'submitted_end_date': p.end_date,
+                'horizon_end': horizon_end,
+                'message': f'Период #{idx} до {p.end_date} выходит за горизонт {horizon_end}.',
+            })
             continue
 
         if p.kind == 'rest':
@@ -328,13 +335,6 @@ def validate_proposal(
             issues.append({'code': 'blocked_day_violation', 'period_index': idx, 'task_id': tid, 'date': p.start_date,
                            'message': f'Период задачи {tid} ({p.start_date}..{p.end_date}) целиком приходится на закрытые дни.'})
 
-        dl_dt = dl_by_task[tid]
-        if dl_dt is not None and dl_dt > now_dt:
-            dl_iso = dl_dt.astimezone(zone).date().isoformat()
-            if p.end_date > dl_iso:
-                issues.append({'code': 'after_deadline', 'period_index': idx, 'task_id': tid,
-                               'message': f'Задача {tid} заканчивается {p.end_date} после срока {dl_iso}.'})
-
         pin = task_pins.get(str(tid)) or {}
         if pin.get('not_before') and p.start_date < pin['not_before']:
             issues.append({'code': 'violates_not_before', 'period_index': idx, 'task_id': tid,
@@ -346,9 +346,7 @@ def validate_proposal(
         confirmed_done = int(tasks_by_id[tid].get('completed_work_minutes') or 0)
         if (pin.get('mode') == 'shift' and pin.get('not_before')) or not target_date or target_date not in days_by_date or target_date in protected or _effective_rem(item, overrides, confirmed_done) <= 0:
             continue
-        dl_dt = dl_by_task[tid]
-        dl_ok = dl_dt is None or dl_dt <= now_dt or target_date <= dl_dt.astimezone(zone).date().isoformat()
-        if dl_ok and not any(p.start_date <= target_date <= p.end_date for p in work_periods.get(tid, ())):
+        if not any(p.start_date <= target_date <= p.end_date for p in work_periods.get(tid, ())):
             issues.append({'code': 'violates_task_pin', 'task_id': tid, 'date': target_date,
                            'message': f'Владелец закрепил задачу {tid} за {target_date}.'})
 
@@ -411,6 +409,7 @@ def materialize_plan(
         key=lambda p: (p.start_date, p.end_date, 0 if p.kind == 'work' else 1, p.task_id or 0),
     )
     periods_out = []
+    late_periods_by_task: dict[int, list[dict]] = {tid: [] for tid in proposal.task_ids}
     for idx, p in enumerate(sorted_periods):
         is_work = p.kind == 'work' and p.task_id is not None
         goal = p.goal.strip()
@@ -433,22 +432,44 @@ def materialize_plan(
             dl_dt = dl_by_task[tid]
             dl_iso = dl_dt.astimezone(zone).date().isoformat() if dl_dt else None
             dl_str = dl_dt.isoformat() if dl_dt else None
-            completes = assigned_by_task[tid] >= plans[tid]['remaining_minutes']
-            assess_risk = (assessments[tid].deadline_risk or '').strip() or None if plans[tid]['remaining_minutes'] > 0 else None
+            rem = plans[tid]['remaining_minutes']
+            completes = assigned_by_task[tid] >= rem
+            assess_risk = (assessments[tid].deadline_risk or '').strip() or None if rem > 0 else None
+            period_lateness = None
+            period_late_msg = None
+            if dl_dt is not None and dl_dt > now_dt and rem > 0 and p.end_date > dl_iso:
+                period_lateness = 'definite' if p.start_date > dl_iso else 'possible'
+                span_label = p.start_date if p.start_date == p.end_date else f'{p.start_date}..{p.end_date}'
+                period_late_msg = (
+                    f'Планируемый период ({span_label}) начинается после срока {dl_iso}.'
+                    if period_lateness == 'definite'
+                    else f'Планируемый период ({span_label}) выходит за срок {dl_iso}.'
+                )
+                late_periods_by_task[tid].append({
+                    'period_index': idx,
+                    'start_date': p.start_date,
+                    'end_date': p.end_date,
+                    'deadline_date': dl_iso,
+                    'lateness': period_lateness,
+                })
             entry.update({
                 'completed_work_minutes': plans[tid]['completed_work_minutes'],
                 'completes_task': completes,
                 'deadline': dl_str,
-                'deadline_risk': assess_risk or (timing_risk_by_task.get(tid) if p.end_date == dl_iso else None),
+                'deadline_risk': assess_risk or period_late_msg or (timing_risk_by_task.get(tid) if p.end_date == dl_iso else None),
                 'tasks': [{
                     'task_id': tid, 'title': entry['title'], 'goal': goal, 'minutes': p.estimated_minutes,
                     'hours_label': entry['hours_label'], 'completes_task': completes, 'deadline': dl_str,
                 }],
             })
+            if period_lateness is not None:
+                entry['lateness'] = period_lateness
         periods_out.append(entry)
 
     conflicts = []
     remaining = []
+    reason_risk_by_task: dict[int, str] = {}
+    has_late_period = False
     for tid in proposal.task_ids:
         rem = plans[tid]['remaining_minutes']
         assess = assessments[tid]
@@ -460,28 +481,48 @@ def materialize_plan(
         dl_iso = dl_dt.astimezone(zone).date().isoformat() if dl_dt else None
         is_overdue = bool(dl_dt and dl_dt <= now_dt and rem > 0)
         timing_risk = timing_risk_by_task.get(tid)
+        late_periods = late_periods_by_task.get(tid) or []
+        has_definite_late = any(lp['lateness'] == 'definite' for lp in late_periods)
+        if late_periods:
+            has_late_period = True
         pin = task_pins.get(str(tid)) or {}
         pin_date = pin.get('target_date')
         c_kind = c_reason = None
         c_infeasible = False
         if pin.get('mode') != 'shift' and pin_date and pin_date in protected and rem > 0:
             c_kind, c_infeasible, c_reason = 'constraint', True, f'{title}: закреплено на {pin_date}, но этот день закрыт для работы.'
-        elif assess_risk or is_overdue or timing_risk or (dl_iso and dl_iso <= horizon_end and unplanned > 0):
-            c_infeasible = is_overdue or bool(dl_iso and dl_iso <= horizon_end and unplanned > 0)
-            c_kind = 'deadline_timing' if (timing_risk and not c_infeasible and not assess_risk) else 'deadline'
+        elif assess_risk or is_overdue or timing_risk or late_periods or (dl_iso and dl_iso <= horizon_end and unplanned > 0):
+            c_infeasible = is_overdue or has_definite_late or bool(dl_iso and dl_iso <= horizon_end and unplanned > 0)
+            c_kind = 'deadline_timing' if (timing_risk and not c_infeasible and not assess_risk and not late_periods) else 'deadline'
+            late_msg = None
+            if late_periods:
+                first_lp = late_periods[0]
+                span_label = first_lp['start_date'] if first_lp['start_date'] == first_lp['end_date'] else f'{first_lp["start_date"]}..{first_lp["end_date"]}'
+                late_msg = (
+                    f'{title}: работа ({span_label}) начинается после срока {dl_iso}.'
+                    if has_definite_late
+                    else f'{title}: период ({span_label}) выходит за срок {dl_iso}.'
+                )
             default_msg = (
                 f'{title}: срок уже прошёл.' if is_overdue
+                else late_msg if late_msg
                 else f'{title}: не хватает времени до срока.' if c_infeasible
                 else f'{title}: {timing_risk}'
             )
             c_reason = assess_risk or default_msg
+            if rem > 0 and c_reason:
+                reason_risk_by_task[tid] = c_reason
         if c_kind:
-            conflicts.append({
+            conflict_entry = {
                 'task_id': tid, 'title': title, 'kind': c_kind,
                 'deadline': dl_dt.isoformat() if dl_dt else None, 'infeasible': c_infeasible,
                 'deficit_minutes': unplanned, 'deficit_label': format_hours(unplanned) if unplanned else '',
                 'reason': c_reason,
-            })
+            }
+            if late_periods:
+                conflict_entry['lateness'] = 'definite' if has_definite_late else 'possible'
+                conflict_entry['conflicting_periods'] = late_periods
+            conflicts.append(conflict_entry)
 
     total_rem = sum(plans[tid]['remaining_minutes'] for tid in proposal.task_ids)
     remaining_minutes = sum(r['remaining_work_minutes'] for r in remaining)
@@ -495,7 +536,7 @@ def materialize_plan(
     schedule = {
         'version': 3, 'valid': True, 'task_ids': list(proposal.task_ids), 'generated_date': today_iso,
         'start_at': now_dt.isoformat(), 'timezone': week.get('timezone', 'UTC'),
-        'feasible': feasible_compat, 'no_objective_conflicts': not has_objective_conflict,
+        'feasible': feasible_compat, 'no_objective_conflicts': not (has_objective_conflict or has_late_period),
         'feasibility_status': feasibility_status, 'fully_scheduled': remaining_minutes == 0,
         'remaining_minutes': remaining_minutes, 'min_minutes': total_rem, 'max_minutes': total_rem,
         'hours_label': format_hours(total_rem), 'periods': periods_out, 'blocked_dates': sorted(protected),
@@ -511,7 +552,12 @@ def materialize_plan(
     reasons = [
         {
             'task_id': tid, 'reason': assessments[tid].reason.strip(), 'time_estimate': plans[tid]['time_estimate'],
-            'deadline_risk': ((assessments[tid].deadline_risk or '').strip() or None if plans[tid]['remaining_minutes'] > 0 else None) or timing_risk_by_task.get(tid),
+            'llm_deadline_risk': (assessments[tid].deadline_risk or '').strip() or None if plans[tid]['remaining_minutes'] > 0 else None,
+            'deadline_risk': (
+                ((assessments[tid].deadline_risk or '').strip() or None if plans[tid]['remaining_minutes'] > 0 else None)
+                or reason_risk_by_task.get(tid)
+                or timing_risk_by_task.get(tid)
+            ),
             'plan': plans[tid],
         }
         for tid in proposal.task_ids
@@ -581,7 +627,7 @@ def refresh_schedule(
         items.append(TaskPlanItem(
             task_id=tid, remaining_minutes=rem,
             reason=str(old_r.get('reason') or 'По приоритету и срокам')[:200],
-            deadline_risk=old_r.get('deadline_risk') if rem > 0 else None,
+            deadline_risk=old_r.get('llm_deadline_risk', old_r.get('deadline_risk')) if rem > 0 else None,
         ))
 
     prev_blocked = list(prev_schedule.get('blocked_dates') or [])

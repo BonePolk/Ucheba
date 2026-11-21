@@ -16,6 +16,7 @@ import tempfile
 import time
 import types
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import HTTPException
 import httpx
@@ -70,6 +71,7 @@ class ModelCapabilities:
     max_output_tokens: int | None = None
     source: str = 'unknown'
     verified_source: str = 'unknown'
+    detection_unavailable: bool = False
 
     @property
     def effective_limit(self) -> int | None:
@@ -88,7 +90,40 @@ class ModelCapabilities:
             'max_output_tokens': self.max_output_tokens,
             'source': self.source,
             'verified_source': self.verified_source,
+            'detection_unavailable': self.detection_unavailable,
         }
+
+
+def _normalize_provider_base_url(base_url: str) -> str:
+    raw = (base_url or '').strip().rstrip('/')
+    if not raw:
+        return ''
+    try:
+        parts = urlsplit(raw)
+    except ValueError:
+        return raw
+    if not parts.scheme or not parts.netloc:
+        return raw
+    scheme = parts.scheme.lower()
+    host = (parts.hostname or '').lower()
+    if not host:
+        return raw
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    if (scheme == 'http' and port == 80) or (scheme == 'https' and port == 443):
+        port = None
+    host_fmt = f'[{host}]' if ':' in host else host
+    netloc = f'{host_fmt}:{port}' if port is not None else host_fmt
+    return f'{scheme}://{netloc}{parts.path.rstrip("/")}'
+
+
+def _capability_scope(auth_mode: str, base_url: str = '') -> tuple[str, str]:
+    mode = (auth_mode or 'api_key').strip().lower()
+    if mode == 'api_key':
+        return mode, _normalize_provider_base_url(base_url)
+    return mode, ''
 
 
 def _safe_int(val, *, minimum: int = 1, maximum: int = 10_000_000) -> int | None:
@@ -166,10 +201,10 @@ def _fresh_get(key: tuple):
     return item[1]
 
 
-def _lookup_cached_model(owner: int, source_kind: str, scope: str, model: str) -> dict | None:
+def _lookup_cached_model(owner: int, source_kind: str, mode: str, scope: str, model: str) -> dict | None:
     if not model:
         return None
-    exact = _fresh_get(('model', owner, source_kind, scope, model))
+    exact = _fresh_get(('model', owner, source_kind, mode, scope, model))
     if exact is not None:
         return exact
     tail = model.rsplit('/', 1)[-1]
@@ -178,14 +213,22 @@ def _lookup_cached_model(owner: int, source_kind: str, scope: str, model: str) -
         if exp <= now:
             _CAP_CACHE.pop(key, None)
             continue
-        if key[0] == 'model' and key[1:4] == (owner, source_kind, scope) and key[4].rsplit('/', 1)[-1] == tail:
+        if key[0] == 'model' and key[1:5] == (owner, source_kind, mode, scope) and key[5].rsplit('/', 1)[-1] == tail:
             return val
     return None
 
 
-def cache_provider_models(base_url: str, models_iter, *, source_kind: str = 'api_key', mark_probed: bool = True) -> None:
+def cache_provider_models(
+    base_url: str,
+    models_iter,
+    *,
+    source_kind: str = 'api_key',
+    auth_mode: str | None = None,
+    mark_probed: bool = True,
+) -> None:
     owner = user_id()
-    scope = (base_url or '').strip().rstrip('/')
+    inferred_mode = auth_mode or ('oauth' if source_kind == 'codex' and (base_url or '').strip().lower() == 'oauth' else 'api_key')
+    mode, scope = _capability_scope(inferred_mode, '' if inferred_mode == 'oauth' else base_url)
     has_any = False
     for raw in models_iter or ():
         limits = extract_model_limits(raw)
@@ -194,14 +237,14 @@ def cache_provider_models(base_url: str, models_iter, *, source_kind: str = 'api
             continue
         has_any = True
         has_limits = any(limits[k] is not None for k in ('context_window', 'max_input_tokens', 'max_output_tokens'))
-        _cache_put(('model', owner, source_kind, scope, mid), limits, MODEL_CAP_TTL if has_limits else MODEL_CAP_MISS_TTL)
+        _cache_put(('model', owner, source_kind, mode, scope, mid), limits, MODEL_CAP_TTL if has_limits else MODEL_CAP_MISS_TTL)
     if mark_probed:
-        _cache_put(('probed', owner, source_kind, scope), True, MODEL_CAP_TTL if has_any else MODEL_CAP_MISS_TTL)
+        _cache_put(('probed', owner, source_kind, mode, scope), 'ok', MODEL_CAP_TTL if has_any else MODEL_CAP_MISS_TTL)
 
 
 async def fetch_provider_model_metadata(base_url: str, api_key: str, model: str) -> dict | None:
     owner = user_id()
-    scope = (base_url or '').strip().rstrip('/')
+    mode, scope = _capability_scope('api_key', base_url)
     if not scope or not api_key:
         return None
     try:
@@ -212,15 +255,16 @@ async def fetch_provider_model_metadata(base_url: str, api_key: str, model: str)
             )
         if response.is_success:
             payload = response.json()
-            items = payload.get('data') if isinstance(payload, dict) else (payload if isinstance(payload, list) else [])
+            items = payload.get('data') if isinstance(payload, dict) else (payload if isinstance(payload, list) else None)
             if isinstance(items, list):
-                cache_provider_models(scope, items, source_kind='api_key')
-                return _lookup_cached_model(owner, 'api_key', scope, model)
+                cache_provider_models(scope, items, source_kind='api_key', auth_mode=mode)
+                return _lookup_cached_model(owner, 'api_key', mode, scope, model)
+            logging.getLogger('uvicorn.error').warning('Provider /models metadata probe returned unexpected payload')
         else:
             logging.getLogger('uvicorn.error').warning('Provider /models metadata probe returned HTTP %s', response.status_code)
     except Exception as exc:
         logging.getLogger('uvicorn.error').warning('Provider /models metadata probe failed: %s', type(exc).__name__)
-    _cache_put(('probed', owner, 'api_key', scope), True, MODEL_CAP_MISS_TTL)
+    _cache_put(('probed', owner, 'api_key', mode, scope), 'failed', MODEL_CAP_MISS_TTL)
     return None
 
 
@@ -237,7 +281,8 @@ def record_runtime_context_limit(
     limit = _safe_int(limit_tokens, minimum=4096)
     if limit is None:
         return
-    key = ('runtime', user_id(), (auth_mode or '').strip(), (base_url or '').strip().rstrip('/'), (model or '').strip())
+    mode, scope = _capability_scope(auth_mode, base_url)
+    key = ('runtime', user_id(), mode, scope, (model or '').strip())
     existing = _fresh_get(key)
     if tighten_only and existing is not None and existing[0] <= limit:
         return
@@ -252,12 +297,12 @@ def clear_model_capability_cache(owner: int | None = None) -> None:
         _CAP_CACHE.pop(key, None)
 
 
-async def _probe_codex_models(client, active_model: str, auth_mode: str) -> dict | None:
+async def _probe_codex_models(client, active_model: str, auth_mode: str, base_url: str = '') -> dict | None:
     if client is None:
         return None
     owner = user_id()
-    scope = (auth_mode or '').strip()
-    if _fresh_get(('probed', owner, 'codex', scope)) is None:
+    mode, scope = _capability_scope(auth_mode, base_url)
+    if _fresh_get(('probed', owner, 'codex', mode, scope)) is None:
         models_fn = getattr(client, 'models', None)
         if callable(models_fn):
             try:
@@ -265,7 +310,7 @@ async def _probe_codex_models(client, active_model: str, auth_mode: str) -> dict
                 page = await asyncio.wait_for(res, timeout=MODEL_PROBE_TIMEOUT) if inspect.isawaitable(res) else res
                 data = getattr(page, 'data', None)
                 if isinstance(data, (list, tuple)):
-                    cache_provider_models(scope, data, source_kind='codex')
+                    cache_provider_models(scope if mode == 'api_key' else 'oauth', data, source_kind='codex', auth_mode=mode)
                     if not active_model:
                         default_item = next(
                             (m for m in data if _field(m, 'is_default', 'isDefault') is True),
@@ -274,10 +319,11 @@ async def _probe_codex_models(client, active_model: str, auth_mode: str) -> dict
                         if default_item is not None:
                             return extract_model_limits(default_item)
                 else:
-                    _cache_put(('probed', owner, 'codex', scope), True, MODEL_CAP_MISS_TTL)
-            except Exception:
-                _cache_put(('probed', owner, 'codex', scope), True, MODEL_CAP_MISS_TTL)
-    return _lookup_cached_model(owner, 'codex', scope, active_model)
+                    _cache_put(('probed', owner, 'codex', mode, scope), 'failed', MODEL_CAP_MISS_TTL)
+            except Exception as exc:
+                logging.getLogger('uvicorn.error').warning('Codex models probe failed: %s', type(exc).__name__)
+                _cache_put(('probed', owner, 'codex', mode, scope), 'failed', MODEL_CAP_MISS_TTL)
+    return _lookup_cached_model(owner, 'codex', mode, scope, active_model)
 
 
 async def detect_model_capabilities(
@@ -292,8 +338,7 @@ async def detect_model_capabilities(
 ) -> ModelCapabilities:
     """Определяет подтверждённое и ручное контекстное окно модели без фиктивных значений."""
     owner = user_id()
-    mode = (auth_mode or 'api_key').strip()
-    scope = (base_url or '').strip().rstrip('/')
+    mode, scope = _capability_scope(auth_mode, base_url)
     active_model = _safe_str(_field(thread, 'model')) or _safe_str(model)
     cfg = config or {}
     manual_ctx = _safe_int(cfg.get('context_window'), minimum=4096)
@@ -301,12 +346,16 @@ async def detect_model_capabilities(
     cfg_out = _safe_int(cfg.get('max_output_tokens'), minimum=256)
 
     thread_cap = extract_model_limits(thread) if thread is not None else {}
-    codex_cap = await _probe_codex_models(client, active_model, mode) or {}
+    codex_cap = await _probe_codex_models(client, active_model, mode, base_url=scope) or {}
+    codex_probe_state = _fresh_get(('probed', owner, 'codex', mode, scope))
     provider_cap = {}
+    provider_probe_state = None
     if mode == 'api_key' and scope:
-        provider_cap = _lookup_cached_model(owner, 'api_key', scope, active_model) or {}
-        if not provider_cap and api_key and _fresh_get(('probed', owner, 'api_key', scope)) is None:
+        provider_cap = _lookup_cached_model(owner, 'api_key', mode, scope, active_model) or {}
+        provider_probe_state = _fresh_get(('probed', owner, 'api_key', mode, scope))
+        if not provider_cap and api_key and provider_probe_state is None:
             provider_cap = await fetch_provider_model_metadata(scope, api_key, active_model) or {}
+            provider_probe_state = _fresh_get(('probed', owner, 'api_key', mode, scope))
 
     rt_entry = _fresh_get(('runtime', owner, mode, scope, active_model))
     if rt_entry is None and active_model != _safe_str(model):
@@ -351,6 +400,12 @@ async def detect_model_capabilities(
     else:
         final_ctx, final_source = None, 'unknown'
 
+    provider_failed = mode == 'api_key' and provider_probe_state == 'failed'
+    codex_failed = codex_probe_state == 'failed' or (
+        mode == 'oauth' and client is None and thread is None and codex_probe_state != 'ok'
+    )
+    detection_unavailable = verified_effective is None and (provider_failed or codex_failed)
+
     return ModelCapabilities(
         model=active_model,
         context_window=final_ctx,
@@ -361,6 +416,7 @@ async def detect_model_capabilities(
         max_output_tokens=min(out_vals) if out_vals else None,
         source=final_source,
         verified_source=verified_source,
+        detection_unavailable=detection_unavailable,
     )
 
 

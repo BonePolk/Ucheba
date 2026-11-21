@@ -16,7 +16,7 @@ const CAP_SOURCE_LABELS = {
   thread: 'метаданные сессии',
   runtime: 'фактический лимит рантайма',
   config: 'настройка конфигурации',
-  manual: 'настроено вручную',
+  manual: 'задано вручную',
 };
 
 function formatTokens(val) {
@@ -205,10 +205,11 @@ export default function AgentSettings({ name, title, data, provider, oauthState,
   });
 
   const capData = capabilities.data;
-  const effectiveCtx = capData?.effective_limit ?? null;
-  const verifiedCtx = capData?.verified_context_window ?? null;
+  const detectionUnavailable = Boolean(capData?.detection_unavailable || capabilities.isError);
   const manualCtx = capData?.manual_context_window ?? parsedContextWindow;
-  const capSource = capData?.source || (manualCtx != null ? 'manual' : 'unknown');
+  const verifiedCtx = capData?.verified_context_window ?? null;
+  const effectiveCtx = capData?.effective_limit ?? (capabilities.isError ? parsedContextWindow : null);
+  const capSource = capData?.source || (effectiveCtx != null ? 'manual' : 'unknown');
   const hasUnsavedAuthOrModel = authMode !== savedAuthMode || model.trim() !== savedModel.trim();
   const savedAuthReady = savedAuthMode === 'oauth' ? oauthAuthorized : Boolean(apiKeyReady && savedModel.trim());
   const actionError = save.error || toggle.error || check.error;
@@ -302,7 +303,11 @@ export default function AgentSettings({ name, title, data, provider, oauthState,
         <div className="text-[12px] font-medium text-[#929292]">Настройки агента</div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-          <Field label="Контекстное окно (токены)" error={contextWindowError}>
+          <Field
+            label="Контекстное окно (токены)"
+            hint="Используется только для расчёта бюджета контекста в агенте и не увеличивает фактический лимит модели или провайдера."
+            error={contextWindowError}
+          >
             <Input
               type="text"
               inputMode="numeric"
@@ -355,20 +360,24 @@ export default function AgentSettings({ name, title, data, provider, oauthState,
         <div className="border border-[#262626] bg-[#0D0D0D] px-2.5 py-2 text-[11px] flex flex-col gap-0.5">
           {capabilities.isFetching && !capData ? (
             <span className="text-[#929292]">Определение контекстного окна…</span>
-          ) : effectiveCtx != null ? (
+          ) : effectiveCtx != null && verifiedCtx != null ? (
             <>
               <div className="text-[#EAEAEA]">
                 <span className="text-[#929292]">
-                  {capSource === 'manual' || (manualCtx != null && verifiedCtx != null && verifiedCtx < manualCtx)
+                  {manualCtx != null && manualCtx < verifiedCtx
                     ? 'Эффективный контекст: '
-                    : 'Определённый контекст: '}
+                    : 'Подтверждённый контекст: '}
                 </span>
                 <span className="font-mono font-medium">{formatTokens(effectiveCtx)} токенов</span>
-                <span className="text-[#929292]"> — {sourceText(capSource)}</span>
+                <span className="text-[#929292]">
+                  {manualCtx != null && manualCtx < verifiedCtx
+                    ? ` — ограничено вручную (провайдер подтверждает ${formatTokens(verifiedCtx)})`
+                    : ` — ${sourceText(capSource)}`}
+                </span>
               </div>
-              {manualCtx != null && verifiedCtx != null && verifiedCtx < manualCtx && (
+              {manualCtx != null && verifiedCtx < manualCtx && (
                 <div className="text-[#929292]">
-                  Подтверждённое ограничение ниже ручного значения ({formatTokens(manualCtx)} токенов).
+                  Подтверждённое ограничение ниже ручного значения ({formatTokens(manualCtx)} токенов); ручная настройка не увеличивает лимит провайдера.
                 </div>
               )}
               {capData?.theoretical_context_window && capData.theoretical_context_window > effectiveCtx && (
@@ -377,9 +386,30 @@ export default function AgentSettings({ name, title, data, provider, oauthState,
                 </div>
               )}
             </>
+          ) : effectiveCtx != null ? (
+            <>
+              <div className="text-[#EAEAEA]">
+                <span className="text-[#929292]">Ручное ограничение: </span>
+                <span className="font-mono font-medium">{formatTokens(effectiveCtx)} токенов</span>
+                <span className="text-[#929292]">
+                  {detectionUnavailable
+                    ? ' — автоопределение недоступно (не подтверждено провайдером)'
+                    : ' — задано вручную (не подтверждено провайдером)'}
+                </span>
+              </div>
+              <div className="text-[#929292]">
+                Применяется только для расчёта бюджета агента и не повышает реальный предел провайдера.
+              </div>
+            </>
           ) : (
             <div className="text-[#929292]">
-              Контекстное окно: <span className="text-[#EAEAEA]">Неизвестно</span> — укажите вручную при необходимости
+              Контекстное окно:{' '}
+              <span className="text-[#EAEAEA]">
+                {detectionUnavailable ? 'Автоопределение недоступно' : 'Неизвестно'}
+              </span>
+              {detectionUnavailable
+                ? ' — сервис агента или метаданные провайдера не ответили; при необходимости укажите ограничение вручную'
+                : ' — провайдер не передаёт метаданные контекста; при необходимости укажите вручную'}
             </div>
           )}
         </div>

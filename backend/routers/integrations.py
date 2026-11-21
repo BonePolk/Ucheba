@@ -176,6 +176,7 @@ async def agent_capabilities(
             'max_output_tokens': None,
             'source': 'manual' if manual is not None else 'unknown',
             'verified_source': 'unknown',
+            'detection_unavailable': True,
         }
 
 

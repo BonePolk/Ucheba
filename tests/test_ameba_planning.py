@@ -130,8 +130,13 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(ok_issues, [])
 
         late = proposal_payload([1], [task_item(1, 60)], [work_period(1, '2026-11-26', '2026-11-26', 60)])
-        _, late_issues, _ = planning.validate_proposal(late, tasks, empty_week(tz='Europe/Moscow'), NOW)
-        self.assertTrue(any(i['code'] == 'after_deadline' for i in late_issues))
+        prop_late, late_issues, days_late = planning.validate_proposal(late, tasks, empty_week(tz='Europe/Moscow'), NOW)
+        self.assertEqual(late_issues, [])
+        res_late = planning.materialize_plan(prop_late, tasks, days_late, empty_week(tz='Europe/Moscow'), NOW)
+        self.assertFalse(res_late['schedule']['no_objective_conflicts'])
+        self.assertEqual(res_late['schedule']['feasibility_status'], 'conflict')
+        self.assertEqual(res_late['schedule']['deadline_conflicts'][0]['lateness'], 'definite')
+        self.assertTrue(res_late['schedule']['periods'][0]['deadline_risk'])
 
         bad_dates = proposal_payload(
             [1], [task_item(1, 60)],
@@ -144,8 +149,13 @@ class ValidationTests(unittest.TestCase):
         # Реальные поля Task/_collect_task_state (без выдуманных available_from/deadline_type).
         early_dl_task = [{'id': 1, 'title': 'Сдача проекта', 'deadline': '2026-11-27T01:00:00+00:00', 'completed_work_minutes': 0}]
         after_dl = proposal_payload([1], [task_item(1, 90)], [work_period(1, '2026-11-28', '2026-11-28', 90)])
-        _, dl_issues, _ = planning.validate_proposal(after_dl, early_dl_task, empty_week(), NOW)
-        self.assertTrue(any(i['code'] == 'after_deadline' for i in dl_issues))
+        prop_dl, dl_issues, days_dl = planning.validate_proposal(after_dl, early_dl_task, empty_week(), NOW)
+        self.assertEqual(dl_issues, [])
+        res_dl = planning.materialize_plan(prop_dl, early_dl_task, days_dl, empty_week(), NOW)
+        self.assertFalse(res_dl['schedule']['no_objective_conflicts'])
+        self.assertEqual(res_dl['schedule']['feasibility_status'], 'conflict')
+        self.assertTrue(res_dl['schedule']['deadline_conflicts'][0]['infeasible'])
+        self.assertEqual(res_dl['schedule']['deadline_conflicts'][0]['lateness'], 'definite')
 
         # Дедлайн Пт 01:00 + гибкий период Чт–Пт допустим, но не заявляется как гарантированно выполнимый.
         thu_fri = proposal_payload([1], [task_item(1, 90)], [work_period(1, '2026-11-26', '2026-11-27', 90)])
@@ -1429,6 +1439,270 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(''.join(parts['subject']), huge_subject)
         self.assertEqual(len(json.loads(''.join(parts['previous_periods_text']))), 40)
         self.assertEqual(''.join(parts['description']), 'Короткое описание')
+
+    def test_deadline_conflicts_and_refresh_beyond_deadline(self):
+        # A: гибкий период выходит за дедлайн — не отклоняется, честно маркирует lateness='possible', сохраняет оценку и отдых.
+        dl_task = [{'id': 1, 'title': 'Курсовая', 'deadline': '2026-11-25T23:59:00+00:00', 'completed_work_minutes': 0}]
+        overlap = proposal_payload(
+            [1], [task_item(1, 180)],
+            [work_period(1, '2026-11-23', '2026-11-27', 180), rest_period('2026-11-28', '2026-11-29')],
+        )
+        prop_a, issues_a, days_a = planning.validate_proposal(overlap, dl_task, empty_week(), NOW)
+        self.assertEqual(issues_a, [])
+        res_a = planning.materialize_plan(prop_a, dl_task, days_a, empty_week(), NOW)
+        self.assertTrue(res_a['schedule']['valid'])
+        self.assertFalse(res_a['schedule']['no_objective_conflicts'])
+        self.assertEqual(res_a['schedule']['feasibility_status'], 'uncertain')
+        self.assertEqual(res_a['plans'][1]['remaining_minutes'], 180)
+        self.assertEqual(len(res_a['schedule']['periods']), 2)
+        self.assertEqual(res_a['schedule']['periods'][0]['lateness'], 'possible')
+        self.assertTrue(res_a['schedule']['periods'][0]['deadline_risk'])
+        self.assertEqual(res_a['schedule']['deadline_conflicts'][0]['lateness'], 'possible')
+        self.assertFalse(res_a['schedule']['deadline_conflicts'][0]['infeasible'])
+
+        # B: несколько задач перегружают горизонт (definite vs possible vs вовремя).
+        multi_tasks = [
+            {'id': 1, 'title': 'Отчёт', 'deadline': '2026-11-25T23:59:00+00:00', 'completed_work_minutes': 0},
+            {'id': 2, 'title': 'Практика', 'deadline': '2026-11-25T23:59:00+00:00', 'completed_work_minutes': 0},
+            {'id': 3, 'title': 'Чтение', 'deadline': '2026-11-28T23:59:00+00:00', 'completed_work_minutes': 0},
+        ]
+        multi_cand = proposal_payload(
+            [1, 2, 3],
+            [task_item(1, 120), task_item(2, 120), task_item(3, 60)],
+            [
+                work_period(1, '2026-11-26', '2026-11-27', 120),
+                work_period(2, '2026-11-24', '2026-11-26', 120),
+                work_period(3, '2026-11-23', '2026-11-25', 60),
+            ],
+        )
+        prop_m, issues_m, days_m = planning.validate_proposal(multi_cand, multi_tasks, empty_week(), NOW)
+        self.assertEqual(issues_m, [])
+        res_m = planning.materialize_plan(prop_m, multi_tasks, days_m, empty_week(), NOW)
+        self.assertFalse(res_m['schedule']['no_objective_conflicts'])
+        self.assertEqual(res_m['schedule']['feasibility_status'], 'conflict')
+        self.assertEqual({c['task_id']: c['lateness'] for c in res_m['schedule']['deadline_conflicts']}, {1: 'definite', 2: 'possible'})
+        self.assertEqual([len(c['conflicting_periods']) for c in res_m['schedule']['deadline_conflicts']], [1, 1])
+
+        # C: структурные ошибки и ручной pin после дедлайна всё ещё жёстко проверяются.
+        _, horizon_issues, _ = planning.validate_proposal(
+            proposal_payload([1], [task_item(1, 60)], [work_period(1, '2026-11-29', '2026-12-05', 60)]),
+            dl_task, empty_week(), NOW,
+        )
+        self.assertEqual(horizon_issues[0]['code'], 'outside_horizon')
+        self.assertEqual((horizon_issues[0]['task_id'], horizon_issues[0]['submitted_end_date']), (1, '2026-12-05'))
+
+        pin_after_dl = {'task_pins': {'1': {'mode': 'date', 'target_date': '2026-11-28', 'not_before': None}}}
+        _, pin_miss_issues, _ = planning.validate_proposal(
+            proposal_payload([1], [task_item(1, 60)], [work_period(1, '2026-11-23', '2026-11-24', 60)]),
+            dl_task, empty_week(), NOW, adjustments=pin_after_dl,
+        )
+        self.assertTrue(any(i['code'] == 'violates_task_pin' for i in pin_miss_issues))
+        prop_pin, pin_ok_issues, days_pin = planning.validate_proposal(
+            proposal_payload([1], [task_item(1, 60)], [work_period(1, '2026-11-28', '2026-11-28', 60)]),
+            dl_task, empty_week(), NOW, adjustments=pin_after_dl,
+        )
+        self.assertEqual(pin_ok_issues, [])
+        mat_pin = planning.materialize_plan(prop_pin, dl_task, days_pin, empty_week(), NOW, adjustments=pin_after_dl)
+        self.assertEqual(mat_pin['schedule']['deadline_conflicts'][0]['lateness'], 'definite')
+
+        # D: /refresh умеет сдвигать задачу за дедлайн, очищать риск при возврате до срока и при выполнении.
+        on_time = proposal_payload([1], [task_item(1, 120)], [work_period(1, '2026-11-23', '2026-11-24', 120)])
+        p0, i0, d0 = planning.validate_proposal(on_time, dl_task, empty_week(), NOW)
+        self.assertEqual(i0, [])
+        saved = planning.materialize_plan(p0, dl_task, d0, empty_week(), NOW)
+        self.assertEqual(saved['schedule']['deadline_conflicts'], [])
+
+        shifted_late = planning.refresh_schedule(
+            saved, dl_task, empty_week(), NOW,
+            adjustments={'task_pins': {'1': {'mode': 'shift', 'target_date': '2026-11-27', 'not_before': '2026-11-27'}}},
+        )
+        self.assertEqual((shifted_late['schedule']['periods'][0]['start_date'], shifted_late['schedule']['periods'][0]['end_date']), ('2026-11-27', '2026-11-28'))
+        self.assertFalse(shifted_late['schedule']['no_objective_conflicts'])
+        self.assertEqual(shifted_late['schedule']['feasibility_status'], 'conflict')
+        self.assertEqual(shifted_late['schedule']['deadline_conflicts'][0]['lateness'], 'definite')
+
+        shifted_back = planning.refresh_schedule(
+            shifted_late, dl_task, empty_week(), NOW,
+            adjustments={'task_pins': {'1': {'mode': 'shift', 'target_date': '2026-11-23', 'not_before': None}}},
+        )
+        self.assertEqual((shifted_back['schedule']['periods'][0]['start_date'], shifted_back['schedule']['periods'][0]['end_date']), ('2026-11-23', '2026-11-24'))
+        self.assertTrue(shifted_back['schedule']['no_objective_conflicts'])
+        self.assertEqual(shifted_back['schedule']['deadline_conflicts'], [])
+        self.assertIsNone(shifted_back['reasons'][0]['deadline_risk'])
+
+        completed_after_late = planning.refresh_schedule(
+            shifted_late,
+            [{'id': 1, 'title': 'Курсовая', 'deadline': '2026-11-25T23:59:00+00:00', 'completed_work_minutes': 120}],
+            empty_week(), NOW,
+        )
+        self.assertEqual(completed_after_late['schedule']['deadline_conflicts'], [])
+        self.assertIsNone(completed_after_late['reasons'][0]['deadline_risk'])
+        self.assertTrue(completed_after_late['schedule']['no_objective_conflicts'])
+
+    async def test_agent_loop_allows_deadline_overflow_and_fails_on_horizon_error(self):
+        # E / I: полный цикл агента принимает план с выходом за срок с первой попытки без 502 и сохраняет rest.
+        tight_tasks = [
+            {'id': 25, 'title': 'Проект', 'deadline': '2026-11-25T23:59:00+00:00', 'completed_work_minutes': 0},
+            {'id': 20, 'title': 'Тест', 'deadline': '2026-11-25T23:59:00+00:00', 'completed_work_minutes': 0},
+        ]
+        cand = proposal_payload(
+            [25, 20],
+            [task_item(25, 180), task_item(20, 120)],
+            [
+                work_period(25, '2026-11-24', '2026-11-27', 180),
+                work_period(20, '2026-11-26', '2026-11-27', 120),
+                rest_period('2026-11-28', '2026-11-29'),
+            ],
+        )
+        res = await self.run_agent([[('propose_plan', cand)]], tasks=tight_tasks)
+        self.assertTrue(res['schedule']['valid'])
+        self.assertFalse(res['schedule']['no_objective_conflicts'])
+        self.assertEqual(res['plans'][25]['remaining_minutes'], 180)
+        self.assertEqual(len(res['schedule']['deadline_conflicts']), 2)
+        self.assertTrue(any(p['kind'] == 'rest' for p in res['schedule']['periods']))
+
+        bad_horizon = proposal_payload(
+            [25, 20], [task_item(25, 60), task_item(20, 60)],
+            [work_period(25, '2026-11-24', '2026-12-20', 60), work_period(20, '2026-11-24', '2026-11-24', 60)],
+        )
+        with self.assertRaisesRegex(HTTPException, 'не прошёл проверку'):
+            await self.run_agent([[('propose_plan', bad_horizon), ('propose_plan', bad_horizon)]], tasks=tight_tasks)
+
+    async def test_capability_cache_isolation_and_detection_failure_visibility(self):
+        import httpx
+        from routers.integrations import agent_capabilities
+
+        clear_model_capability_cache()
+
+        # 16A: _probe_codex_models при auth_mode='api_key' разделяет кэш по base_url.
+        c1 = MagicMock()
+        c1.models = AsyncMock(return_value=MagicMock(data=[{'model': 'shared-model', 'context_window': 200_000}]))
+        c2 = MagicMock()
+        c2.models = AsyncMock(return_value=MagicMock(data=[{'model': 'shared-model', 'context_window': 64_000}]))
+
+        gw1_caps = await detect_model_capabilities(
+            auth_mode='api_key', base_url='https://gw-1.invalid/v1', model='shared-model', client=c1,
+        )
+        gw2_caps = await detect_model_capabilities(
+            auth_mode='api_key', base_url='https://gw-2.invalid/v1', model='shared-model', client=c2,
+        )
+        gw3_caps = await detect_model_capabilities(
+            auth_mode='api_key', base_url='https://gw-3.invalid/v1', model='shared-model', client=None,
+        )
+        self.assertEqual(gw1_caps.verified_context_window, 200_000)
+        self.assertEqual(gw2_caps.verified_context_window, 64_000)
+        self.assertIsNone(gw3_caps.verified_context_window)
+
+        # 16B: oauth-кэш изолирован от api_key даже при совпадении имени модели или устаревшем base_url.
+        codex_harness.cache_provider_models('oauth', [{'model': 'shared-model', 'context_window': 400_000}], source_kind='codex')
+        oauth_caps = await detect_model_capabilities(
+            auth_mode='oauth', base_url='https://gw-1.invalid/v1', model='shared-model', client=None,
+        )
+        self.assertEqual(oauth_caps.verified_context_window, 400_000)
+        self.assertEqual(oauth_caps.source, 'codex')
+        self.assertFalse(oauth_caps.detection_unavailable)
+
+        # 16C: изоляция кэша по пользователям.
+        codex_harness.cache_provider_models(
+            'https://gw-u.invalid/v1', [{'id': 'shared-model', 'context_window': 300_000}],
+            source_kind='api_key', auth_mode='api_key',
+        )
+        token_u2 = current_user_id.set(2)
+        try:
+            u2_miss = await detect_model_capabilities(auth_mode='api_key', base_url='https://gw-u.invalid/v1', model='shared-model')
+            self.assertIsNone(u2_miss.verified_context_window)
+            codex_harness.cache_provider_models(
+                'https://gw-u.invalid/v1', [{'id': 'shared-model', 'context_window': 128_000}],
+                source_kind='api_key', auth_mode='api_key',
+            )
+            clear_model_capability_cache(1)
+            u2_keep = await detect_model_capabilities(auth_mode='api_key', base_url='https://gw-u.invalid/v1', model='shared-model')
+            self.assertEqual(u2_keep.verified_context_window, 128_000)
+        finally:
+            current_user_id.reset(token_u2)
+        u1_cleared = await detect_model_capabilities(auth_mode='api_key', base_url='https://gw-u.invalid/v1', model='shared-model')
+        self.assertIsNone(u1_cleared.verified_context_window)
+
+        # 16D + 17A/B/C: HTTP 200 без метаданных vs ошибка /models (в т.ч. при кэшировании) vs нормализация URL и приоритет verified над manual.
+        clear_model_capability_cache()
+
+        def fake_async_client(response_or_exc):
+            cm = MagicMock()
+            inst = MagicMock()
+            if isinstance(response_or_exc, Exception):
+                inst.get = AsyncMock(side_effect=response_or_exc)
+            else:
+                inst.get = AsyncMock(return_value=response_or_exc)
+            cm.__aenter__ = AsyncMock(return_value=inst)
+            cm.__aexit__ = AsyncMock(return_value=False)
+            return cm
+
+        ok_empty = MagicMock(is_success=True, status_code=200, json=MagicMock(return_value={'data': [{'id': 'opaque-model'}]}))
+        with patch.object(codex_harness.httpx, 'AsyncClient', return_value=fake_async_client(ok_empty)):
+            clean_no_meta = await detect_model_capabilities(
+                auth_mode='api_key', base_url='https://gw-clean.invalid/v1', api_key='secret-key',
+                model='opaque-model', config={'context_window': None},
+            )
+        self.assertFalse(clean_no_meta.detection_unavailable)
+        self.assertEqual(clean_no_meta.source, 'unknown')
+
+        fail_502 = MagicMock(is_success=False, status_code=502)
+        with patch.object(codex_harness.httpx, 'AsyncClient', return_value=fake_async_client(fail_502)):
+            failed_no_manual = await detect_model_capabilities(
+                auth_mode='api_key', base_url='https://gw-down.invalid/v1', api_key='secret-key',
+                model='m1', config={'context_window': None},
+            )
+        # Повторный запрос в пределах miss TTL также должен честно показывать недоступность автоопределения.
+        failed_with_manual = await detect_model_capabilities(
+            auth_mode='api_key', base_url='https://gw-down.invalid/v1', api_key='secret-key',
+            model='m1', config={'context_window': 128_000},
+        )
+        self.assertTrue(failed_no_manual.detection_unavailable)
+        self.assertEqual(failed_no_manual.source, 'unknown')
+        self.assertTrue(failed_with_manual.detection_unavailable)
+        self.assertEqual((failed_with_manual.effective_limit, failed_with_manual.verified_context_window, failed_with_manual.source), (128_000, None, 'manual'))
+
+        ok_128k = MagicMock(is_success=True, status_code=200, json=MagicMock(return_value={'data': [{'id': 'm-cap', 'context_window': 128_000, 'theoretical_context_window': 1_000_000}]}))
+        with patch.object(codex_harness.httpx, 'AsyncClient', return_value=fake_async_client(ok_128k)):
+            await detect_model_capabilities(
+                auth_mode='api_key', base_url='HTTPS://GW-NORM.INVALID:443/v1/', api_key='secret-token-xyz',
+                model='m-cap', config={'context_window': 1_000_000},
+            )
+        norm_cached = await detect_model_capabilities(
+            auth_mode='api_key', base_url='https://gw-norm.invalid/v1', api_key='',
+            model='m-cap', config={'context_window': 1_000_000},
+        )
+        self.assertEqual((norm_cached.effective_limit, norm_cached.verified_context_window, norm_cached.source), (128_000, 128_000, 'provider'))
+        self.assertFalse(norm_cached.detection_unavailable)
+        self.assertFalse(any('secret-token-xyz' in repr(k) for k in codex_harness._CAP_CACHE))
+
+        # 17E: oauth без активного клиента Codex сообщает об отсутствии автоопределения.
+        oauth_unavail = await detect_model_capabilities(auth_mode='oauth', model='gpt-5', client=None, thread=None)
+        self.assertTrue(oauth_unavail.detection_unavailable)
+
+        # 17D: backend fallback /agents/{name}/capabilities возвращает detection_unavailable=True для всех агентов.
+        with patch('routers.integrations.check_feature'), \
+             patch('routers.integrations.read_settings', side_effect=[
+                 ({'auth_mode': 'api_key', 'model': 'm1', 'context_window': 256_000}, {}),
+                 ({'base_url': 'https://lenec.tech/v1'}, {'api_key': 'k'}),
+                 ({'auth_mode': 'api_key', 'model': 'm2', 'context_window': None}, {}),
+                 ({'base_url': 'https://lenec.tech/v1'}, {'api_key': 'k'}),
+                 ({'auth_mode': 'api_key', 'model': 'm3', 'context_window': None}, {}),
+                 ({'base_url': 'https://lenec.tech/v1'}, {'api_key': 'k'}),
+                 ({'auth_mode': 'oauth', 'model': '', 'context_window': 128_000}, {}),
+                 ({'base_url': 'https://lenec.tech/v1'}, {}),
+             ]), \
+             patch('routers.integrations.call', AsyncMock(side_effect=httpx.ConnectError('service down'))):
+            fb_ameba = await agent_capabilities('ameba', None)
+            fb_monocle = await agent_capabilities('monocle', None)
+            fb_straus = await agent_capabilities('straus', None)
+            fb_arrodes = await agent_capabilities('arrodes', None)
+        self.assertTrue(all(r['detection_unavailable'] is True and r['verified_context_window'] is None for r in (fb_ameba, fb_monocle, fb_straus, fb_arrodes)))
+        self.assertEqual((fb_ameba['effective_limit'], fb_ameba['source']), (256_000, 'manual'))
+        self.assertEqual((fb_monocle['effective_limit'], fb_monocle['source']), (None, 'unknown'))
+        self.assertEqual((fb_straus['effective_limit'], fb_straus['source']), (None, 'unknown'))
+        self.assertEqual((fb_arrodes['effective_limit'], fb_arrodes['source']), (128_000, 'manual'))
+        clear_model_capability_cache()
 
 
 class StorageTests(unittest.TestCase):
