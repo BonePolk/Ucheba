@@ -9,7 +9,6 @@ from fastapi import HTTPException
 from sqlmodel import Session, select
 
 from common.accounts import check_feature
-from common.ameba_guards import verify_progress_update
 from common.calendar import planning_week as read_week, read_ameba_plan, read_config as read_calendar, save_ameba_plan, view_events
 from common.database import get_engine
 from common.dates import normalize_utc
@@ -23,7 +22,6 @@ from integrations.context import context_status, prepare, snapshot
 
 ranking_locks = {}
 deferred_refreshes = {}
-MARKER_WORDS = ('дедлайн', 'срок', 'сдача', 'сдать', 'напоминан', 'открыт', 'deadline', 'due', 'reminder')
 
 
 def _load_setting(session: Session, name: str, default: dict) -> dict:
@@ -86,106 +84,6 @@ def save_plan_feedback(text):
     save_adjustments(current)
 
 
-def read_profile(session: Session | None = None) -> dict:
-    default = {'preferences': {}, 'observations': []}
-    if session is not None:
-        raw = _load_setting(session, 'ameba_profile', default)
-    else:
-        with Session(get_engine()) as local:
-            raw = _load_setting(local, 'ameba_profile', default)
-    return {
-        'preferences': dict(raw.get('preferences') or {}),
-        'observations': list(raw.get('observations') or [])[-100:],
-    }
-
-
-def _save_profile(session: Session, profile: dict) -> None:
-    clean = {
-        'preferences': dict(profile.get('preferences') or {}),
-        'observations': list(profile.get('observations') or [])[-100:],
-    }
-    _save_setting(session, 'ameba_profile', clean)
-
-
-def _day_busy_minutes(day_iso: str) -> int:
-    day_obj = datetime.strptime(day_iso, '%Y-%m-%d').date()
-    intervals = []
-    for ev in view_events(day_obj, day_obj):
-        if ev.get('kind') not in ('busy', 'task'):
-            continue
-        sh, sm = map(int, ev['start'].split(':'))
-        eh, em = map(int, ev['end'].split(':'))
-        dur = (eh * 60 + em) - (sh * 60 + sm)
-        text = f"{ev.get('title', '')} {ev.get('summary', '')}".casefold()
-        if (dur >= 1080 or (ev.get('kind') == 'task' and dur <= 30)) and any(w in text for w in MARKER_WORDS):
-            continue
-        intervals.append((sh * 60 + sm, eh * 60 + em))
-    merged = []
-    for a, b in sorted(intervals):
-        if merged and a <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
-        else:
-            merged.append((a, b))
-    return sum(b - a for a, b in merged)
-
-
-def record_observation(
-    session: Session,
-    task: Task,
-    outcome: str,
-    actual_minutes: int | None = None,
-    period_id: str | None = None,
-) -> None:
-    saved = session.get(TaskRanking, 1)
-    result = json.loads(saved.result) if saved and saved.result else {}
-    schedule = result.get('schedule') or {}
-    zone = ZoneInfo(read_calendar()['timezone'])
-    today = datetime.now(zone).date()
-
-    plan = next((item.get('plan') for item in result.get('timeline', []) if item.get('id') == task.id), None)
-    planned_minutes = int(plan.get('planned_work_minutes', plan.get('work_max_minutes', 0)) or 0) if plan else 0
-    effort = (plan or {}).get('effort') or 'medium'
-
-    target_date = today
-    if period_id:
-        for p in schedule.get('periods', []):
-            if p.get('id') == period_id:
-                t_item = next((t for t in p.get('tasks', []) if t.get('task_id') == task.id), None)
-                planned_val = t_item.get('minutes') if t_item else (p.get('minutes') if p.get('task_id') == task.id else None)
-                if planned_val and outcome in ('partial', 'missed', 'too_hard'):
-                    planned_minutes = int(planned_val)
-                if p.get('start_date'):
-                    target_date = datetime.strptime(p['start_date'], '%Y-%m-%d').date()
-                break
-
-    busy_minutes = _day_busy_minutes(target_date.isoformat())
-    profile = read_profile(session)
-    profile['observations'].append({
-        'task_id': task.id,
-        'category': task.category or '',
-        'effort': effort,
-        'outcome': outcome,
-        'planned_minutes': planned_minutes,
-        'actual_minutes': int(actual_minutes) if actual_minutes is not None else None,
-        'busy_day': busy_minutes >= 240,
-        'weekday': target_date.weekday(),
-        'recorded_at': datetime.now(timezone.utc).isoformat(),
-    })
-    _save_profile(session, profile)
-
-
-def record_task_completion(session: Session, task: Task) -> None:
-    if task.completed_work_minutes <= 0:
-        return
-    saved = session.get(TaskRanking, 1)
-    if not saved or not saved.result:
-        return
-    result = json.loads(saved.result)
-    if not any(item.get('id') == task.id and item.get('plan') for item in result.get('timeline', [])):
-        return
-    record_observation(session, task, 'done', actual_minutes=task.completed_work_minutes)
-
-
 def _collect_task_state(session):
     tasks = session.exec(select(Task).where(Task.archived == False, Task.status != 'done').order_by(Task.id)).all()
     subtasks_map = subtasks_service.list_for_tasks(session, [task.id for task in tasks])
@@ -235,29 +133,6 @@ def _collect_task_state(session):
     return state, ready, waiting
 
 
-def apply_progress(current_minutes: int, update: dict) -> int:
-    """Вычисляет подтверждённый прогресс (add/set) с защитой от отрицательных значений."""
-    op = update.get('operation')
-    current = max(0, int(current_minutes or 0))
-    if op == 'add':
-        mins = int(update.get('minutes', 0))
-        if mins <= 0 or mins > 10000:
-            raise ValueError('Добавляемый прогресс должен быть больше 0 минут.')
-        total = current + mins
-    elif op == 'set':
-        mins = int(update.get('minutes', 0))
-        if mins < 0 or mins > 10000:
-            raise ValueError('Итоговый прогресс должен быть от 0 до 10000 минут.')
-        total = mins
-    elif 'completed_work_minutes' in update:
-        total = int(update['completed_work_minutes'])
-    else:
-        raise ValueError('Некорректный формат обновления прогресса.')
-    if total < 0 or total > 10000:
-        raise ValueError('Суммарный прогресс должен быть от 0 до 10000 минут.')
-    return total
-
-
 def _commit_persistent_preferences(items: list[dict]) -> int:
     """Сохраняет подтверждённые устойчивые привычки в общую память после commit плана."""
     if not items:
@@ -295,12 +170,11 @@ def _build_signature(session, state, include_ameba_facts: bool = True) -> str:
     from agent_memory import read as read_facts
     calendar = read_calendar()
     adjustments = read_adjustments(session)
-    profile = read_profile(session)
     ameba_cfg = read_config('ameba')
     provider_base = read_settings('ai_provider', apply_feature=False)[0].get('base_url')
     allowed_agents = ('Владелец', 'user', 'Ameba') if include_ameba_facts else ('Владелец', 'user')
     return json.dumps({
-        'version': 44,
+        'version': 45,
         'tasks': state,
         'calendar': {
             'revision': calendar.get('revision', ''),
@@ -309,7 +183,6 @@ def _build_signature(session, state, include_ameba_facts: bool = True) -> str:
         },
         'facts': sorted(({'key': fact['key'], 'text': fact['text']} for fact in read_facts() if fact['agent'] in allowed_agents), key=lambda fact: fact['key']),
         'feedback': adjustments,
-        'preferences': profile.get('preferences', {}),
         'provider': {
             'base_url': provider_base,
             **{
@@ -354,41 +227,25 @@ def automatic_inputs():
 
 def calendar_schedule():
     config = read_calendar()
-    zone = ZoneInfo(config['timezone'])
-    today = datetime.now(zone).date()
-    events = view_events(today, today + timedelta(days=6))
-    by_day = {
-        (today + timedelta(days=offset)).isoformat(): {
-            'date': (today + timedelta(days=offset)).isoformat(),
-            'weekday': (today + timedelta(days=offset)).weekday(),
-            'busy_minutes': 0,
-            'commitments': [],
-            'markers': [],
-        }
-        for offset in range(7)
-    }
-    for event in events:
-        entry = by_day.get(event['date'])
-        if not entry or event['kind'] == 'work':
+    today = datetime.now(ZoneInfo(config['timezone'])).date()
+    intervals_by_day = {(today + timedelta(days=offset)).isoformat(): [] for offset in range(7)}
+    for ev in view_events(today, today + timedelta(days=6)):
+        if ev['kind'] not in ('busy', 'task') or ev['date'] not in intervals_by_day:
             continue
-        sh, sm = map(int, event['start'].split(':'))
-        eh, em = map(int, event['end'].split(':'))
-        dur = max(0, (eh * 60 + em) - (sh * 60 + sm))
-        text = f"{event.get('title', '')} {event.get('summary', '')}".casefold()
-        all_day = dur >= 1080 or (sh == 0 and sm <= 5 and eh >= 23 and em >= 55)
-        if (all_day or (event['kind'] == 'task' and dur <= 30)) and any(w in text for w in MARKER_WORDS):
-            entry['markers'].append({'title': event['title'], 'kind': 'deadline', 'all_day': all_day})
-        elif event['kind'] in ('busy', 'task'):
-            entry['commitments'].append({'id': event['id'], 'title': event['title'], 'start': event['start'], 'end': event['end'], 'kind': event['kind']})
-    for date_iso, entry in by_day.items():
-        entry['busy_minutes'] = _day_busy_minutes(date_iso)
-    return {
-        'version': 2,
-        'start_at': datetime.now(timezone.utc).isoformat(),
-        'timezone': config['timezone'],
-        'days_summary': list(by_day.values()),
-        'rest_assumption': '',
-    }
+        sh, sm = map(int, ev['start'].split(':'))
+        eh, em = map(int, ev['end'].split(':'))
+        if eh * 60 + em > sh * 60 + sm:
+            intervals_by_day[ev['date']].append((sh * 60 + sm, eh * 60 + em))
+    days_summary = []
+    for date_iso, spans in intervals_by_day.items():
+        merged = []
+        for a, b in sorted(spans):
+            if merged and a <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+            else:
+                merged.append((a, b))
+        days_summary.append({'date': date_iso, 'busy_minutes': sum(b - a for a, b in merged)})
+    return {'version': 3, 'timezone': config['timezone'], 'days_summary': days_summary}
 
 
 def plan_expired(result):
@@ -409,7 +266,6 @@ def ranking_status():
         ids = [task_id for task_id in result.get('task_ids', []) if task_id in ready_ids]
         plan_reset = bool(saved) and read_ameba_plan().get('run_id') != result.get('plan_run_id')
         adjustments = read_adjustments(session)
-        profile = read_profile(session)
         return result | {
             'enabled': bool(read_config('ameba').get('enabled')),
             'plan_reset': plan_reset,
@@ -421,7 +277,6 @@ def ranking_status():
             'total_count': len(ready) + len(waiting),
             'feedback': adjustments['text'],
             'manual_adjustments': adjustments,
-            'observations_count': len(profile['observations']),
             'needs_refresh': not saved or saved.snapshot != signature or plan_expired(result),
             'uncertain_comparisons': result.get('uncertain_comparisons', 0),
             'calendar_schedule': calendar_schedule(),
@@ -459,7 +314,6 @@ async def request_ranking(tasks, task_id=0, checked_contexts=(), refresh=False):
         saved = session.get(TaskRanking, 1)
         previous = json.loads(saved.result) if saved else {}
         adjustments = read_adjustments(session)
-        profile = read_profile(session)
     return await scheduler.run_ranking({
         'input_signature': input_signature,
         'api_key': api_key,
@@ -472,7 +326,6 @@ async def request_ranking(tasks, task_id=0, checked_contexts=(), refresh=False):
         'previous_plan': previous,
         'user_feedback': adjustments['text'],
         'manual_adjustments': adjustments,
-        'recent_observations': profile.get('observations', [])[-10:],
         'checked_contexts': list(checked_contexts),
     }, endpoint='/refresh' if refresh else '/rank')
 
@@ -563,7 +416,6 @@ async def submit_feedback(task_id: int, outcome: str, actual_minutes: int | None
         task = session.get(Task, task_id)
         if not task:
             raise HTTPException(404, 'Задача не найдена')
-        record_observation(session, task, outcome, actual_minutes=actual_minutes, period_id=period_id)
         if outcome == 'done':
             task.status = 'done'
             if actual_minutes is not None and actual_minutes > 0:
@@ -758,9 +610,8 @@ async def rank_all(force=False, task_id=0):
             raise HTTPException(502, 'Ameba не построила корректный план периодов. Предыдущий результат сохранён.')
         task_preferences = result.pop('task_preferences', []) or []
         persistent_preferences = result.pop('persistent_preferences', []) or []
-        progress_updates = result.pop('progress_updates', []) or []
-        confirmed_user_answers = result.pop('confirmed_user_answers', []) or []
-        plans_map = result.get('plans') or {}
+        result.pop('progress_updates', None)
+        confirmed_progress = result.pop('confirmed_progress', []) or []
         result.pop('memory_saved_count', None)
         result['task_ids'] = ids
         result.update(generated_at=datetime.now(timezone.utc).isoformat(), ranked_count=len(ids), pending_count=len(waiting), total_count=len(ready) + len(waiting))
@@ -768,7 +619,6 @@ async def rank_all(force=False, task_id=0):
         task_notes_saved_count = 0
         progress_updated_count = 0
         final_signature = signature
-        ready_by_id = {t['id']: t for t in ready}
         with Session(get_engine()) as session:
             if (
                 task_state(session)[0] != signature
@@ -789,45 +639,33 @@ async def rank_all(force=False, task_id=0):
                     adj['task_notes'][str(tid)] = text
                     task_notes_saved_count += 1
             seen_progress_ids: set[int] = set()
-            for upd in progress_updates:
-                tid = upd.get('task_id')
+            for entry in confirmed_progress:
+                if not isinstance(entry, dict) or entry.get('confirmed_by_user') is not True:
+                    continue
+                tid = entry.get('task_id')
                 if tid not in ready_id_set or tid in seen_progress_ids:
+                    continue
+                add_mins = int(entry.get('add_minutes') or 0)
+                if add_mins <= 0 or add_mins > 1440:
                     continue
                 seen_progress_ids.add(tid)
                 task_row = session.get(Task, tid)
                 if not task_row or task_row.archived or task_row.status == 'done':
                     continue
-                base_mins = upd.get('base_completed_minutes')
+                base_mins = entry.get('base_completed_minutes')
                 if base_mins is not None and task_row.completed_work_minutes != int(base_mins):
                     raise HTTPException(409, 'Прогресс задачи изменился во время расчёта. Повторите планирование')
-                plan_info = plans_map.get(tid) or plans_map.get(str(tid)) or {}
-                ok_progress, _, _ = verify_progress_update(
-                    upd,
-                    ready_by_id[tid],
-                    user_feedback=adj['text'],
-                    user_answers=confirmed_user_answers,
-                    all_tasks=ready,
-                    total_minutes_min=plan_info.get('total_minutes_min'),
-                    total_minutes_max=plan_info.get('total_minutes_max'),
-                )
-                if not ok_progress:
-                    raise HTTPException(502, 'Ameba предложила неподтверждённое изменение прогресса. Предыдущий результат сохранён.')
-                try:
-                    new_mins = apply_progress(task_row.completed_work_minutes, upd)
-                except ValueError as exc:
-                    raise HTTPException(422, str(exc)) from None
-                if task_row.completed_work_minutes != new_mins:
-                    task_row.completed_work_minutes = new_mins
-                    if task_row.status == 'todo' and new_mins > 0:
-                        ctx = session.get(TaskContext, tid)
-                        was_valid = ctx is not None and context_status(task_row, ctx) == 'ready'
-                        task_row.status = 'in_progress'
-                        if was_valid:
-                            ctx.task_snapshot = snapshot(task_row)
-                            session.add(ctx)
-                    task_row.updated_at = datetime.now(timezone.utc)
-                    session.add(task_row)
-                    progress_updated_count += 1
+                task_row.completed_work_minutes += add_mins
+                if task_row.status == 'todo':
+                    ctx = session.get(TaskContext, tid)
+                    was_valid = ctx is not None and context_status(task_row, ctx) == 'ready'
+                    task_row.status = 'in_progress'
+                    if was_valid:
+                        ctx.task_snapshot = snapshot(task_row)
+                        session.add(ctx)
+                task_row.updated_at = datetime.now(timezone.utc)
+                session.add(task_row)
+                progress_updated_count += 1
             if adj['text']:
                 consumed_feedback = True
                 adj['text'] = ''
@@ -841,7 +679,7 @@ async def rank_all(force=False, task_id=0):
             session.add(saved)
             for tid in ids:
                 task = session.get(Task, tid)
-                task.ai_details = json.dumps({'version': 44, 'status': 'ranked'})
+                task.ai_details = json.dumps({'version': 45, 'status': 'ranked'})
                 task.ai_scored_at = datetime.now(timezone.utc)
                 session.add(task)
             if result.get('plan_run_id'):
@@ -890,7 +728,7 @@ async def evaluate_task(task_id):
     context = await prepare(task_id)
     original = context['task_snapshot']
     if context['status'] != 'ready':
-        metrics = {'version': 44, 'status': 'needs_context', 'reason': ' '.join(context['questions'])}
+        metrics = {'version': 45, 'status': 'needs_context', 'reason': ' '.join(context['questions'])}
         with Session(get_engine()) as session:
             task = session.get(Task, task_id)
             if not task:
@@ -905,4 +743,4 @@ async def evaluate_task(task_id):
     result = await rank_all(task_id=task_id)
     ids = result['task_ids']
     return result | {'rank': ids.index(task_id) + 1 if task_id in ids else None,
-                     'metrics': {'status': 'ranked', 'version': 44}}
+                     'metrics': {'status': 'ranked', 'version': 45}}
