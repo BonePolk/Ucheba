@@ -23,6 +23,7 @@ from common.codex_harness import (
     clear_model_capability_cache,
     detect_model_capabilities,
     extract_model_limits,
+    record_runtime_context_limit,
 )
 from common.database import init_db
 from common.identity import current_user_id
@@ -607,6 +608,13 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
             if captured_prompts is not None:
                 captured_prompts.append(prompt_input.content if hasattr(prompt_input, 'content') else prompt_input)
             forced_outcome = next(outcome_iter, None)
+            if forced_outcome is not None and adapter is not None and (forced_outcome.last_usage or forced_outcome.context_window):
+                if callable(adapter.on_token_usage):
+                    adapter.on_token_usage(
+                        last_usage=forced_outcome.last_usage,
+                        total_usage=forced_outcome.usage,
+                        context_window=forced_outcome.context_window,
+                    )
             if forced_outcome is not None and not forced_outcome.completed:
                 if getattr(forced_outcome, 'compacted', False) and adapter is not None:
                     adapter.compaction_count += 1
@@ -1047,10 +1055,11 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
         )
         # В начальном промпте огромная задача не раздувает сообщение сверх per-task лимита, а инструмент режет на чанки.
         first_chunk = tool_results[0][1]['tasks'][0]
-        self.assertIn('full_context_chunk', first_chunk)
-        meta1 = first_chunk['full_context_chunk']
+        self.assertIn('details_chunk', first_chunk)
+        meta1 = first_chunk['details_chunk']
         self.assertTrue(meta1['has_more'])
         self.assertEqual(meta1['total_chars'], len(giant_text))
+        self.assertEqual(meta1['fields'], ['full_context'])
         next_off = meta1['next_offset']
         self.assertIn(f'context_offset={next_off}', tool_results[0][1]['note'])
 
@@ -1061,13 +1070,62 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
             out, _ = await handler.call('get_task_details', {'task_ids': [1], 'context_offset': next_off})
             c = out['tasks'][0]
             chunks.append(c['full_context'])
-            next_off = c['full_context_chunk']['next_offset']
+            next_off = c['details_chunk']['next_offset']
         self.assertEqual(''.join(chunks), giant_text)
 
-    async def test_compaction_signals_recovery_without_asking_user(self):
-        # Сценарий F: при событии сжатия контекста второй ход явно инструктируется догрузить детали и прошлый план без ask_user.
+    async def test_get_task_details_bounds_entire_payload_for_non_full_context_fields(self):
+        # Сценарий C: огромные description + owner_notes при пустом full_context ограничиваются целиком и не путаются с пустыми полями.
+        desc_30k = 'Описание задачи: ' + ('подробное условие реализации ' * 1080)
+        notes_20k = 'Заметка владельца: ' + ('личные заметки и ограничения ' * 695)
+        self.assertGreater(len(desc_30k), 30_000)
+        self.assertGreater(len(notes_20k), 20_000)
+        tasks = [{
+            'id': 7,
+            'title': 'Переезд и документы',
+            'priority': 'high',
+            'status': 'in_progress',
+            'deadline': '2026-11-26T09:30:00Z',
+            'completed_work_minutes': 45,
+            'description': desc_30k,
+            'owner_notes': notes_20k,
+            'full_context': '',
+        }]
+        handler = ameba_service.AmebaTools({'tasks': tasks, 'now': NOW}, empty_week(), MagicMock())
+        caps32 = ModelCapabilities(model='mid', context_window=32_000, theoretical_context_window=32_000, source='provider')
+        budget32 = ameba_service._plan_context_budget(caps32, overhead_tokens=5_000)
+        handler.configure_context(caps32, budget32, initial_prompt_tokens=2_000, previous_periods_by_task={}, previous_plan_truncated=False)
+        resp_budget = handler._tool_response_budget()
+
+        reassembled = {'description': [], 'owner_notes': []}
+        next_off = None
+        seen_chunks = 0
+        while True:
+            out, _ = await handler.call('get_task_details', {'task_ids': [7], 'context_offset': next_off})
+            handler.pending_tool_tokens = 0
+            self.assertLessEqual(ameba_service._estimate_json_tokens(out), resp_budget)
+            card = out['tasks'][0]
+            self.assertEqual((card['id'], card['title'], card['completed_work_minutes']), (7, 'Переезд и документы', 45))
+            self.assertEqual((card['deadline_date_local'], card['deadline_time_local']), ('2026-11-26', '09:30'))
+            self.assertNotIn('full_context', card)
+            meta = card['details_chunk']
+            self.assertNotIn('full_context', meta['remaining_fields'])
+            if seen_chunks == 0 and 'owner_notes' not in card:
+                self.assertIn('owner_notes', meta['remaining_fields'])
+            for key in ('description', 'owner_notes'):
+                if key in card:
+                    reassembled[key].append(card[key])
+            seen_chunks += 1
+            next_off = meta['next_offset']
+            if next_off is None:
+                break
+        self.assertGreater(seen_chunks, 2)
+        self.assertEqual(''.join(reassembled['description']), desc_30k)
+        self.assertEqual(''.join(reassembled['owner_notes']), notes_20k)
+
+    async def test_compaction_signals_recovery_and_marks_usage_stale_until_fresh_usage(self):
+        # Сценарий E и F: сжатие без tokenUsage делает usage stale с консервативным бюджетом; свежий tokenUsage возвращает динамический бюджет.
         tasks = [
-            {'id': 1, 'title': 'Лабораторная', 'completed_work_minutes': 0, 'full_context': 'Полное условие'},
+            {'id': 1, 'title': 'Лабораторная', 'completed_work_minutes': 0, 'full_context': 'Детали: ' + ('x' * 60_000)},
             {'id': 2, 'title': 'Отчёт', 'completed_work_minutes': 0, 'full_context': 'Детали отчёта'},
         ]
         prev = {
@@ -1098,8 +1156,37 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('get_task_details', prompts[1])
         self.assertEqual(tool_results[0][1]['tasks'][0]['previous_periods'][0]['start_date'], '2026-11-23')
 
-    async def test_provider_smaller_effective_limit_respected_and_clamped_on_overflow(self):
-        # Сценарий G: (1) top_provider ограничивает 1M модель до 32K, (2) ошибка contextWindowExceeded переключает в компактный режим и запоминает лимит.
+        handler = ameba_service.AmebaTools({'tasks': tasks, 'now': NOW}, empty_week(), MagicMock())
+        caps1m = ModelCapabilities(model='gemini-pro', context_window=1_000_000, theoretical_context_window=1_000_000, source='provider')
+        budget1m = ameba_service._plan_context_budget(caps1m, overhead_tokens=5_000)
+        handler.configure_context(caps1m, budget1m, initial_prompt_tokens=195_000, previous_periods_by_task={}, previous_plan_truncated=False)
+        self.assertEqual(handler._tool_response_budget(), ameba_service.MAX_TOOL_RESPONSE_TOKENS)
+
+        # Сценарий E: on_compaction сбрасывает устаревшую оценку без деления на 2.
+        handler.on_compaction()
+        self.assertTrue(handler.usage_stale)
+        self.assertIsNone(handler.used_input_tokens)
+        self.assertLessEqual(handler._tool_response_budget(), ameba_service.CONSERVATIVE_TOOL_TOKENS)
+        stale_out, _ = await handler.call('get_task_details', {'task_ids': [1], 'context_offset': None})
+        self.assertLessEqual(ameba_service._estimate_json_tokens(stale_out), ameba_service.CONSERVATIVE_TOOL_TOKENS)
+
+        # Сценарий F: после свежего last_usage возвращается обычный динамический бюджет от реальных токенов.
+        handler.on_token_usage(last_usage={'input_tokens': 24_000, 'output_tokens': 500, 'total_tokens': 25_000})
+        self.assertFalse(handler.usage_stale)
+        self.assertEqual(handler.used_input_tokens, 25_000)
+        self.assertEqual(handler._tool_response_budget(), ameba_service.MAX_TOOL_RESPONSE_TOKENS)
+
+        # На 32K модели исчерпанный реальный остаток честно даёт 0 вместо придуманных 2000 токенов.
+        caps32 = ModelCapabilities(model='mid', context_window=32_000, theoretical_context_window=32_000, source='provider')
+        budget32 = ameba_service._plan_context_budget(caps32, overhead_tokens=5_000)
+        handler.configure_context(caps32, budget32, initial_prompt_tokens=5_000, previous_periods_by_task={}, previous_plan_truncated=False)
+        handler.on_token_usage(last_usage={'input_tokens': 25_000, 'total_tokens': 25_000})
+        self.assertEqual(handler._tool_response_budget(), 0)
+        exhausted_out, _ = await handler.call('get_task_details', {'task_ids': [2], 'context_offset': None})
+        self.assertFalse(exhausted_out['valid'])
+
+    async def test_failed_1m_request_retries_compact_without_fabricating_limit_and_explicit_limit_works(self):
+        # Сценарий A и B: (A) сбой без явного лимита делает 1 компактный повтор без затирания 1M и выдумки 45K; (B) явный меньший лимит применяется с сохранением теоретического.
         ids14 = list(range(1, 15))
         block = 'Detailed requirements and schedule notes for task planning. ' * 380
         tasks14 = [
@@ -1108,52 +1195,78 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
         ]
         plan14 = proposal_payload(ids14, [task_item(tid, 60) for tid in ids14], [work_period(tid, '2026-11-23', '2026-11-28', 60) for tid in ids14])
 
-        # G1: проактивный учёт меньшего эффективного лимита провайдера
-        g1_prompts = []
-        await self.run_agent(
-            [[('propose_plan', plan14)]],
-            tasks=tasks14,
-            provider_metadata={'model': 'gemini-pro', 'context_window': 32_000, 'theoretical_context_window': 1_000_000, 'max_input_tokens': None, 'max_output_tokens': None},
-            config={'model': 'gemini-pro'},
-            captured_prompts=g1_prompts,
-        )
-        g1_payload = json.loads(g1_prompts[0].split('\n', 1)[1])
-        self.assertTrue(all(t.get('has_more_details') for t in g1_payload['tasks']))
-
-        # G2: модель заявляет 1M, первый ход падает с contextWindowExceeded -> сразу переключение на компактный поток и память на следующий запуск
+        # Сценарий A: модель имеет подтверждённые 1M, первый ход (~90K токенов) отклонён без явного лимита провайдера.
         overflow = TurnOutcome(
             text='', completed=False, status='failed', error_detail='Ameba: превышен контекст модели',
-            usage={'input_tokens': 0, 'output_tokens': 0}, error_kind='contextWindowExceeded',
+            usage={'input_tokens': 0, 'output_tokens': 0}, error_kind='contextWindowExceeded', context_window=None,
         )
-        g2_prompts = []
+        prompts_a = []
+        tools_a = []
         res = await self.run_agent(
             [[('get_task_details', {'task_ids': [1], 'context_offset': None}), ('propose_plan', plan14)]],
             tasks=tasks14,
             provider_metadata={'model': 'gemini-proxy', 'context_window': 1_000_000, 'theoretical_context_window': 1_000_000, 'max_input_tokens': None, 'max_output_tokens': None},
             config={'model': 'gemini-proxy'},
             turn_outcomes=[overflow, None],
-            captured_prompts=g2_prompts,
+            captured_prompts=prompts_a,
+            captured_tools=tools_a,
         )
         self.assertEqual(res['task_ids'], ids14)
-        self.assertEqual(len(g2_prompts), 2)
-        self.assertGreater(len(g2_prompts[0]), len(g2_prompts[1]) * 3)
-        second_payload = json.loads(g2_prompts[1].split('\n', 1)[1])
+        self.assertEqual(len(prompts_a), 2)
+        self.assertGreater(len(prompts_a[0]), len(prompts_a[1]) * 3)
+        second_payload = json.loads(prompts_a[1].split('\n', 1)[1])
         self.assertTrue(all(t.get('has_more_details') for t in second_payload['tasks']))
+        # Подтверждённая 1M-способность не подменяется фиктивным лимитом ~45K после сбоя.
+        with patch.object(codex_harness, 'fetch_provider_model_metadata', AsyncMock(return_value={'model': 'gemini-proxy', 'context_window': 1_000_000, 'theoretical_context_window': 1_000_000, 'max_input_tokens': None, 'max_output_tokens': None})):
+            caps_after = await detect_model_capabilities(
+                auth_mode='api_key', base_url='https://lenec.tech/v1', api_key='synthetic', model='gemini-proxy',
+            )
+        self.assertEqual(caps_after.context_window, 1_000_000)
+        self.assertEqual(caps_after.effective_limit, 1_000_000)
+        self.assertEqual(caps_after.theoretical_context_window, 1_000_000)
+        self.assertEqual(caps_after.source, 'provider')
 
-        # Повторный запуск с тем же кэшем больше не шлёт огромный 80K промпт
-        g2_repeat_prompts = []
+        # Сценарий B1: провайдер явно ограничивает 1M модель до 32K в метаданных.
+        prompts_b = []
         await self.run_agent(
             [[('propose_plan', plan14)]],
             tasks=tasks14,
-            provider_metadata={'model': 'gemini-proxy', 'context_window': 1_000_000, 'theoretical_context_window': 1_000_000, 'max_input_tokens': None, 'max_output_tokens': None},
-            config={'model': 'gemini-proxy'},
-            captured_prompts=g2_repeat_prompts,
-            keep_capability_cache=True,
+            provider_metadata={'model': 'gemini-pro', 'context_window': 32_000, 'theoretical_context_window': 1_000_000, 'max_input_tokens': None, 'max_output_tokens': None},
+            config={'model': 'gemini-pro'},
+            captured_prompts=prompts_b,
         )
-        repeat_payload = json.loads(g2_repeat_prompts[0].split('\n', 1)[1])
-        self.assertLess(len(g2_repeat_prompts[0]), len(g2_prompts[0]) // 2)
-        self.assertTrue(any(t.get('has_more_details') for t in repeat_payload['tasks']))
+        b_payload = json.loads(prompts_b[0].split('\n', 1)[1])
+        self.assertTrue(all(t.get('has_more_details') for t in b_payload['tasks']))
+
+        # Сценарий B2: подтверждённый runtime-лимит 32K снижает effective_limit, но сохраняет theoretical=1M.
+        record_runtime_context_limit('api_key', 'https://lenec.tech/v1', 'gemini-1m', 32_000, source='runtime', tighten_only=True)
+        with patch.object(codex_harness, 'fetch_provider_model_metadata', AsyncMock(return_value={'model': 'gemini-1m', 'context_window': 1_000_000, 'theoretical_context_window': 1_000_000, 'max_input_tokens': None, 'max_output_tokens': None})):
+            caps_rt = await detect_model_capabilities(
+                auth_mode='api_key', base_url='https://lenec.tech/v1', api_key='synthetic', model='gemini-1m',
+            )
+        self.assertEqual(caps_rt.effective_limit, 32_000)
+        self.assertEqual(caps_rt.theoretical_context_window, 1_000_000)
+        self.assertEqual(caps_rt.source, 'runtime')
         clear_model_capability_cache()
+
+    async def test_small_window_model_never_invents_positive_budget_and_avoids_loop(self):
+        # Сценарий D: для слишком маленького окна effective - reserved <= 0 не придумывается +2000 и нет цикла больших запросов.
+        tiny_caps = ModelCapabilities(model='tiny-6k', context_window=6_000, theoretical_context_window=6_000, source='config')
+        tiny_budget = ameba_service._plan_context_budget(tiny_caps, overhead_tokens=5_000)
+        self.assertTrue(tiny_budget['insufficient'])
+        self.assertEqual(tiny_budget['usable_tokens'], 0)
+        self.assertEqual(tiny_budget['initial_prompt_tokens'], 0)
+        self.assertEqual(tiny_budget['tool_response_tokens'], 0)
+
+        prompts = []
+        with self.assertRaises(HTTPException) as ctx:
+            await self.run_agent(
+                [[('propose_plan', proposal_payload([1], [task_item(1, 60)], [work_period(1, '2026-11-23', '2026-11-23', 60)]))]],
+                config={'model': 'tiny-6k', 'context_window': 6_000},
+                captured_prompts=prompts,
+            )
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertEqual(prompts, [])
 
 
 class StorageTests(unittest.TestCase):
