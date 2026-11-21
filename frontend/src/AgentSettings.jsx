@@ -1,13 +1,32 @@
 import { useEffect, useState } from 'react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { X } from 'lucide-react';
 import { request } from './api';
 import ModelPicker from './ModelPicker';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/controls';
-import { Field, Textarea } from '@/components/ui/input';
+import { Field, Input, Textarea } from '@/components/ui/input';
 import { SelectField } from '@/components/ui/select';
 import { Badge, Notice, SectionHeader, StatusIndicator } from '@/components/ui/surface';
 import { cn } from '@/lib/utils';
+
+const CAP_SOURCE_LABELS = {
+  provider: 'метаданные провайдера',
+  codex: 'метаданные Codex',
+  thread: 'метаданные сессии',
+  runtime: 'фактический лимит рантайма',
+  config: 'настройка конфигурации',
+  manual: 'настроено вручную',
+};
+
+function formatTokens(val) {
+  return Number(val).toLocaleString('ru-RU');
+}
+
+function sourceText(source) {
+  if (!source || source === 'unknown') return 'неизвестно';
+  return source.split('+').map((part) => CAP_SOURCE_LABELS[part] || part).join(' + ');
+}
 
 const EFFORT_OPTIONS = [
   { value: 'low', label: 'Быстро (low)' },
@@ -39,10 +58,12 @@ export default function AgentSettings({ name, title, data, provider, oauthState,
   const defaultMode = name === 'arrodes' ? 'oauth' : 'api_key';
   const savedAuthMode = data.auth_mode || defaultMode;
   const savedModel = data.model ?? (savedAuthMode === 'oauth' ? '' : 'gpt-6-luna');
+  const savedContextWindow = data.context_window != null ? String(data.context_window) : '';
 
   const [enabled, setEnabled] = useState(data.enabled);
   const [authMode, setAuthMode] = useState(savedAuthMode);
   const [model, setModel] = useState(savedModel);
+  const [contextWindow, setContextWindow] = useState(savedContextWindow);
   const [effort, setEffort] = useState(data.reasoning_effort || 'medium');
   const [customInstructions, setCustomInstructions] = useState(data.custom_instructions ?? '');
 
@@ -60,6 +81,26 @@ export default function AgentSettings({ name, title, data, provider, oauthState,
   useEffect(() => {
     setEnabled(data.enabled);
   }, [data.enabled]);
+
+  useEffect(() => {
+    setContextWindow(savedContextWindow);
+  }, [savedContextWindow]);
+
+  const trimmedCtx = contextWindow.replace(/[\s_]+/g, '');
+  let parsedContextWindow = null;
+  let contextWindowError = '';
+  if (trimmedCtx) {
+    if (!/^\d+$/.test(trimmedCtx)) {
+      contextWindowError = 'Введите целое число токенов или оставьте пустым для Авто';
+    } else {
+      const n = Number(trimmedCtx);
+      if (n < 4096 || n > 10_000_000) {
+        contextWindowError = 'Допустимый диапазон: от 4 096 до 10 000 000';
+      } else {
+        parsedContextWindow = n;
+      }
+    }
+  }
 
   function switchAuthMode(nextMode) {
     if (nextMode === authMode) return;
@@ -90,6 +131,7 @@ export default function AgentSettings({ name, title, data, provider, oauthState,
         enabled,
         auth_mode: authMode,
         model: model.trim(),
+        context_window: parsedContextWindow,
         reasoning_effort: effort,
         custom_instructions: customInstructions,
         ...(name === 'monocle' ? {
@@ -116,19 +158,57 @@ export default function AgentSettings({ name, title, data, provider, oauthState,
       }),
     }),
     onSuccess: async () => {
-      await client.invalidateQueries({ queryKey: ['integrations'], exact: true });
-      await client.invalidateQueries({ queryKey: ['ameba-ranking'] });
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ['integrations'], exact: true }),
+        client.invalidateQueries({ queryKey: ['integrations', 'agent-capabilities', name] }),
+        client.invalidateQueries({ queryKey: ['ameba-ranking'] }),
+      ]);
     },
   });
 
   const check = useMutation({
     mutationFn: () => request(`/integrations/agents/${name}/check`, { method: 'POST' }),
-    onSuccess: () => client.invalidateQueries({ queryKey: ['integrations'], exact: true }),
+    onSuccess: async () => {
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ['integrations'], exact: true }),
+        client.invalidateQueries({ queryKey: ['integrations', 'agent-capabilities', name] }),
+      ]);
+    },
   });
 
   const oauthAuthorized = Boolean(oauthState?.data?.authorized);
   const apiKeyReady = Boolean(provider?.configured?.api_key);
   const selectedReady = authMode === 'oauth' ? oauthAuthorized : apiKeyReady;
+  const capQueryKey = [
+    'integrations',
+    'agent-capabilities',
+    name,
+    authMode,
+    provider?.base_url || '',
+    model.trim(),
+    parsedContextWindow ?? 'auto',
+    selectedReady,
+  ];
+  const capabilities = useQuery({
+    queryKey: capQueryKey,
+    enabled: !contextWindowError,
+    queryFn: () => request(`/integrations/agents/${name}/capabilities`, {
+      method: 'POST',
+      body: JSON.stringify({
+        auth_mode: authMode,
+        model: model.trim(),
+        context_window: parsedContextWindow,
+      }),
+    }),
+    staleTime: 30_000,
+    retry: false,
+  });
+
+  const capData = capabilities.data;
+  const effectiveCtx = capData?.effective_limit ?? null;
+  const verifiedCtx = capData?.verified_context_window ?? null;
+  const manualCtx = capData?.manual_context_window ?? parsedContextWindow;
+  const capSource = capData?.source || (manualCtx != null ? 'manual' : 'unknown');
   const hasUnsavedAuthOrModel = authMode !== savedAuthMode || model.trim() !== savedModel.trim();
   const savedAuthReady = savedAuthMode === 'oauth' ? oauthAuthorized : Boolean(apiKeyReady && savedModel.trim());
   const actionError = save.error || toggle.error || check.error;
@@ -214,13 +294,35 @@ export default function AgentSettings({ name, title, data, provider, oauthState,
         oauthAuthorized={oauthAuthorized}
         value={model}
         onChange={setModel}
+        onModelsLoaded={() => client.invalidateQueries({ queryKey: ['integrations', 'agent-capabilities', name] })}
       />
 
       {/* Agent-specific settings */}
       <div className="border-t border-[#222222] pt-3 flex flex-col gap-3">
         <div className="text-[12px] font-medium text-[#929292]">Настройки агента</div>
 
-        <div className={cn('grid grid-cols-1 gap-2.5', (name === 'ameba' || name === 'arrodes') && 'sm:grid-cols-2')}>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+          <Field label="Контекстное окно (токены)" error={contextWindowError}>
+            <Input
+              type="text"
+              inputMode="numeric"
+              placeholder="Авто"
+              value={contextWindow}
+              error={Boolean(contextWindowError)}
+              onChange={(event) => setContextWindow(event.currentTarget.value)}
+              rightSlot={contextWindow ? (
+                <button
+                  type="button"
+                  aria-label="Сбросить на Авто"
+                  onClick={() => setContextWindow('')}
+                  className="h-6 w-6 max-md:h-9 max-md:w-9 grid place-items-center text-[#787878] hover:text-[#EAEAEA] cursor-pointer"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              ) : null}
+            />
+          </Field>
+
           <Field label="Глубина рассуждений">
             <SelectField
               value={effort}
@@ -247,6 +349,38 @@ export default function AgentSettings({ name, title, data, provider, oauthState,
                 options={WEB_SEARCH_OPTIONS}
               />
             </Field>
+          )}
+        </div>
+
+        <div className="border border-[#262626] bg-[#0D0D0D] px-2.5 py-2 text-[11px] flex flex-col gap-0.5">
+          {capabilities.isFetching && !capData ? (
+            <span className="text-[#929292]">Определение контекстного окна…</span>
+          ) : effectiveCtx != null ? (
+            <>
+              <div className="text-[#EAEAEA]">
+                <span className="text-[#929292]">
+                  {capSource === 'manual' || (manualCtx != null && verifiedCtx != null && verifiedCtx < manualCtx)
+                    ? 'Эффективный контекст: '
+                    : 'Определённый контекст: '}
+                </span>
+                <span className="font-mono font-medium">{formatTokens(effectiveCtx)} токенов</span>
+                <span className="text-[#929292]"> — {sourceText(capSource)}</span>
+              </div>
+              {manualCtx != null && verifiedCtx != null && verifiedCtx < manualCtx && (
+                <div className="text-[#929292]">
+                  Подтверждённое ограничение ниже ручного значения ({formatTokens(manualCtx)} токенов).
+                </div>
+              )}
+              {capData?.theoretical_context_window && capData.theoretical_context_window > effectiveCtx && (
+                <div className="text-[#929292]">
+                  Теоретическое окно модели: {formatTokens(capData.theoretical_context_window)} токенов.
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="text-[#929292]">
+              Контекстное окно: <span className="text-[#EAEAEA]">Неизвестно</span> — укажите вручную при необходимости
+            </div>
           )}
         </div>
 
@@ -342,7 +476,7 @@ export default function AgentSettings({ name, title, data, provider, oauthState,
         <Button
           variant="primary"
           loading={save.isPending}
-          disabled={toggle.isPending || (authMode === 'api_key' && !model.trim())}
+          disabled={toggle.isPending || Boolean(contextWindowError) || (authMode === 'api_key' && !model.trim())}
           onClick={() => save.mutate()}
         >
           Сохранить

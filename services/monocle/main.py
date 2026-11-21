@@ -13,6 +13,7 @@ from common.codex_harness import (
     normalize_effort,
     open_codex,
     prepare_codex_root,
+    resolve_session_capabilities,
     run_codex_turn,
     scratch_env,
     serve_mcp,
@@ -693,6 +694,7 @@ async def analyze(body: dict):
     config = body.pop('config', {})
     auth = normalize_auth(config, key, default_mode='api_key', label='Monocle')
     options = {
+        'context_window': config.get('context_window'),
         'reasoning_effort': normalize_effort(config.get('reasoning_effort')),
         'allow_browser': bool(config.get('allow_browser', True)),
         'ask_clarifications': bool(config.get('ask_clarifications', True)),
@@ -778,6 +780,17 @@ async def run_agent(auth, memory, task_id, body, progress, options=None):
             developer_instructions=instructions,
             config=mcp_config | shell_policy,
         )
+        caps = await resolve_session_capabilities(
+            'Monocle',
+            auth_mode=auth_mode,
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            config=opts,
+            client=client,
+            thread=thread,
+        )
+        cap_scope = (auth_mode, base_url, caps.model or model)
         outcome = await run_codex_turn(
             thread,
             ExternalMessage(tool_name='task_manager', content=prompt_text),
@@ -787,6 +800,7 @@ async def run_agent(auth, memory, task_id, body, progress, options=None):
             effort=reasoning_effort,
             output_schema=output_schema,
             client=client,
+            capability_scope=cap_scope,
         )
         usage['input_tokens'] += outcome.usage.get('input_tokens', 0)
         usage['output_tokens'] += outcome.usage.get('output_tokens', 0)
@@ -809,6 +823,7 @@ async def run_agent(auth, memory, task_id, body, progress, options=None):
                         effort='low',
                         output_schema=output_schema,
                         client=client,
+                        capability_scope=cap_scope,
                     )
                     usage['input_tokens'] += outcome.usage.get('input_tokens', 0)
                     usage['output_tokens'] += outcome.usage.get('output_tokens', 0)
@@ -836,6 +851,7 @@ async def run_agent(auth, memory, task_id, body, progress, options=None):
                         effort='low',
                         output_schema=output_schema,
                         client=client,
+                        capability_scope=cap_scope,
                     )
                     usage['input_tokens'] += outcome.usage.get('input_tokens', 0)
                     usage['output_tokens'] += outcome.usage.get('output_tokens', 0)

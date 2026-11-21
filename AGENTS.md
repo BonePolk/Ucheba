@@ -65,7 +65,7 @@ Ucheba — персональный менеджер задач с AI-агент
 
 ## Интеграция с LLM и инструментами
 
-- Monocle, Ameba и Straus используют общий Codex harness (`common/codex_harness.py`): `open_codex`, `start_codex_thread`, `run_codex_turn`, `McpToolAdapter`, `serve_mcp`.
+- Все AI-агенты (`Monocle`, `Ameba`, `Straus`, `Arrodes`) используют общий Codex harness (`common/codex_harness.py`: `open_codex`, `start_codex_thread`, `run_codex_turn`, `resolve_session_capabilities`, `detect_model_capabilities`, `McpToolAdapter`, `serve_mcp`) и независимую настройку `context_window` (`None` = автоопределение с приоритетом подтверждённых ограничений провайдера/рантайма над более высоким ручным значением, `POST /api/integrations/agents/{name}/capabilities`).
 - Все схемы инструментов (`strict: True`) обязаны иметь `additionalProperties: False`, все свойства перечислены в `required`, опциональные значения представляются как `type | null` без значений по умолчанию, мешающих JSON Schema.
 - Учитывай особенность шлюза: не используй именованный `tool_choice={'type': 'function', 'name': ...}`.
 - Скрытые рассуждения не передаются в UI; для публичных пояснений используется `NOTE_TOOL` (`agent_note`).

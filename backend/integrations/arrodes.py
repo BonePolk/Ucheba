@@ -97,7 +97,7 @@ def start_task(task_id, instruction='', resume_run_id=None):
     }
     options = {
         key: config[key]
-        for key in ('reasoning_effort', 'web_search_mode', 'allow_browser', 'allow_shell', 'ask_clarifications', 'custom_instructions')
+        for key in ('context_window', 'reasoning_effort', 'web_search_mode', 'allow_browser', 'allow_shell', 'ask_clarifications', 'custom_instructions')
     }
     if job_task and not job_task.done():
         raise HTTPException(409, 'Arrodes уже обрабатывает задачу')

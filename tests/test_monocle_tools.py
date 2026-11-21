@@ -132,6 +132,7 @@ class MonocleStructuredOutput(unittest.IsolatedAsyncioTestCase):
     async def run_monocle(self, outcomes):
         from contextlib import asynccontextmanager
         from unittest.mock import AsyncMock, MagicMock, patch
+        import common.codex_harness as codex_harness
         from common.progress import Progress
         import main
 
@@ -162,6 +163,7 @@ class MonocleStructuredOutput(unittest.IsolatedAsyncioTestCase):
         with Progress('Monocle', 1) as progress, \
              patch.object(main.materials, 'model_input', return_value=[]), \
              patch.object(main.materials, 'browser_site', return_value=None), \
+             patch.object(codex_harness, 'fetch_provider_model_metadata', AsyncMock(return_value=None)), \
              patch.object(main, 'open_codex', fake_open_codex), \
              patch.object(main, 'scratch_env', fake_scratch), \
              patch.object(main, 'serve_mcp', fake_serve), \

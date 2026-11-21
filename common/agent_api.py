@@ -7,14 +7,14 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 from openai import AsyncOpenAI, APIConnectionError, APIStatusError
 
-from common.codex_harness import cache_provider_models
+from common.codex_harness import cache_provider_models, detect_model_capabilities
 
 
 MODEL_FIRST_DATA_TIMEOUT = 180
 MODEL_IDLE_TIMEOUT = 180
 
 
-def agent_routes(app, label):
+def agent_routes(app, label, *, oauth_client_getter=None):
     async def api_error(request, exc):
         code = getattr(exc, 'status_code', None)
         logging.getLogger('uvicorn.error').error('%s: %s (API %s)', label, type(exc).__name__, code or 'unknown')
@@ -51,6 +51,26 @@ def agent_routes(app, label):
             items = [model async for model in available if getattr(model, 'id', None)]
         cache_provider_models(endpoint, items)
         return sorted({model.id for model in items})
+
+    @app.post('/capabilities')
+    async def capabilities(body: dict | None = None):
+        data = body or {}
+        cfg = data.get('config') or {}
+        default_mode = 'oauth' if label == 'Arrodes' else 'api_key'
+        auth_mode = (cfg.get('auth_mode') or default_mode).strip()
+        model = (cfg.get('model') or '').strip()
+        base_url = (cfg.get('base_url') or 'https://lenec.tech/v1').strip() if auth_mode == 'api_key' else ''
+        api_key = (data.get('api_key') or '').strip() if auth_mode == 'api_key' else ''
+        client = await oauth_client_getter() if auth_mode == 'oauth' and callable(oauth_client_getter) else None
+        caps = await detect_model_capabilities(
+            auth_mode=auth_mode,
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            config=cfg,
+            client=client,
+        )
+        return caps.to_dict()
 
 
 def response_text(response) -> str:

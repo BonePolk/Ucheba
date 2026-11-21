@@ -21,6 +21,7 @@ export default function AiConnections({ data, oauthState }) {
       await Promise.all([
         client.invalidateQueries({ queryKey: ['integrations', 'openai-oauth'] }),
         client.invalidateQueries({ queryKey: ['integrations', 'arrodes'] }),
+        client.invalidateQueries({ queryKey: ['integrations', 'agent-capabilities'] }),
       ]);
     },
   });
@@ -31,6 +32,7 @@ export default function AiConnections({ data, oauthState }) {
       await Promise.all([
         client.invalidateQueries({ queryKey: ['integrations', 'openai-oauth'] }),
         client.invalidateQueries({ queryKey: ['integrations', 'arrodes'] }),
+        client.invalidateQueries({ queryKey: ['integrations', 'agent-capabilities'] }),
         client.invalidateQueries({ queryKey: ['integrations'], exact: true }),
       ]);
     },
@@ -52,6 +54,7 @@ export default function AiConnections({ data, oauthState }) {
       setApiKey('');
       await Promise.all([
         client.invalidateQueries({ queryKey: ['integrations'], exact: true }),
+        client.invalidateQueries({ queryKey: ['integrations', 'agent-capabilities'] }),
         client.invalidateQueries({ queryKey: ['ameba-ranking'] }),
       ]);
     },
@@ -65,7 +68,12 @@ export default function AiConnections({ data, oauthState }) {
         ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}),
       }),
     }),
-    onSuccess: () => client.invalidateQueries({ queryKey: ['integrations'], exact: true }),
+    onSuccess: async () => {
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ['integrations'], exact: true }),
+        client.invalidateQueries({ queryKey: ['integrations', 'agent-capabilities'] }),
+      ]);
+    },
   });
 
   const oauthBusy = oauthConnect.isPending || oauthDisconnect.isPending;

@@ -44,7 +44,7 @@ UNBOUNDED_TOOLS = frozenset({'ask_user', 'browser_wait_for_user', 'delete_silo_f
 MODEL_CAP_TTL = 1800
 MODEL_CAP_MISS_TTL = 300
 MODEL_CAP_CACHE_SIZE = 256
-MODEL_PROBE_TIMEOUT = 4.0
+MODEL_PROBE_TIMEOUT = 2.0
 
 _CTX_WINDOW_KEYS = (
     'context_window', 'contextWindow', 'context_length', 'contextLength',
@@ -64,14 +64,31 @@ class ModelCapabilities:
     model: str = ''
     context_window: int | None = None
     theoretical_context_window: int | None = None
+    verified_context_window: int | None = None
+    manual_context_window: int | None = None
     max_input_tokens: int | None = None
     max_output_tokens: int | None = None
     source: str = 'unknown'
+    verified_source: str = 'unknown'
 
     @property
     def effective_limit(self) -> int | None:
         vals = [v for v in (self.context_window, self.max_input_tokens) if type(v) is int and v > 0]
         return min(vals) if vals else None
+
+    def to_dict(self) -> dict:
+        return {
+            'model': self.model,
+            'context_window': self.context_window,
+            'effective_limit': self.effective_limit,
+            'theoretical_context_window': self.theoretical_context_window,
+            'verified_context_window': self.verified_context_window,
+            'manual_context_window': self.manual_context_window,
+            'max_input_tokens': self.max_input_tokens,
+            'max_output_tokens': self.max_output_tokens,
+            'source': self.source,
+            'verified_source': self.verified_source,
+        }
 
 
 def _safe_int(val, *, minimum: int = 1, maximum: int = 10_000_000) -> int | None:
@@ -227,8 +244,12 @@ def record_runtime_context_limit(
     _cache_put(key, (limit, source), MODEL_CAP_TTL)
 
 
-def clear_model_capability_cache() -> None:
-    _CAP_CACHE.clear()
+def clear_model_capability_cache(owner: int | None = None) -> None:
+    if owner is None:
+        _CAP_CACHE.clear()
+        return
+    for key in [k for k in _CAP_CACHE if len(k) > 1 and k[1] == owner]:
+        _CAP_CACHE.pop(key, None)
 
 
 async def _probe_codex_models(client, active_model: str, auth_mode: str) -> dict | None:
@@ -269,17 +290,15 @@ async def detect_model_capabilities(
     client=None,
     thread=None,
 ) -> ModelCapabilities:
-    """Определяет реальное и теоретическое контекстное окно модели без фиктивных значений."""
+    """Определяет подтверждённое и ручное контекстное окно модели без фиктивных значений."""
     owner = user_id()
     mode = (auth_mode or 'api_key').strip()
     scope = (base_url or '').strip().rstrip('/')
     active_model = _safe_str(_field(thread, 'model')) or _safe_str(model)
     cfg = config or {}
-    cfg_cap = {
-        'context_window': _safe_int(cfg.get('context_window'), minimum=4096),
-        'max_input_tokens': _safe_int(cfg.get('max_input_tokens'), minimum=4096),
-        'max_output_tokens': _safe_int(cfg.get('max_output_tokens'), minimum=256),
-    }
+    manual_ctx = _safe_int(cfg.get('context_window'), minimum=4096)
+    cfg_in = _safe_int(cfg.get('max_input_tokens'), minimum=4096)
+    cfg_out = _safe_int(cfg.get('max_output_tokens'), minimum=256)
 
     thread_cap = extract_model_limits(thread) if thread is not None else {}
     codex_cap = await _probe_codex_models(client, active_model, mode) or {}
@@ -293,35 +312,89 @@ async def detect_model_capabilities(
     if rt_entry is None and active_model != _safe_str(model):
         rt_entry = _fresh_get(('runtime', owner, mode, scope, _safe_str(model)))
 
-    named_caps = (('config', cfg_cap), ('provider', provider_cap), ('codex', codex_cap), ('thread', thread_cap))
-    ctx_sources = [(name, val) for name, cap in named_caps if (val := cap.get('context_window')) is not None]
+    verified_caps = (('provider', provider_cap), ('codex', codex_cap), ('thread', thread_cap))
+    verified_ctx_sources = [(name, val) for name, cap in verified_caps if (val := cap.get('context_window')) is not None]
     if rt_entry is not None:
-        ctx_sources.append((rt_entry[1], rt_entry[0]))
+        verified_ctx_sources.append((rt_entry[1], rt_entry[0]))
+    verified_in_sources = [(name, val) for name, cap in verified_caps if (val := cap.get('max_input_tokens')) is not None]
 
-    effective_ctx = min(val for _, val in ctx_sources) if ctx_sources else None
+    verified_ctx = min(val for _, val in verified_ctx_sources) if verified_ctx_sources else None
+    verified_in = min(val for _, val in verified_in_sources) if verified_in_sources else None
+    verified_vals = [v for v in (verified_ctx, verified_in) if v is not None]
+    verified_effective = min(verified_vals) if verified_vals else None
+    verified_limiting = [
+        name for name, val in verified_ctx_sources + verified_in_sources if val == verified_effective
+    ]
+    verified_source = '+'.join(dict.fromkeys(verified_limiting)) if verified_limiting else 'unknown'
+
     theo_vals = [
         val
-        for _, cap in named_caps[1:]
+        for _, cap in verified_caps
         for val in (cap.get('theoretical_context_window'), cap.get('context_window'))
         if val is not None
     ]
-    theoretical_ctx = max(theo_vals) if theo_vals else effective_ctx
+    theoretical_ctx = max(theo_vals) if theo_vals else verified_effective
 
-    in_sources = [(name, val) for name, cap in named_caps if (val := cap.get('max_input_tokens')) is not None]
-    out_vals = [val for _, cap in named_caps if (val := cap.get('max_output_tokens')) is not None]
-    min_in = min(val for _, val in in_sources) if in_sources else None
-    limiting = [name for name, val in ctx_sources if val == effective_ctx] if ctx_sources else [
-        name for name, val in in_sources if val == min_in
-    ]
+    all_in = [v for _, v in verified_in_sources] + ([cfg_in] if cfg_in is not None else [])
+    min_in = min(all_in) if all_in else None
+    out_vals = [v for v in (cfg_out, provider_cap.get('max_output_tokens'), codex_cap.get('max_output_tokens'), thread_cap.get('max_output_tokens')) if v is not None]
+
+    if verified_effective is not None:
+        if manual_ctx is not None and manual_ctx < verified_effective:
+            final_ctx, final_source = manual_ctx, 'manual'
+        else:
+            final_ctx, final_source = verified_ctx, verified_source
+    elif manual_ctx is not None:
+        final_ctx, final_source = manual_ctx, 'manual'
+    elif cfg_in is not None:
+        final_ctx, final_source = None, 'config'
+    else:
+        final_ctx, final_source = None, 'unknown'
 
     return ModelCapabilities(
         model=active_model,
-        context_window=effective_ctx,
+        context_window=final_ctx,
         theoretical_context_window=theoretical_ctx,
+        verified_context_window=verified_effective,
+        manual_context_window=manual_ctx,
         max_input_tokens=min_in,
         max_output_tokens=min(out_vals) if out_vals else None,
-        source='+'.join(dict.fromkeys(limiting)) if limiting else 'unknown',
+        source=final_source,
+        verified_source=verified_source,
     )
+
+
+async def resolve_session_capabilities(
+    label: str,
+    *,
+    auth_mode: str,
+    base_url: str = '',
+    api_key: str = '',
+    model: str = '',
+    config: dict | None = None,
+    client=None,
+    thread=None,
+) -> ModelCapabilities:
+    """Определяет и логирует фактические возможности контекста для любого агента."""
+    caps = await detect_model_capabilities(
+        auth_mode=auth_mode,
+        base_url=base_url,
+        api_key=api_key,
+        model=model,
+        config=config,
+        client=client,
+        thread=thread,
+    )
+    logging.getLogger('uvicorn.error').info(
+        '%s context capabilities: model=%s effective=%s verified=%s manual=%s source=%s',
+        label,
+        caps.model or '-',
+        caps.effective_limit,
+        caps.verified_context_window,
+        caps.manual_context_window,
+        caps.source,
+    )
+    return caps
 
 
 def user_home() -> Path:
@@ -884,6 +957,7 @@ async def run_codex_turn(
     summary: str | None = 'auto',
     client=None,
     idle_timeout: int | float | None = TURN_IDLE_TIMEOUT,
+    capability_scope: tuple[str, str, str] | None = None,
 ) -> TurnOutcome:
     progress.begin_response()
     turn_kwargs = {}
@@ -1026,6 +1100,12 @@ async def run_codex_turn(
                     ctx_win = _safe_int(_field(tu, 'model_context_window', 'modelContextWindow'), minimum=4096)
                     if ctx_win is not None:
                         runtime_context_window = ctx_win
+                        progress.update(model_context_window=ctx_win)
+                        if capability_scope is not None:
+                            record_runtime_context_limit(
+                                capability_scope[0], capability_scope[1], capability_scope[2], ctx_win,
+                                source='runtime', tighten_only=True,
+                            )
                     if adapter is not None:
                         if last_usage is not None:
                             adapter.last_usage = dict(last_usage)
@@ -1147,9 +1227,19 @@ async def check_connection(label: str, *, config: dict | None, api_key: str = ''
                 model_provider=thread_provider,
                 config=shell_policy,
             )
+            caps = await resolve_session_capabilities(
+                label,
+                auth_mode=auth_mode,
+                base_url=base_url,
+                api_key=key,
+                model=model,
+                config=config,
+                client=client,
+                thread=thread,
+            )
             async with asyncio.timeout(90):
                 await thread.run('Ответь только OK.')
-        return {'ok': True}
+        return {'ok': True, 'capabilities': caps.to_dict()}
     except HTTPException:
         raise
     except TimeoutError:

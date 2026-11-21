@@ -110,6 +110,75 @@ async def check_ai_provider(body: dict | None = None):
     return {'ok': True, 'models_count': len(models)}
 
 
+def _parse_context_window(value):
+    if value is None or value == '':
+        return None
+    if isinstance(value, bool):
+        raise ValueError('context_window')
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        if not stripped.isdigit():
+            raise ValueError('context_window')
+        return int(stripped)
+    if type(value) is not int:
+        raise ValueError('context_window')
+    return value
+
+
+class AgentCapabilitiesRequest(BaseModel):
+    auth_mode: Literal['api_key', 'oauth'] | None = None
+    model: str | None = Field(default=None, max_length=200)
+    context_window: int | None = Field(default=None, ge=4096, le=10_000_000)
+
+    @field_validator('context_window', mode='before')
+    @classmethod
+    def valid_context_window(cls, value):
+        return _parse_context_window(value)
+
+
+@router.post('/agents/{name}/capabilities')
+async def agent_capabilities(
+    name: Literal['monocle', 'ameba', 'straus', 'arrodes'],
+    body: AgentCapabilitiesRequest | None = None,
+):
+    check_feature(name)
+    config, _ = read_settings(name, apply_feature=False)
+    provider_cfg, provider_secrets = read_settings('ai_provider', apply_feature=False)
+    effective = dict(config)
+    if body is not None:
+        if 'auth_mode' in body.model_fields_set and body.auth_mode is not None:
+            effective['auth_mode'] = body.auth_mode
+        if 'model' in body.model_fields_set and body.model is not None:
+            effective['model'] = body.model.strip()
+        if 'context_window' in body.model_fields_set:
+            effective['context_window'] = body.context_window
+    auth_mode = (effective.get('auth_mode') or ('oauth' if name == 'arrodes' else 'api_key')).strip()
+    effective['auth_mode'] = auth_mode
+    api_key = ''
+    if auth_mode == 'api_key':
+        effective['base_url'] = provider_cfg['base_url']
+        api_key = (provider_secrets.get('api_key') or '').strip()
+    target = 'arrodes' if auth_mode == 'oauth' else name
+    try:
+        return await call(target, '/capabilities', {'config': effective, 'api_key': api_key}, timeout=10)
+    except (HTTPException, httpx.HTTPError):
+        manual = effective.get('context_window')
+        return {
+            'model': effective.get('model') or '',
+            'context_window': manual,
+            'effective_limit': manual,
+            'theoretical_context_window': None,
+            'verified_context_window': None,
+            'manual_context_window': manual,
+            'max_input_tokens': None,
+            'max_output_tokens': None,
+            'source': 'manual' if manual is not None else 'unknown',
+            'verified_source': 'unknown',
+        }
+
+
 @router.post('/agents/{name}/check')
 async def check_agent(name: Literal['monocle', 'ameba', 'straus', 'arrodes']):
     check_feature(name)
@@ -405,8 +474,14 @@ class AiProviderConfig(ProviderConfig):
 class BaseAgentConfig(BaseModel):
     auth_mode: Literal['api_key', 'oauth'] = 'api_key'
     model: str = Field(default='gpt-6-luna', max_length=200)
+    context_window: int | None = Field(default=None, ge=4096, le=10_000_000)
     reasoning_effort: Literal['low', 'medium', 'high'] = 'medium'
     custom_instructions: str = Field(default='', max_length=2000)
+
+    @field_validator('context_window', mode='before')
+    @classmethod
+    def valid_context_window(cls, value):
+        return _parse_context_window(value)
 
     @model_validator(mode='after')
     def check_api_key_model(self):
@@ -447,7 +522,6 @@ class ContextConfig(BaseAgentConfig):
 
 class AmebaConfig(BaseAgentConfig):
     enabled: bool = False
-    context_window: int | None = Field(default=None, ge=4096, le=10_000_000)
     auto_replan: bool = True
     planning_style: Literal['gentle', 'balanced', 'intense'] = 'balanced'
     allow_context_recheck: bool = True

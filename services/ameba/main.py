@@ -24,12 +24,11 @@ from common.codex_harness import (
     ModelCapabilities,
     append_custom_instructions,
     check_connection,
-    detect_model_capabilities,
     normalize_auth,
     normalize_effort,
     open_codex,
     prepare_codex_root,
-    record_runtime_context_limit,
+    resolve_session_capabilities,
     run_codex_turn,
     scratch_env,
     serve_mcp,
@@ -54,8 +53,8 @@ agent_routes(app, 'Ameba')
 
 @app.post('/check')
 async def check_model(body: dict):
-    await check_connection('Ameba', config=body.get('config'), api_key=body.get('api_key', ''), default_mode='api_key')
-    return {'ok': True, 'comparisons': 0}
+    result = await check_connection('Ameba', config=body.get('config'), api_key=body.get('api_key', ''), default_mode='api_key')
+    return result | {'comparisons': 0}
 
 
 @app.post('/refresh')
@@ -233,7 +232,7 @@ AMEBA_INSTRUCTIONS = (
 MAX_TOOL_RESPONSE_TOKENS = 64_000
 CONSERVATIVE_TOOL_TOKENS = 8_000
 _CHUNKABLE_TEXT_FIELDS = ('summary', 'description', 'owner_notes', 'full_context')
-_LONG_META_FIELDS = ('task_note', 'time_estimate', 'effort', 'impact')
+_LONG_META_FIELDS = ('category', 'subject', 'task_note', 'time_estimate', 'effort', 'impact')
 
 
 def _estimate_tokens(text: str | None) -> int:
@@ -421,11 +420,9 @@ def _compact_tasks(tasks: list[dict], now: datetime, zone: ZoneInfo) -> list[dic
     compact = []
     for task in tasks:
         item = _base_task_fields(task, now, zone)
-        has_more = False
-        for field in ('category', 'subject', 'task_note'):
-            if task.get(field):
-                item[field] = task[field]
-        for field in ('time_estimate', 'effort', 'impact'):
+        trimmed_title, has_more = _trim_text(item['title'], 240)
+        item['title'] = trimmed_title
+        for field in ('category', 'subject', 'task_note', 'time_estimate', 'effort', 'impact'):
             if task.get(field):
                 trimmed, cut = _trim_text(task[field], 180)
                 item[field] = trimmed
@@ -537,8 +534,13 @@ def _pack_task_details_card(card: dict, offset: int, token_limit: int) -> dict:
         return card
 
     base = {k: v for k, v in card.items() if k not in _CHUNKABLE_TEXT_FIELDS}
-    segments: list[tuple[str, str]] = [(f, str(card[f])) for f in _CHUNKABLE_TEXT_FIELDS if card.get(f)]
-    if 'subtasks' in base and _estimate_json_tokens(base['subtasks']) > 1_000:
+    segments: list[tuple[str, str]] = []
+    if isinstance(base.get('title'), str) and len(base['title']) > 400:
+        full_title = base['title']
+        base['title'] = _trim_text(full_title, 300)[0]
+        segments.append(('title_full', full_title))
+    segments.extend((f, str(card[f])) for f in _CHUNKABLE_TEXT_FIELDS if card.get(f))
+    if 'subtasks' in base and _estimate_json_tokens(base['subtasks']) > 400:
         subs = base.pop('subtasks')
         base['subtasks_summary'] = _subtasks_summary(subs)
         segments.append(('subtasks_text', '\n'.join(
@@ -546,8 +548,12 @@ def _pack_task_details_card(card: dict, offset: int, token_limit: int) -> dict:
             + (f' ({s["estimated_minutes"]} мин)' if s.get('estimated_minutes') is not None else '')
             for s in subs
         )))
+    if 'previous_periods' in base and _estimate_json_tokens(base['previous_periods']) > 400:
+        prev = base.pop('previous_periods')
+        base['previous_periods_count'] = len(prev)
+        segments.append(('previous_periods_text', json.dumps(prev, ensure_ascii=False, separators=(',', ':'))))
     for field in _LONG_META_FIELDS:
-        if isinstance(base.get(field), str) and len(base[field]) > 800:
+        if isinstance(base.get(field), str) and len(base[field]) > 400:
             segments.append((field, base.pop(field)))
 
     ranges: list[tuple[str, str, int, int]] = []
@@ -840,21 +846,26 @@ class AmebaTools:
                         break
                     details.append(card)
                     total_tokens += card_tokens + 2
+                def _build_output():
+                    out = {'tasks': details, 'missing_task_ids': missing_ids[:20]}
+                    if missing_ids:
+                        out['available_task_ids'] = self.expected
+                    if deferred_ids:
+                        out['deferred_task_ids'] = deferred_ids
+                    notes = [n for n in (
+                        chunk_note,
+                        f'Загружена часть списка; запроси get_task_details для оставшихся ID: {deferred_ids}.' if deferred_ids else None,
+                    ) if n]
+                    if notes:
+                        out['note'] = ' '.join(notes)
+                    return out
+
+                output = _build_output()
+                while len(details) > 1 and _estimate_json_tokens(output) > resp_token_budget:
+                    removed = details.pop()
+                    deferred_ids.insert(0, removed['id'])
+                    output = _build_output()
                 self.progress.add(f'Загрузила детали задач ({len(details)} шт.)')
-                output = {
-                    'tasks': details,
-                    'missing_task_ids': missing_ids[:20],
-                }
-                if missing_ids:
-                    output['available_task_ids'] = self.expected
-                if deferred_ids:
-                    output['deferred_task_ids'] = deferred_ids
-                notes = [n for n in (
-                    chunk_note,
-                    f'Загружена часть списка; запроси get_task_details для оставшихся ID: {deferred_ids}.' if deferred_ids else None,
-                ) if n]
-                if notes:
-                    output['note'] = ' '.join(notes)
                 self.pending_tool_tokens += _estimate_json_tokens(output)
                 return output, []
             if name == 'record_progress':
@@ -1054,7 +1065,7 @@ async def rank(body: dict):
         elif budget['known']:
             prev_limit = min(budget['previous_plan_tokens'], int(avail_after_ov * 0.35))
         else:
-            prev_limit = budget['previous_plan_tokens']
+            prev_limit = min(budget['previous_plan_tokens'], avail_after_ov // 2)
         prev_obj, prev_by_task, prev_truncated = _serialize_previous_plan(
             body.get('previous_plan'),
             titles_by_id=titles_by_id,
@@ -1075,15 +1086,42 @@ async def rank(body: dict):
         payload = {'tasks': selected_tasks, **fixed_payload}
         if prev_obj:
             payload['previous_plan'] = prev_obj
-        if not deferred_ids and not prev_truncated:
-            hint = 'Ниже переданы актуальные сведения по задачам и прошлому плану; вызывай get_task_details только если часть контекста будет сжата или понадобится сверка.'
-        else:
-            hint = 'Ниже переданы задачи; для позиций с has_more_details или при потере части прошлого плана загружай детали через get_task_details, а не спрашивай владельца о данных Ucheba.'
-        text = (
-            f'Составь интеллектуальный план на ближайшие дни для всех {len(expected)} задач (ID: {expected}). '
-            f'{hint} Учитывай calendar_days, user_memory, user_feedback и ограничения; затем вызови propose_plan.\n'
-            + json.dumps(payload, ensure_ascii=False, separators=(',', ':'), default=str)
-        )
+
+        def _render():
+            hint = (
+                'Ниже переданы актуальные сведения по задачам и прошлому плану; вызывай get_task_details только если часть контекста будет сжата или понадобится сверка.'
+                if not deferred_ids and not prev_truncated else
+                'Ниже переданы задачи; для позиций с has_more_details или при потере части прошлого плана загружай детали через get_task_details, а не спрашивай владельца о данных Ucheba.'
+            )
+            return (
+                f'Составь интеллектуальный план на ближайшие дни для всех {len(expected)} задач (ID: {expected}). '
+                f'{hint} Учитывай calendar_days, user_memory, user_feedback и ограничения; затем вызови propose_plan.\n'
+                + json.dumps(payload, ensure_ascii=False, separators=(',', ':'), default=str)
+            )
+
+        text = _render()
+        if (not budget['known'] or force_compact) and _estimate_tokens(text) > budget['initial_prompt_tokens']:
+            if 'previous_plan' in payload:
+                payload.pop('previous_plan')
+                prev_truncated = bool(prev_by_task)
+                text = _render()
+            if _estimate_tokens(text) > budget['initial_prompt_tokens']:
+                has_detail_keys = ('category', 'subject', 'summary', 'description', 'full_context', 'owner_notes', 'subtasks', 'time_estimate', 'effort', 'impact', 'task_note')
+                minimal = []
+                for t in tasks:
+                    base_t = _base_task_fields(t, now, zone)
+                    title_short, cut = _trim_text(base_t['title'], 120)
+                    base_t['title'] = title_short
+                    if cut or any(t.get(k) for k in has_detail_keys):
+                        base_t['has_more_details'] = True
+                    minimal.append(base_t)
+                payload['tasks'] = minimal
+                deferred_ids = [item['id'] for item in minimal if item.get('has_more_details')]
+                text = _render()
+            if _estimate_tokens(text) > budget['initial_prompt_tokens'] and 'user_memory' in payload:
+                payload.pop('user_memory')
+                payload['user_memory_omitted'] = True
+                text = _render()
         return text, budget, deferred_ids, prev_by_task, prev_truncated
 
     sandbox = Sandbox.full_access if CONTAINER_SANDBOX else Sandbox.read_only
@@ -1121,7 +1159,8 @@ async def rank(body: dict):
                 'config': mcp_config | shell_policy,
             }
             thread = await start_codex_thread(client, 'Ameba', **thread_kwargs)
-            caps = await detect_model_capabilities(
+            caps = await resolve_session_capabilities(
+                'Ameba',
                 auth_mode=auth_mode,
                 base_url=base_url,
                 api_key=api_key,
@@ -1155,6 +1194,7 @@ async def rank(body: dict):
                     adapter=adapter,
                     effort=reasoning_effort,
                     client=client,
+                    capability_scope=(auth_mode, base_url, attempt_caps.model or model),
                 )
                 return turn_out, attempt_prompt, attempt_budget, use_thread
 
@@ -1168,11 +1208,6 @@ async def rank(body: dict):
                     400,
                     f'Контекстное окно модели ({caps.effective_limit} токенов) недостаточно для инструкций и задач Ameba '
                     f'(требуется минимум {budget["reserved_tokens"]} токенов резерва и служебного промпта). Выберите модель с большим контекстом.',
-                )
-            if outcome.context_window:
-                record_runtime_context_limit(
-                    auth_mode, base_url, caps.model or model, outcome.context_window,
-                    source='runtime', tighten_only=True,
                 )
 
             if (
@@ -1200,11 +1235,6 @@ async def rank(body: dict):
                 )
                 if retry_out is None:
                     raise HTTPException(400, outcome.error_detail or 'Контекстное окно модели недостаточно для компактного запуска Ameba.')
-                if retry_out.context_window:
-                    record_runtime_context_limit(
-                        auth_mode, base_url, retry_caps.model or model, retry_out.context_window,
-                        source='runtime', tighten_only=True,
-                    )
                 outcome, thread = retry_out, retry_thread
 
             if not (outcome.terminal_result and outcome.terminal_result.get('context_requests')) and tools_handler.validated is None:
@@ -1228,6 +1258,7 @@ async def rank(body: dict):
                     adapter=adapter,
                     effort=reasoning_effort,
                     client=client,
+                    capability_scope=(auth_mode, base_url, caps.model or model),
                 )
 
             if outcome.terminal_result and outcome.terminal_result.get('context_requests'):

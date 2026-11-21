@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import agent
+import common.codex_harness as codex_harness
 from common.codex_harness import TurnOutcome
 from common.identity import current_user_id
 from common.file_tools import FILE_NAMES, LIBRARY_NAMES
@@ -91,7 +92,8 @@ class StrausTools(unittest.IsolatedAsyncioTestCase):
         browser.library_client = library
         body = {'api_key': 'fixture-key', 'config': {'model': 'fixture'}, 'instruction': 'Fixture instruction',
                 'calendar': calendar or {'events': [], 'timezone': 'UTC'}, 'tasks': []}
-        with patch.object(agent, 'open_codex', fake_open_codex), \
+        with patch.object(codex_harness, 'fetch_provider_model_metadata', AsyncMock(return_value=None)), \
+             patch.object(agent, 'open_codex', fake_open_codex), \
              patch.object(agent, 'scratch_env', fake_scratch), \
              patch.object(agent, 'serve_mcp', fake_serve), \
              patch.object(agent, 'run_codex_turn', side_effect=fake_turn), \

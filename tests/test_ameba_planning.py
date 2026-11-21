@@ -17,6 +17,7 @@ import main as ameba_service
 import planning
 from common import calendar
 import common.codex_harness as codex_harness
+import common.settings as settings_mod
 from common.codex_harness import (
     ModelCapabilities,
     TurnOutcome,
@@ -546,12 +547,87 @@ class CapabilityDetectionTests(unittest.IsolatedAsyncioTestCase):
         thread = MagicMock()
         thread.turn = AsyncMock(return_value=FakeTurn())
         adapter = codex_harness.McpToolAdapter([], AsyncMock(), MagicMock())
-        outcome = await codex_harness.run_codex_turn(thread, 'hi', label='Ameba', progress=MagicMock(), adapter=adapter)
+        outcome = await codex_harness.run_codex_turn(
+            thread, 'hi', label='Ameba', progress=MagicMock(), adapter=adapter,
+            capability_scope=('api_key', 'https://example.invalid/v1', 'm1'),
+        )
         self.assertTrue(outcome.compacted)
         self.assertEqual(outcome.context_window, 128000)
         self.assertEqual(outcome.last_usage['input_tokens'], 9500)
         self.assertEqual(adapter.compaction_count, 1)
         self.assertEqual(adapter.context_window, 128000)
+
+    async def test_universal_capability_resolution_and_isolation(self):
+        clear_model_capability_cache()
+
+        # Сценарий 4: подтверждённое ограничение провайдера (128K) приоритетнее большего ручного значения (1M).
+        with patch.object(
+            codex_harness,
+            'fetch_provider_model_metadata',
+            AsyncMock(return_value={
+                'model': 'model-x',
+                'context_window': 128_000,
+                'theoretical_context_window': 1_000_000,
+                'max_input_tokens': None,
+                'max_output_tokens': 8_192,
+            }),
+        ):
+            capped = await detect_model_capabilities(
+                auth_mode='api_key',
+                base_url='https://gw-1.invalid/v1',
+                api_key='k',
+                model='model-x',
+                config={'context_window': 1_000_000},
+            )
+        self.assertEqual(capped.effective_limit, 128_000)
+        self.assertEqual(capped.verified_context_window, 128_000)
+        self.assertEqual(capped.manual_context_window, 1_000_000)
+        self.assertEqual(capped.theoretical_context_window, 1_000_000)
+        self.assertEqual(capped.source, 'provider')
+        self.assertEqual(capped.verified_source, 'provider')
+
+        # Сценарий 5: смена модели или base_url не тянет закешированные возможности предыдущей модели/шлюза.
+        with patch.object(codex_harness, 'fetch_provider_model_metadata', AsyncMock(return_value=None)):
+            changed_model = await detect_model_capabilities(
+                auth_mode='api_key',
+                base_url='https://gw-1.invalid/v1',
+                api_key='k',
+                model='other-model',
+                config={'context_window': None},
+            )
+            changed_url = await detect_model_capabilities(
+                auth_mode='api_key',
+                base_url='https://gw-2.invalid/v1',
+                api_key='k',
+                model='model-x',
+                config={'context_window': None},
+            )
+        # Сценарий 3: неизвестное окно без ручной настройки остаётся unknown/None.
+        self.assertIsNone(changed_model.effective_limit)
+        self.assertIsNone(changed_model.verified_context_window)
+        self.assertEqual(changed_model.source, 'unknown')
+        self.assertIsNone(changed_url.effective_limit)
+        self.assertEqual(changed_url.source, 'unknown')
+
+        # Сценарий 2: Arrodes использует автоопределение по OAuth Codex models() и thread.model.
+        codex_client = MagicMock()
+        codex_client.models = AsyncMock(return_value=MagicMock(data=[
+            {'model': 'gpt-codex-auto', 'is_default': True, 'context_window': 400_000, 'max_output_tokens': 32_768},
+        ]))
+        arrodes_thread = MagicMock(model='gpt-codex-auto', context_window=None, theoretical_context_window=None, max_input_tokens=None, max_output_tokens=None)
+        arrodes_caps = await detect_model_capabilities(
+            auth_mode='oauth',
+            model='',
+            config={'context_window': None},
+            client=codex_client,
+            thread=arrodes_thread,
+        )
+        self.assertEqual(arrodes_caps.model, 'gpt-codex-auto')
+        self.assertEqual(arrodes_caps.effective_limit, 400_000)
+        self.assertEqual(arrodes_caps.verified_context_window, 400_000)
+        self.assertIsNone(arrodes_caps.manual_context_window)
+        self.assertEqual(arrodes_caps.source, 'codex')
+        clear_model_capability_cache()
 
 
 class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
@@ -1268,6 +1344,92 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertEqual(prompts, [])
 
+    async def test_unknown_window_compact_fallback_and_oversized_meta_fields_stay_within_budget(self):
+        # Сценарий 9: (1) при неизвестном окне начальный промпт с 40 задачами и большим прошлым планом укладывается в компактный лимит;
+        # (2) в get_task_details необычно длинные title/subject/previous_periods ограничиваются бюджетом всего ответа.
+        ids40 = list(range(1, 41))
+        long_summary = 'Подробное описание требований и этапов работы ' * 25
+        tasks40 = [
+            {
+                'id': tid,
+                'title': f'Задача #{tid}: ' + ('длинное название задачи ' * 8),
+                'priority': 'high' if tid <= 3 else 'medium',
+                'completed_work_minutes': 20 if tid == 1 else 0,
+                'summary': long_summary,
+                'owner_notes': 'Важная заметка владельца ' * 20,
+            }
+            for tid in ids40
+        ]
+        prev40 = {
+            'task_ids': ids40,
+            'explanation': 'Предыдущий план с большим объяснением. ' * 40,
+            'schedule': {
+                'version': 3,
+                'blocked_dates': [],
+                'periods': [
+                    work_period(tid, '2026-11-23', '2026-11-28', 60, goal=f'Большая цель этапа #{tid} ' * 4)
+                    for tid in ids40
+                ],
+            },
+        }
+        big_memory = [{'key': f'm{i}', 'agent': 'Владелец', 'text': 'Большая заметка памяти ' * 40} for i in range(40)]
+        plan40 = proposal_payload(
+            ids40, [task_item(tid, 60) for tid in ids40], [work_period(tid, '2026-11-23', '2026-11-28', 60) for tid in ids40],
+        )
+        prompts = []
+        await self.run_agent(
+            [[('propose_plan', plan40)]],
+            tasks=tasks40,
+            previous_plan=prev40,
+            memory_items=big_memory,
+            provider_metadata=None,
+            config={'model': 'opaque', 'context_window': None},
+            captured_prompts=prompts,
+        )
+        self.assertEqual(len(prompts), 1)
+        self.assertLessEqual(ameba_service._estimate_tokens(prompts[0]), 10_000)
+        payload = json.loads(prompts[0].split('\n', 1)[1])
+        self.assertEqual([t['id'] for t in payload['tasks']], ids40)
+        self.assertTrue(any(t.get('has_more_details') for t in payload['tasks']))
+
+        # Необычно длинные title (25K), subject (10K) и 40 previous_periods не нарушают resp_token_budget и не теряют данные.
+        huge_title = 'Большой заголовок задачи: ' + ('слово ' * 4200)
+        huge_subject = 'Длинный предмет: ' + ('курс ' * 2000)
+        many_periods = [work_period(1, '2026-11-23', '2026-11-24', 30, goal=f'Период #{i}') for i in range(40)]
+        meta_task = [{
+            'id': 1,
+            'title': huge_title,
+            'subject': huge_subject,
+            'deadline': '2026-11-27T12:00:00Z',
+            'completed_work_minutes': 50,
+            'description': 'Короткое описание',
+        }]
+        handler = ameba_service.AmebaTools({'tasks': meta_task, 'now': NOW}, empty_week(), MagicMock())
+        caps16 = ModelCapabilities(model='small-16k', context_window=16_000, theoretical_context_window=16_000, source='manual')
+        budget16 = ameba_service._plan_context_budget(caps16, overhead_tokens=5_000)
+        handler.configure_context(caps16, budget16, initial_prompt_tokens=1_000, previous_periods_by_task={1: many_periods}, previous_plan_truncated=True)
+        resp_budget = handler._tool_response_budget()
+
+        next_off = None
+        parts = {'title_full': [], 'subject': [], 'previous_periods_text': [], 'description': []}
+        while True:
+            out, _ = await handler.call('get_task_details', {'task_ids': [1], 'context_offset': next_off})
+            handler.pending_tool_tokens = 0
+            self.assertLessEqual(ameba_service._estimate_json_tokens(out), resp_budget)
+            card = out['tasks'][0]
+            self.assertEqual((card['id'], card['completed_work_minutes'], card['deadline_time_local']), (1, 50, '12:00'))
+            self.assertLessEqual(len(card['title']), 310)
+            for key in parts:
+                if key in card:
+                    parts[key].append(card[key])
+            next_off = card['details_chunk']['next_offset']
+            if next_off is None:
+                break
+        self.assertEqual(''.join(parts['title_full']), huge_title)
+        self.assertEqual(''.join(parts['subject']), huge_subject)
+        self.assertEqual(len(json.loads(''.join(parts['previous_periods_text']))), 40)
+        self.assertEqual(''.join(parts['description']), 'Короткое описание')
+
 
 class StorageTests(unittest.TestCase):
     def setUp(self):
@@ -1627,6 +1789,68 @@ class StorageTests(unittest.TestCase):
 
         with patch('agent_memory.read', side_effect=RuntimeError('read failed')):
             self.assertEqual(ameba._commit_persistent_preferences([{'key': 'k', 'text': 'Запомнить'}]), (0, 1))
+
+    def test_universal_agent_context_window_persistence_isolation_and_large_budget(self):
+        from routers.integrations import CONFIG_MODELS, agent_capabilities
+
+        # Сценарии 1, 6, 7, 8: независимое сохранение context_window (>= 1M) для каждого агента без утечек между ними и с сохранением в БД.
+        for agent_name in ('ameba', 'monocle', 'straus', 'arrodes'):
+            validated = CONFIG_MODELS[agent_name].model_validate({'context_window': 1_500_000, 'model': 'm1', 'enabled': True})
+            self.assertEqual(validated.context_window, 1_500_000)
+            cleared = CONFIG_MODELS[agent_name].model_validate({'context_window': ''})
+            self.assertIsNone(cleared.context_window)
+            with self.assertRaises(Exception):
+                CONFIG_MODELS[agent_name].model_validate({'context_window': True})
+            with self.assertRaises(Exception):
+                CONFIG_MODELS[agent_name].model_validate({'context_window': 1024})
+
+        settings_mod.save_settings('ameba', {'model': 'model-a', 'context_window': 1_000_000})
+        settings_mod.save_settings('monocle', {'model': 'model-b', 'context_window': 200_000})
+        settings_mod.save_settings('straus', {'model': 'model-s', 'context_window': 500_000})
+        settings_mod.save_settings('arrodes', {'auth_mode': 'oauth', 'model': 'model-c', 'context_window': None})
+
+        # Перечитывание в новой сессии сохраняет точные независимые значения.
+        self.assertEqual(settings_mod.read_settings('ameba', apply_feature=False)[0]['context_window'], 1_000_000)
+        self.assertEqual(settings_mod.read_settings('monocle', apply_feature=False)[0]['context_window'], 200_000)
+        self.assertEqual(settings_mod.read_settings('straus', apply_feature=False)[0]['context_window'], 500_000)
+        self.assertIsNone(settings_mod.read_settings('arrodes', apply_feature=False)[0]['context_window'])
+
+        # Изменение одного агента не затрагивает настройки других и учитывается в resolve_agent_auth / public_settings.
+        settings_mod.save_settings('monocle', {'context_window': 128_000})
+        pub = settings_mod.public_settings()
+        self.assertEqual(pub['ameba']['context_window'], 1_000_000)
+        self.assertEqual(pub['monocle']['context_window'], 128_000)
+        self.assertEqual(pub['context']['context_window'], 128_000)
+        self.assertEqual(pub['straus']['context_window'], 500_000)
+        self.assertIsNone(pub['arrodes']['context_window'])
+        self.assertEqual(settings_mod.resolve_agent_auth('monocle', require_credentials=False)[0]['context_window'], 128_000)
+        self.assertIsNone(settings_mod.resolve_agent_auth('arrodes', require_credentials=False)[0]['context_window'])
+
+        # Сценарии 1 и 8 в runtime-резолвинге: Ameba=1M и Monocle=200K получают собственные ручные бюджеты при неизвестном провайдере.
+        clear_model_capability_cache()
+        with patch.object(codex_harness, 'fetch_provider_model_metadata', AsyncMock(return_value=None)):
+            ameba_caps = asyncio.run(detect_model_capabilities(
+                auth_mode='api_key', base_url='https://example.invalid/v1', api_key='k',
+                model='model-a', config=settings_mod.read_settings('ameba', apply_feature=False)[0],
+            ))
+            monocle_caps = asyncio.run(detect_model_capabilities(
+                auth_mode='api_key', base_url='https://example.invalid/v1', api_key='k',
+                model='model-b', config=settings_mod.read_settings('monocle', apply_feature=False)[0],
+            ))
+        self.assertEqual((ameba_caps.effective_limit, ameba_caps.source), (1_000_000, 'manual'))
+        self.assertEqual((monocle_caps.effective_limit, monocle_caps.source), (200_000, 'manual'))
+        big_budget = ameba_service._plan_context_budget(ameba_caps, overhead_tokens=5_000)
+        self.assertGreaterEqual(big_budget['initial_prompt_tokens'], 600_000)
+        self.assertEqual(big_budget['tool_response_tokens'], ameba_service.MAX_TOOL_RESPONSE_TOKENS)
+
+        # Роутер capabilities использует настройки агента с переданным черновиком и изоляцией от других агентов.
+        with patch('routers.integrations.check_feature'), \
+             patch('routers.integrations.call', AsyncMock(side_effect=lambda target, path, body, timeout=10: {'target': target, 'cfg': body['config']})):
+            out_monocle = asyncio.run(agent_capabilities('monocle', None))
+            out_arrodes = asyncio.run(agent_capabilities('arrodes', None))
+        self.assertEqual((out_monocle['target'], out_monocle['cfg']['context_window']), ('monocle', 128_000))
+        self.assertEqual((out_arrodes['target'], out_arrodes['cfg']['context_window']), ('arrodes', None))
+        clear_model_capability_cache()
 
 
 # --- Набор сценариев для оценки реальных решений LLM (без привязки к одному JSON) ---

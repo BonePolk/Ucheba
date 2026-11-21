@@ -20,11 +20,13 @@ from common.codex_harness import (
     McpToolAdapter,
     append_custom_instructions,
     build_codex_config,
+    cache_provider_models,
     normalize_auth,
     normalize_effort,
     open_codex,
     prepare_codex_root,
     prepare_codex_user,
+    resolve_session_capabilities,
     run_codex_turn,
     scratch_env,
     serve_mcp,
@@ -148,7 +150,18 @@ async def models():
     if account.account is None:
         raise HTTPException(400, 'Подключите OpenAI OAuth в профиле')
     available = await current.models()
+    cache_provider_models('oauth', getattr(available, 'data', None) or (), source_kind='codex')
     return list(dict.fromkeys(item.model for item in available.data))
+
+
+async def optional_oauth_client():
+    try:
+        async with asyncio.timeout(3):
+            current = await get_client()
+            account = await current.account()
+            return current if account.account is not None else None
+    except Exception:
+        return None
 
 
 async def device_login():
@@ -185,9 +198,10 @@ async def check(body=None):
     if not await sandbox_available():
         raise HTTPException(503, 'Linux sandbox недоступен. ' + state().sandbox_error)
     data = body or {}
+    cfg = data.get('config') if 'config' in data else {}
     if 'config' in data:
         auth_mode, api_key, base_url, model = normalize_auth(
-            data.get('config'),
+            cfg,
             data.get('api_key', ''),
             default_mode='oauth',
             label='Arrodes',
@@ -211,9 +225,12 @@ async def check(body=None):
                 approval_mode=ApprovalMode.deny_all,
                 model=model or None,
             )
+            caps = await resolve_session_capabilities(
+                'Arrodes', auth_mode='oauth', model=model, config=cfg, client=current, thread=thread,
+            )
             async with asyncio.timeout(90):
                 await thread.run('Ответь только OK.')
-            return {'ok': True}
+            return {'ok': True, 'capabilities': caps.to_dict()}
 
         async with scratch_env(writable=False) as (work_dir, shell_policy), open_codex(
             'Arrodes',
@@ -235,9 +252,19 @@ async def check(body=None):
                 model_provider=thread_provider,
                 config=shell_policy,
             )
+            caps = await resolve_session_capabilities(
+                'Arrodes',
+                auth_mode='api_key',
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                config=cfg,
+                client=current,
+                thread=thread,
+            )
             async with asyncio.timeout(90):
                 await thread.run('Ответь только OK.')
-        return {'ok': True}
+        return {'ok': True, 'capabilities': caps.to_dict()}
     except HTTPException:
         raise
     except TimeoutError:
@@ -381,6 +408,16 @@ async def execute(run_id, payload, progress, auth=None, options=None):
                     thread = await start_codex_thread(current, 'Arrodes', resume_id=previous['thread_id'], **options)
                 else:
                     thread = await start_codex_thread(current, 'Arrodes', ephemeral=False, **options)
+                caps = await resolve_session_capabilities(
+                    'Arrodes',
+                    auth_mode=auth_mode,
+                    base_url=base_url,
+                    api_key=api_key,
+                    model=model,
+                    config=opts,
+                    client=current,
+                    thread=thread,
+                )
                 record = metadata(run_id)
                 record.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                 record.write_text(json.dumps({
@@ -397,6 +434,7 @@ async def execute(run_id, payload, progress, auth=None, options=None):
                     adapter=adapter,
                     effort=reasoning_effort,
                     client=current,
+                    capability_scope=(auth_mode, base_url, caps.model or model),
                 )
 
             if not outcome.completed:

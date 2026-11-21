@@ -13,6 +13,7 @@ export default function ModelPicker({
   providerConfigured = configured,
   value,
   onChange,
+  onModelsLoaded,
   chatgpt = false,
   authMode = chatgpt ? 'oauth' : 'api_key',
   oauthAuthorized = true,
@@ -56,6 +57,7 @@ export default function ModelPicker({
       if (controller.signal.aborted) return;
       setItems([...new Set(result.filter((item) => typeof item === 'string' && item.trim()))]);
       setLoaded(true);
+      onModelsLoaded?.();
     } catch (failure) {
       if (!controller.signal.aborted) setError(failure.message);
     } finally {

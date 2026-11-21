@@ -11,6 +11,7 @@ from common.codex_harness import (
     normalize_auth,
     normalize_effort,
     open_codex,
+    resolve_session_capabilities,
     run_codex_turn,
     scratch_env,
     serve_mcp,
@@ -312,6 +313,17 @@ async def run(body):
                 developer_instructions=instructions,
                 config=mcp_config | shell_policy,
             )
+            caps = await resolve_session_capabilities(
+                'Straus',
+                auth_mode=auth_mode,
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                config=provider,
+                client=client,
+                thread=thread,
+            )
+            cap_scope = (auth_mode, base_url, caps.model or model)
             outcome = await run_codex_turn(
                 thread,
                 ExternalMessage(tool_name='task_manager', content=json.dumps(initial_payload, ensure_ascii=False, default=str)),
@@ -320,6 +332,7 @@ async def run(body):
                 adapter=adapter,
                 effort=reasoning_effort,
                 client=client,
+                capability_scope=cap_scope,
             )
             if outcome.terminal_result is not None:
                 return outcome.terminal_result
@@ -336,6 +349,7 @@ async def run(body):
                 adapter=adapter,
                 effort=reasoning_effort,
                 client=client,
+                capability_scope=cap_scope,
             )
             if outcome.terminal_result is not None:
                 return outcome.terminal_result

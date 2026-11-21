@@ -29,7 +29,7 @@ async def lifespan(app):
 
 
 app = private_app('arrodes', lifespan)
-agent_routes(app, 'Arrodes')
+agent_routes(app, 'Arrodes', oauth_client_getter=runner.optional_oauth_client)
 
 
 @app.get('/status')
