@@ -15,6 +15,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
 import { Badge, EmptyState } from '@/components/ui/surface';
+import { cn } from '@/lib/utils';
 import { CollapseSection, LAYOUT_TRANSITION, motion, useReducedMotion } from '@/lib/motion';
 
 const MONTHS_SHORT = ['янв', 'фев', 'мар', 'апр', 'мая', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
@@ -59,6 +60,7 @@ export function durationLabel(minutes) {
 
 export default function AgentTimeline({
   finished = true,
+  updating = false,
   schedule,
   calendarOnly = false,
   onFeedback,
@@ -66,6 +68,7 @@ export default function AgentTimeline({
   busy = false,
   taskPins = {},
   estimateOverrides = {},
+  taskRemainingById = {},
   onRefresh,
 }) {
   const reduced = useReducedMotion();
@@ -90,7 +93,23 @@ export default function AgentTimeline({
     );
   }
 
-  const visiblePeriods = expanded ? periods : periods.slice(0, 10);
+  const periodTotalByTask = {};
+  const periodCountByTask = {};
+  for (const period of periods) {
+    if (period.task_id) {
+      const key = String(period.task_id);
+      periodTotalByTask[key] = (periodTotalByTask[key] ?? 0) + Number(period.minutes || 0);
+      periodCountByTask[key] = (periodCountByTask[key] ?? 0) + 1;
+    } else if (period.tasks?.length) {
+      for (const t of period.tasks) {
+        const key = String(t.task_id);
+        periodTotalByTask[key] = (periodTotalByTask[key] ?? 0) + Number(t.minutes || 0);
+        periodCountByTask[key] = (periodCountByTask[key] ?? 0) + 1;
+      }
+    }
+  }
+
+  const visiblePeriods = expanded ? periods : periods.slice(0, 12);
 
   function openFeedback(taskId, periodId, outcome) {
     setEstimateDraft(null);
@@ -121,10 +140,12 @@ export default function AgentTimeline({
     setOpenReasons((prev) => ({ ...prev, [key]: !prev[key] }));
   }
 
-  function renderTaskMenu(taskId, periodId, defaultMinutes) {
+  function renderTaskMenu(taskId, periodId) {
     if (!onFeedback && !onAdjust) return null;
-    const isPinned = Boolean(taskPins[String(taskId)]);
-    const manualVal = estimateOverrides[String(taskId)];
+    const key = String(taskId);
+    const isPinned = Boolean(taskPins[key]);
+    const manualVal = estimateOverrides[key];
+    const currentTaskRemaining = taskRemainingById[key] ?? periodTotalByTask[key];
 
     return (
       <DropdownMenu>
@@ -167,7 +188,7 @@ export default function AgentTimeline({
                   Снять перенос
                 </DropdownMenuItem>
               )}
-              <DropdownMenuItem onClick={() => openEstimateEditor(taskId, manualVal ?? defaultMinutes, periodId)}>
+              <DropdownMenuItem onClick={() => openEstimateEditor(taskId, manualVal ?? currentTaskRemaining, periodId)}>
                 Изменить остаток времени…
               </DropdownMenuItem>
               {manualVal !== undefined && (
@@ -221,13 +242,13 @@ export default function AgentTimeline({
         <CollapseSection open={editingEstThis}>
           {editingEstThis && (
             <div className="mt-2 pt-2 border-t border-dashed border-[#303030] flex flex-wrap items-center gap-1.5">
-              <span className="text-[12px] text-[#929292]">Осталось минут:</span>
+              <span className="text-[12px] text-[#929292]">Остаток по задаче (мин):</span>
               <Input
                 type="number"
                 min={0}
                 max={10000}
                 placeholder="Минуты"
-                aria-label="Осталось минут"
+                aria-label="Остаток по задаче (мин)"
                 value={estimateInput}
                 onChange={(event) => setEstimateInput(event.currentTarget.value)}
                 className="w-[90px] max-md:w-[104px] h-[25px] text-[12px]"
@@ -245,6 +266,11 @@ export default function AgentTimeline({
                 Сохранить
               </Button>
               <Button size="xs" variant="ghost" onClick={() => setEstimateDraft(null)}>✕</Button>
+              {(periodCountByTask[String(taskId)] ?? 0) > 1 && (
+                <span className="text-[11px] text-[#787878] w-full">
+                  Указывается общий остаток всей задачи с учётом всех периодов.
+                </span>
+              )}
             </div>
           )}
         </CollapseSection>
@@ -253,157 +279,175 @@ export default function AgentTimeline({
   }
 
   return (
-    <div className="flex flex-col gap-2">
-      {visiblePeriods.map((period) => {
-        const isCurrent = period.start_date <= todayIso && todayIso <= period.end_date;
-        const dateLabel = formatDateRange(period.start_date, period.end_date);
-        const isRest = period.kind === 'rest' || period.kind === 'free' || period.kind === 'recovery' || period.kind === 'light';
+    <div className="flex w-full min-w-0 flex-col gap-2.5">
+      <div className="flex flex-wrap items-center justify-between gap-2 px-0.5">
+        <span className="text-[11px] font-medium uppercase tracking-wider text-[#929292]">
+          План на ближайшие дни
+        </span>
+        {updating && (
+          <span className="text-[11px] text-[#B98CE8]">
+            Обновляется — показан текущий план
+          </span>
+        )}
+      </div>
 
-        if (isRest && !period.task_id && !(period.tasks?.length > 0)) {
-          const reasonOpen = Boolean(openReasons[period.id]);
-          return (
-            <motion.article
-              key={period.id}
-              layout={reduced ? false : 'position'}
-              transition={reduced ? { duration: 0.01 } : LAYOUT_TRANSITION}
-              className="border border-[#242424] bg-[#0D0D0D] px-3 py-2 flex flex-col gap-1"
-            >
-              <div className="flex flex-wrap items-center justify-between gap-2 text-[12px]">
-                <span className="text-[#929292]">{dateLabel}</span>
-                {isCurrent && <Badge variant="outline">Сейчас</Badge>}
-              </div>
-              <div className="text-[13px] text-[#B8B8B8]">{period.goal || period.title}</div>
-              {period.reason && (
-                <div>
-                  <button
-                    type="button"
-                    aria-expanded={reasonOpen}
-                    onClick={() => toggleReason(period.id)}
-                    className="inline-flex items-center gap-1 text-[11px] text-[#787878] hover:text-[#EAEAEA] cursor-pointer"
-                  >
-                    {reasonOpen ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-                    <span>Почему так</span>
-                  </button>
-                  <CollapseSection open={reasonOpen}>
-                    <p className="mt-1 text-[12px] text-[#929292] leading-snug m-0">{period.reason}</p>
-                  </CollapseSection>
+      <div
+        className={cn(
+          'grid w-full min-w-0 grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3 items-start',
+          updating && 'opacity-75 transition-opacity',
+        )}
+      >
+        {visiblePeriods.map((period) => {
+          const isCurrent = period.start_date <= todayIso && todayIso <= period.end_date;
+          const dateLabel = formatDateRange(period.start_date, period.end_date);
+          const isRest = period.kind === 'rest' || period.kind === 'free' || period.kind === 'recovery' || period.kind === 'light';
+
+          if (isRest && !period.task_id && !(period.tasks?.length > 0)) {
+            const reasonOpen = Boolean(openReasons[period.id]);
+            return (
+              <motion.article
+                key={period.id}
+                layout={reduced ? false : 'position'}
+                transition={reduced ? { duration: 0.01 } : LAYOUT_TRANSITION}
+                className="min-w-0 border border-[#242424] bg-[#0D0D0D] px-3.5 py-3 flex flex-col gap-1.5"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2 text-[12px]">
+                  <span className="text-[#929292]">{dateLabel}</span>
+                  {isCurrent && <Badge variant="outline">Сейчас</Badge>}
                 </div>
-              )}
-            </motion.article>
-          );
-        }
+                <div className="text-[13px] text-[#B8B8B8] break-words">{period.goal || period.title}</div>
+                {period.reason && (
+                  <div>
+                    <button
+                      type="button"
+                      aria-expanded={reasonOpen}
+                      onClick={() => toggleReason(period.id)}
+                      className="inline-flex items-center gap-1 text-[11px] text-[#787878] hover:text-[#EAEAEA] cursor-pointer"
+                    >
+                      {reasonOpen ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                      <span>Почему так</span>
+                    </button>
+                    <CollapseSection open={reasonOpen}>
+                      <p className="mt-1 text-[12px] text-[#929292] leading-snug m-0 break-words">{period.reason}</p>
+                    </CollapseSection>
+                  </div>
+                )}
+              </motion.article>
+            );
+          }
 
-        // Новый формат v3: один период привязан к одной задаче period.task_id.
-        if (period.task_id) {
-          const reasonOpen = Boolean(openReasons[period.id]);
-          const hasRisk = Boolean(period.deadline_risk);
-          const isPinned = Boolean(taskPins[String(period.task_id)]);
-          const manualVal = estimateOverrides[String(period.task_id)];
+          // Новый формат v3: один период привязан к одной задаче period.task_id.
+          if (period.task_id) {
+            const reasonOpen = Boolean(openReasons[period.id]);
+            const hasRisk = Boolean(period.deadline_risk);
+            const isPinned = Boolean(taskPins[String(period.task_id)]);
+            const manualVal = estimateOverrides[String(period.task_id)];
 
+            return (
+              <motion.article
+                key={period.id}
+                layout={reduced ? false : 'position'}
+                transition={reduced ? { duration: 0.01 } : LAYOUT_TRANSITION}
+                className="min-w-0 border border-[#303030] border-l-2 bg-[#111111] px-3.5 py-3 flex flex-col gap-1.5"
+                style={{
+                  borderLeftColor: hasRisk ? '#D4A24C' : isCurrent ? '#7F49B4' : '#3A3A3A',
+                  background: isCurrent ? '#141118' : '#111111',
+                }}
+              >
+                <div className="flex items-center justify-between gap-2 min-w-0">
+                  <div className="flex flex-wrap items-center gap-1.5 min-w-0 text-[12px] text-[#929292]">
+                    <span>{dateLabel}</span>
+                    {isCurrent && <Badge variant="accent">Сейчас</Badge>}
+                    {isPinned && <Badge variant="info">Закреплено</Badge>}
+                    {manualVal !== undefined && <Badge variant="info">Ост. {manualVal} м</Badge>}
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {period.hours_label && (
+                      <span className="text-[12px] font-medium text-[#B8B8B8] tabular-nums">{period.hours_label}</span>
+                    )}
+                    {renderTaskMenu(period.task_id, period.id)}
+                  </div>
+                </div>
+
+                <a
+                  href={`/?task=${period.task_id}`}
+                  className="text-[14px] font-medium text-[#EAEAEA] hover:text-[#CFA9F5] hover:underline break-words w-fit max-w-full"
+                >
+                  {period.title}
+                </a>
+
+                {period.goal && (
+                  <p className="text-[12px] text-[#C8C8C8] leading-snug m-0 break-words">{period.goal}</p>
+                )}
+
+                {period.context_hint && (
+                  <p className="text-[12px] text-[#B98CE8] leading-snug m-0 break-words">{period.context_hint}</p>
+                )}
+
+                {period.reason && (
+                  <div className="pt-0.5">
+                    <button
+                      type="button"
+                      aria-expanded={reasonOpen}
+                      onClick={() => toggleReason(period.id)}
+                      className="inline-flex items-center gap-1 text-[11px] text-[#8A8A8A] hover:text-[#EAEAEA] cursor-pointer"
+                    >
+                      {reasonOpen ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                      <span>Почему так</span>
+                    </button>
+                    <CollapseSection open={reasonOpen}>
+                      <p className="mt-1 text-[12px] text-[#929292] leading-snug m-0 break-words">{period.reason}</p>
+                    </CollapseSection>
+                  </div>
+                )}
+
+                {renderInlineEditors(period.task_id, period.id)}
+              </motion.article>
+            );
+          }
+
+          // Совместимость со старым форматом v2 (несколько задач в одном периоде).
           return (
             <motion.article
               key={period.id}
               layout={reduced ? false : 'position'}
               transition={reduced ? { duration: 0.01 } : LAYOUT_TRANSITION}
-              className="border border-[#303030] border-l-2 bg-[#111111] px-3 py-2.5 flex flex-col gap-1"
+              className="min-w-0 border border-[#303030] border-l-2 bg-[#111111] px-3.5 py-3 flex flex-col gap-2"
               style={{
-                borderLeftColor: hasRisk ? '#D4A24C' : isCurrent ? '#7F49B4' : '#3A3A3A',
+                borderLeftColor: isCurrent ? '#7F49B4' : '#3A3A3A',
                 background: isCurrent ? '#141118' : '#111111',
               }}
             >
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex flex-wrap items-center gap-1.5 min-w-0 text-[12px] text-[#929292]">
+              <div className="flex items-center justify-between gap-2 text-[12px] text-[#929292]">
+                <div className="flex items-center gap-1.5">
                   <span>{dateLabel}</span>
                   {isCurrent && <Badge variant="accent">Сейчас</Badge>}
-                  {isPinned && <Badge variant="info">Закреплено</Badge>}
-                  {manualVal !== undefined && <Badge variant="info">Ост. {manualVal} м</Badge>}
                 </div>
-                <div className="flex items-center gap-1.5 shrink-0">
-                  {period.hours_label && (
-                    <span className="text-[12px] font-medium text-[#B8B8B8] tabular-nums">{period.hours_label}</span>
-                  )}
-                  {renderTaskMenu(period.task_id, period.id, period.minutes)}
-                </div>
+                {period.hours_label && <span className="tabular-nums text-[#B8B8B8]">{period.hours_label}</span>}
               </div>
-
-              <a
-                href={`/?task=${period.task_id}`}
-                className="text-[14px] font-medium text-[#EAEAEA] hover:text-[#CFA9F5] hover:underline break-words w-fit"
-              >
-                {period.title}
-              </a>
-
-              {period.goal && (
-                <p className="text-[12px] text-[#C8C8C8] leading-snug m-0 break-words">{period.goal}</p>
-              )}
-
-              {period.context_hint && (
-                <p className="text-[12px] text-[#B98CE8] leading-snug m-0 break-words">{period.context_hint}</p>
-              )}
-
-              {period.reason && (
-                <div className="pt-0.5">
-                  <button
-                    type="button"
-                    aria-expanded={reasonOpen}
-                    onClick={() => toggleReason(period.id)}
-                    className="inline-flex items-center gap-1 text-[11px] text-[#8A8A8A] hover:text-[#EAEAEA] cursor-pointer"
-                  >
-                    {reasonOpen ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-                    <span>Почему так</span>
-                  </button>
-                  <CollapseSection open={reasonOpen}>
-                    <p className="mt-1 text-[12px] text-[#929292] leading-snug m-0 break-words">{period.reason}</p>
-                  </CollapseSection>
-                </div>
-              )}
-
-              {renderInlineEditors(period.task_id, period.id)}
+              <div className="flex flex-col divide-y divide-[#222222]">
+                {(period.tasks ?? []).map((task) => (
+                  <div key={task.task_id} className="py-1.5 first:pt-0 last:pb-0 min-w-0">
+                    <div className="flex items-center justify-between gap-2 min-w-0">
+                      <a href={`/?task=${task.task_id}`} className="text-[13px] font-medium text-[#EAEAEA] hover:text-[#CFA9F5] hover:underline min-w-0 break-words">
+                        {task.title}
+                      </a>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {task.hours_label && <span className="text-[12px] text-[#929292] tabular-nums">{task.hours_label}</span>}
+                        {renderTaskMenu(task.task_id, period.id)}
+                      </div>
+                    </div>
+                    {task.goal && <p className="text-[12px] text-[#929292] m-0 mt-0.5 break-words">{task.goal}</p>}
+                    {renderInlineEditors(task.task_id, period.id)}
+                  </div>
+                ))}
+              </div>
             </motion.article>
           );
-        }
+        })}
+      </div>
 
-        // Совместимость со старым форматом v2 (несколько задач в одном периоде).
-        return (
-          <motion.article
-            key={period.id}
-            layout={reduced ? false : 'position'}
-            transition={reduced ? { duration: 0.01 } : LAYOUT_TRANSITION}
-            className="border border-[#303030] border-l-2 bg-[#111111] px-3 py-2.5 flex flex-col gap-2"
-            style={{
-              borderLeftColor: isCurrent ? '#7F49B4' : '#3A3A3A',
-              background: isCurrent ? '#141118' : '#111111',
-            }}
-          >
-            <div className="flex items-center justify-between gap-2 text-[12px] text-[#929292]">
-              <div className="flex items-center gap-1.5">
-                <span>{dateLabel}</span>
-                {isCurrent && <Badge variant="accent">Сейчас</Badge>}
-              </div>
-              {period.hours_label && <span className="tabular-nums text-[#B8B8B8]">{period.hours_label}</span>}
-            </div>
-            <div className="flex flex-col divide-y divide-[#222222]">
-              {(period.tasks ?? []).map((task) => (
-                <div key={task.task_id} className="py-1.5 first:pt-0 last:pb-0">
-                  <div className="flex items-center justify-between gap-2">
-                    <a href={`/?task=${task.task_id}`} className="text-[13px] font-medium text-[#EAEAEA] hover:text-[#CFA9F5] hover:underline min-w-0 break-words">
-                      {task.title}
-                    </a>
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      {task.hours_label && <span className="text-[12px] text-[#929292] tabular-nums">{task.hours_label}</span>}
-                      {renderTaskMenu(task.task_id, period.id, task.minutes)}
-                    </div>
-                  </div>
-                  {task.goal && <p className="text-[12px] text-[#929292] m-0 mt-0.5 break-words">{task.goal}</p>}
-                  {renderInlineEditors(task.task_id, period.id)}
-                </div>
-              ))}
-            </div>
-          </motion.article>
-        );
-      })}
-
-      {periods.length > 10 && (
+      {periods.length > 12 && (
         <div>
           <Button size="sm" variant="subtle" onClick={() => setExpanded(!expanded)}>
             {expanded ? 'Свернуть' : `Показать все (${periods.length})`}

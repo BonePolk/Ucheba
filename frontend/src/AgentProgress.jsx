@@ -189,6 +189,7 @@ export function useAgentProgressStream(taskId = 0, providers = []) {
             if (amebaEntry.status !== 'running' && lastAmebaStatus === 'running' && lastInvalidatedAmebaRun !== amebaEntry.id) {
               lastInvalidatedAmebaRun = amebaEntry.id;
               client.invalidateQueries({ queryKey: ['ameba-ranking'] });
+              client.invalidateQueries({ queryKey: ['agent-queue'] });
             }
             lastAmebaStatus = amebaEntry.status;
           }
@@ -246,6 +247,8 @@ export default function AgentProgress({
   autoOpenOnActive = true,
   defaultOpen,
   hideSummaryWhenIdle = false,
+  compactRunning = false,
+  hideErrorNotice = false,
   open,
   onOpenChange,
 }) {
@@ -332,8 +335,68 @@ export default function AgentProgress({
   const horizonTone = hasFailure ? 'danger' : (hasQuestion || browserWaiting) ? 'warning' : 'accent';
 
   if (!providers.length) return null;
-  if (hideSummaryWhenIdle && !running && !opened && !streamError && !hasQuestion && !hasFailure && entries.every((e) => e.available)) {
+  if (
+    hideSummaryWhenIdle
+    && !running
+    && !opened
+    && !streamError
+    && !hasQuestion
+    && (!hasFailure || hideErrorNotice)
+    && entries.every((e) => e.available)
+  ) {
     return null;
+  }
+
+  if (compactRunning && !opened) {
+    const compactText = run?.pending_question
+      ? 'Ждёт ответа владельца'
+      : run?.browser_waiting
+        ? (run.current_action ?? 'Ждёт освобождения браузера')
+        : run?.model_waiting
+          ? 'Обдумывает план…'
+          : (run?.agent_comment || run?.current_action || (queued ? 'В очереди на планирование…' : 'Составляет план…'));
+
+    return (
+      <section className="relative overflow-hidden border border-[#303030] bg-[#111111] px-3 py-1.5 flex flex-col gap-1.5">
+        <LiveHorizon active={running && !run?.pending_question} tone={horizonTone} />
+        <div className="flex items-center justify-between gap-2 min-h-[26px] min-w-0">
+          <div className="flex items-center gap-2 min-w-0 flex-1">
+            <StatusIndicator tone={indicatorTone} pulse={running && !run?.pending_question} />
+            <span className="text-[12px] text-[#EAEAEA] truncate" role="status" aria-live="polite">
+              <AgentExplanation text={compactText} />
+            </span>
+          </div>
+          <Button
+            size="xs"
+            variant="subtle"
+            aria-expanded={opened}
+            onClick={() => setOpenState(true)}
+            className="gap-1.5 shrink-0"
+          >
+            {running && !run?.pending_question && <Spinner size={11} />}
+            <span>Журнал</span>
+            {run?.events?.length ? <span className="text-[11px] text-[#929292] tabular-nums">({run.events.length})</span> : null}
+            <ChevronDown className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+
+        {hasFailure && !hideErrorNotice && (
+          <Notice tone="error">{run.error || 'Агент завершился с ошибкой. Повторите поручение.'}</Notice>
+        )}
+
+        {entries.filter((entry) => entry.run?.pending_question).map((entry) => (
+          <AgentQuestion key={entry.run.pending_question.id} question={entry.run.pending_question} agent={entry.run.agent} />
+        ))}
+
+        {entries.filter((entry) => !entry.available).map((entry) => (
+          <div key={entry.provider} className="text-[11px] text-[#D4A24C]">
+            {names[entry.provider] ?? entry.provider}: журнал пока недоступен
+          </div>
+        ))}
+
+        {streamError && <Notice tone="warning">Соединение с журналом потеряно. Переподключаемся…</Notice>}
+      </section>
+    );
   }
 
   return (

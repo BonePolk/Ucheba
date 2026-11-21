@@ -178,8 +178,28 @@ class ValidationAndScenarios(unittest.TestCase):
         prop, issues, days, budgets = planning.validate_proposal(honest, tasks, empty_week(), NOW)
         self.assertEqual(issues, [])
         res = planning.materialize_plan(prop, tasks, days, budgets, empty_week(), NOW)
+        self.assertTrue(res['schedule']['valid'])
         self.assertFalse(res['schedule']['feasible'])
+        self.assertFalse(res['schedule']['fully_scheduled'])
         self.assertGreater(res['schedule']['remaining'][0]['remaining_work_minutes'], 0)
+
+    def test_feasible_vs_deadline_risk_separation(self):
+        tasks = [{'id': 1, 'title': 'Курсовая', 'deadline': '2026-11-25T18:00:00Z', 'completed_work_minutes': 0}]
+        cand = proposal_payload(
+            [1],
+            [assess(1, 180, 180, policy='finish_before', effort='medium', deadline_risk='Запас небольшой, лучше не откладывать')],
+            [work_period(1, '2026-11-23', '2026-11-24', [('2026-11-23', 90), ('2026-11-24', 90)])],
+        )
+        prop, issues, days, budgets = planning.validate_proposal(cand, tasks, empty_week(), NOW)
+        self.assertEqual(issues, [])
+        res = planning.materialize_plan(prop, tasks, days, budgets, empty_week(), NOW)
+        self.assertTrue(res['schedule']['valid'])
+        self.assertTrue(res['schedule']['feasible'])
+        self.assertTrue(res['schedule']['fully_scheduled'])
+        self.assertEqual(res['schedule']['remaining_minutes'], 0)
+        self.assertEqual(len(res['schedule']['deadline_conflicts']), 1)
+        self.assertFalse(res['schedule']['deadline_conflicts'][0]['infeasible'])
+        self.assertEqual(len(res['schedule']['deadline_risks']), 1)
 
     def test_scenario_f_progress_subtracted_once_and_refresh(self):
         tasks = [{'id': 1, 'title': 'Лабораторная', 'completed_work_minutes': 120}]
@@ -294,6 +314,59 @@ class ValidationAndScenarios(unittest.TestCase):
         _, valid_issues, _, _ = planning.validate_proposal(valid_test, tasks, empty_week(), NOW)
         self.assertEqual(valid_issues, [])
 
+    def test_same_day_available_from_and_deadline_intersection_and_competition(self):
+        # Открытие 15:00 и дедлайн 16:00 в один день -> доступно не больше 60 мин.
+        tasks = [{
+            'id': 1,
+            'title': 'Короткое окно',
+            'deadline': '2026-11-24T16:00:00+00:00',
+            'completed_work_minutes': 0,
+        }]
+        too_long = proposal_payload(
+            [1],
+            [assess(1, 180, 180, splittable=True, policy='expires', available_from='2026-11-24T15:00:00+00:00')],
+            [work_period(1, '2026-11-24', '2026-11-24', [('2026-11-24', 180)])],
+        )
+        cand_prop, issues, _, _ = planning.validate_proposal(too_long, tasks, empty_week(), NOW)
+        self.assertIsNotNone(cand_prop)
+        self.assertTrue(any(i['code'] == 'deadline_day_over_capacity' for i in issues))
+
+        # Две задачи делят общее окно 14:00..16:00 (120 мин) в один день -> суммарно 180 > 120 отклоняется.
+        comp_tasks = [
+            {'id': 1, 'title': 'Первая', 'deadline': '2026-11-24T16:00:00+00:00', 'completed_work_minutes': 0},
+            {'id': 2, 'title': 'Вторая', 'deadline': '2026-11-24T16:00:00+00:00', 'completed_work_minutes': 0},
+        ]
+        comp = proposal_payload(
+            [1, 2],
+            [
+                assess(1, 90, 90, policy='expires', available_from='2026-11-24T14:00:00+00:00'),
+                assess(2, 90, 90, policy='expires', available_from='2026-11-24T14:00:00+00:00'),
+            ],
+            [
+                work_period(1, '2026-11-24', '2026-11-24', [('2026-11-24', 90)]),
+                work_period(2, '2026-11-24', '2026-11-24', [('2026-11-24', 90)]),
+            ],
+        )
+        _, comp_issues, _, _ = planning.validate_proposal(comp, comp_tasks, empty_week(), NOW)
+        self.assertTrue(any(i['code'] == 'deadline_day_over_capacity' for i in comp_issues))
+
+    def test_refresh_rejects_invalidated_plan_when_calendar_shrinks(self):
+        tasks = [{'id': 1, 'title': 'Лабораторная', 'completed_work_minutes': 0}]
+        cand = proposal_payload(
+            [1],
+            [assess(1, 240, 240, splittable=False)],
+            [work_period(1, '2026-11-24', '2026-11-24', [('2026-11-24', 240)])],
+        )
+        prop, issues, days, budgets = planning.validate_proposal(cand, tasks, empty_week(), NOW)
+        self.assertEqual(issues, [])
+        res = planning.materialize_plan(prop, tasks, days, budgets, empty_week(), NOW)
+
+        shrunk_events = [
+            {'id': 'busy-1', 'kind': 'busy', 'title': 'Конференция', 'date': '2026-11-24', 'start': '08:00', 'end': '20:00'},
+        ]
+        with self.assertRaises(ValueError):
+            planning.refresh_schedule(res, tasks, empty_week(events=shrunk_events), NOW)
+
     def test_strict_openai_tool_schemas(self):
         def check_strict(node):
             if isinstance(node, dict):
@@ -314,7 +387,7 @@ class ValidationAndScenarios(unittest.TestCase):
 
 
 class AgentLoop(unittest.IsolatedAsyncioTestCase):
-    async def run_agent(self, actions, *, user_feedback='', memory_items=None, memory_mock=None):
+    async def run_agent(self, actions, *, user_feedback='', memory_items=None, memory_mock=None, tasks=None, weekly_schedule=None):
         from contextlib import asynccontextmanager
         from common.codex_harness import TurnOutcome
 
@@ -375,9 +448,9 @@ class AgentLoop(unittest.IsolatedAsyncioTestCase):
             return await ameba_service.rank.__wrapped__({
                 'api_key': 'synthetic',
                 'config': {'model': 'fixture'},
-                'tasks': [{'id': 1, 'title': 'Лабораторная', 'completed_work_minutes': 0}],
+                'tasks': tasks or [{'id': 1, 'title': 'Лабораторная', 'completed_work_minutes': 0}],
                 'now': NOW,
-                'weekly_schedule': empty_week(),
+                'weekly_schedule': weekly_schedule or empty_week(),
                 'user_feedback': user_feedback,
             })
 
@@ -401,8 +474,8 @@ class AgentLoop(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res['memory_saved_count'], 0)
         mem_mock.assert_not_called()
 
-    async def test_scenario_e_persistent_habit_saved_without_duplicates(self):
-        mem_mock = AsyncMock(return_value={'ok': True})
+    async def test_scenario_e_persistent_habit_filtered_and_prepared_for_backend(self):
+        mem_mock = AsyncMock(return_value=[])
         existing = [{'key': 'user.1', 'agent': 'Владелец', 'text': 'Учусь по утрам'}]
         cand = proposal_payload(
             [1],
@@ -419,10 +492,91 @@ class AgentLoop(unittest.IsolatedAsyncioTestCase):
             memory_items=existing,
             memory_mock=mem_mock,
         )
-        self.assertEqual(res['memory_saved_count'], 1)
-        mem_mock.assert_awaited_once()
-        saved_args = mem_mock.await_args.args[1]
-        self.assertTrue(saved_args['key'].startswith('ameba.'))
+        # Сервис Ameba возвращает подготовленные привычки, но не пишет в память до commit в backend.
+        mem_mock.assert_not_called()
+        self.assertEqual(res['memory_saved_count'], 0)
+        self.assertEqual(len(res['persistent_preferences']), 1)
+        self.assertEqual(res['persistent_preferences'][0]['key'], 'ameba.hard_on_free_days')
+
+    async def test_repair_plan_preserves_untouched_tasks_and_assessments(self):
+        tasks = [
+            {'id': 1, 'title': 'Конспект', 'completed_work_minutes': 0},
+            {'id': 2, 'title': 'Переезд', 'completed_work_minutes': 0},
+        ]
+        bad = proposal_payload(
+            [1, 2],
+            [
+                assess(1, 90, 90, reason='Первая оценка'),
+                assess(2, 120, 120, reason='Вторая оценка'),
+            ],
+            [
+                work_period(1, '2026-11-23', '2026-11-23', [('2026-11-23', 90)], goal='Сделать конспект'),
+                work_period(2, '2026-11-24', '2026-11-24', [('2026-11-24', 500)], goal='Перевезти всё сразу'),
+            ],
+            explanation='Исходное объяснение плана.',
+        )
+        repair = {
+            'task_ids': None,
+            'task_replacements': [],
+            'period_replacements': [
+                {
+                    'index': 1,
+                    'period': work_period(
+                        2,
+                        '2026-11-24',
+                        '2026-11-25',
+                        [('2026-11-24', 60), ('2026-11-25', 60)],
+                        goal='Перевезти постепенно',
+                    ),
+                },
+            ],
+            'remove_period_indices': [],
+            'add_periods': [],
+            'preferences': None,
+            'progress_updates': None,
+            'explanation': None,
+        }
+        res = await self.run_agent([[('propose_plan', bad), ('repair_plan', repair)]], tasks=tasks)
+        self.assertEqual(res['task_ids'], [1, 2])
+        self.assertEqual(res['explanation'], 'Исходное объяснение плана.')
+        self.assertEqual([t['id'] for t in res['timeline']], [1, 2])
+        self.assertEqual(res['schedule']['periods'][0]['goal'], 'Сделать конспект')
+        self.assertEqual(res['schedule']['periods'][1]['minutes'], 120)
+
+    async def test_repair_plan_without_candidate_returns_error(self):
+        repair = {
+            'task_ids': None,
+            'task_replacements': [],
+            'period_replacements': [],
+            'remove_period_indices': [],
+            'add_periods': [],
+            'preferences': None,
+            'progress_updates': None,
+            'explanation': None,
+        }
+        with self.assertRaisesRegex(Exception, 'исходного предложения|не предложила корректный план'):
+            await self.run_agent([[('repair_plan', repair)]])
+
+    async def test_double_invalid_repair_stops_and_preserves_previous_plan(self):
+        bad = proposal_payload(
+            [1],
+            [assess(1, 120, 120)],
+            [work_period(1, '2026-11-23', '2026-11-23', [('2026-11-23', 500)])],
+        )
+        still_bad_repair = {
+            'task_ids': None,
+            'task_replacements': [],
+            'period_replacements': [
+                {'index': 0, 'period': work_period(1, '2026-11-23', '2026-11-23', [('2026-11-23', 480)])},
+            ],
+            'remove_period_indices': [],
+            'add_periods': [],
+            'preferences': None,
+            'progress_updates': None,
+            'explanation': None,
+        }
+        with self.assertRaisesRegex(Exception, 'после исправления'):
+            await self.run_agent([[('propose_plan', bad), ('repair_plan', still_bad_repair)]])
 
     async def test_scenario_h_one_repair_succeeds_and_second_failure_stops(self):
         bad = proposal_payload(
@@ -536,7 +690,7 @@ class Storage(unittest.TestCase):
             [assess(1, 180, 180)],
             [work_period(1, '2026-11-23', '2026-11-25', [('2026-11-23', 60), ('2026-11-25', 60)])],
             preferences=[{'text': 'Удобно перевозить после университета', 'scope': 'task', 'task_id': 1, 'key': None}],
-            progress_updates=[{'task_id': 1, 'completed_work_minutes': 60}],
+            progress_updates=[{'task_id': 1, 'operation': 'add', 'minutes': 60}],
         )
         prop, issues, days, budgets = planning.validate_proposal(
             cand, [{'id': 1, 'title': 'Переезд', 'completed_work_minutes': 0}], empty_week(), NOW, has_feedback=True,
@@ -560,6 +714,221 @@ class Storage(unittest.TestCase):
             self.assertEqual(session.get(Task, 1).completed_work_minutes, 60)
             self.assertEqual(session.get(Task, 1).status, 'in_progress')
             self.assertEqual(ameba.read_adjustments(session)['task_notes']['1'], 'Удобно перевозить после университета')
+
+    def test_save_plan_feedback_without_session(self):
+        ameba.save_plan_feedback('оставить пятницу свободной')
+        self.assertEqual(ameba.plan_feedback(), 'оставить пятницу свободной')
+
+    def test_progress_update_add_and_no_double_apply_on_retry(self):
+        task = Task(id=1, title='Лабораторная', status='in_progress', completed_work_minutes=120)
+        with Session(self.engine) as session:
+            session.add(task)
+            session.add(TaskContext(task_id=1, subject='', status='ready', task_snapshot=monocle_context.snapshot(task),
+                                    usage=json.dumps({'context_policy': 5, 'full_markdown': 'ok'})))
+            session.commit()
+
+        cand = proposal_payload(
+            [1],
+            [assess(1, 300, 300)],
+            [work_period(1, '2026-11-23', '2026-11-24', [('2026-11-23', 90), ('2026-11-24', 60)])],
+            progress_updates=[{'task_id': 1, 'operation': 'add', 'minutes': 30}],
+        )
+        prop, issues, days, budgets = planning.validate_proposal(
+            cand, [{'id': 1, 'title': 'Лабораторная', 'completed_work_minutes': 120}], empty_week(), NOW, has_feedback=True,
+        )
+        self.assertEqual(issues, [])
+        materialized = planning.materialize_plan(prop, [{'id': 1, 'title': 'Лабораторная', 'completed_work_minutes': 120}], days, budgets, empty_week(), NOW)
+        stale_retry = json.loads(json.dumps(materialized))
+
+        calendar.reset_ameba_plan('run_add')
+        with patch.object(ameba, 'check_feature'), \
+             patch.object(ameba, 'read_config', return_value={'enabled': True}), \
+             patch.object(ameba, 'read_settings', return_value=({'base_url': 'u'}, {})), \
+             patch.object(ameba, 'context_status', return_value='ready'), \
+             patch.object(ameba, 'request_ranking', AsyncMock(return_value=materialized | {'plan_run_id': 'run_add', 'calendar_revision': 'r1'})), \
+             patch('agent_memory.read', return_value=[]):
+            ameba.save_plan_feedback('позанимался ещё 30 минут')
+            out = asyncio.run(ameba.rank_all())
+        self.assertEqual(out['progress_updated_count'], 1)
+        with Session(self.engine) as session:
+            self.assertEqual(session.get(Task, 1).completed_work_minutes, 150)
+
+        # Повторное применение устаревшего результата с base=120 отклоняется и не даёт 180.
+        calendar.reset_ameba_plan('run_retry')
+        with patch.object(ameba, 'check_feature'), \
+             patch.object(ameba, 'read_config', return_value={'enabled': True}), \
+             patch.object(ameba, 'read_settings', return_value=({'base_url': 'u'}, {})), \
+             patch.object(ameba, 'context_status', return_value='ready'), \
+             patch.object(ameba, 'request_ranking', AsyncMock(return_value=stale_retry | {'plan_run_id': 'run_retry', 'calendar_revision': 'r1'})), \
+             patch('agent_memory.read', return_value=[]):
+            with self.assertRaisesRegex(Exception, 'Прогресс задачи изменился'):
+                asyncio.run(ameba.rank_all(force=True))
+        with Session(self.engine) as session:
+            self.assertEqual(session.get(Task, 1).completed_work_minutes, 150)
+
+    def test_persistent_memory_not_written_when_commit_fails(self):
+        task = Task(id=1, title='Учёба', status='todo', completed_work_minutes=0)
+        with Session(self.engine) as session:
+            session.add(task)
+            session.add(TaskContext(task_id=1, subject='', status='ready', task_snapshot=monocle_context.snapshot(task),
+                                    usage=json.dumps({'context_policy': 5, 'full_markdown': 'ok'})))
+            session.commit()
+
+        cand = proposal_payload(
+            [1],
+            [assess(1, 120, 120)],
+            [work_period(1, '2026-11-23', '2026-11-23', [('2026-11-23', 120)])],
+            preferences=[{'text': 'Сложные задачи делаю с утра', 'scope': 'persistent', 'task_id': None, 'key': 'ameba.morning'}],
+        )
+        prop, issues, days, budgets = planning.validate_proposal(
+            cand, [{'id': 1, 'title': 'Учёба', 'completed_work_minutes': 0}], empty_week(), NOW, has_feedback=True,
+        )
+        self.assertEqual(issues, [])
+        materialized = planning.materialize_plan(prop, [{'id': 1, 'title': 'Учёба', 'completed_work_minutes': 0}], days, budgets, empty_week(), NOW)
+
+        saved_facts = []
+
+        def fake_save_fact(fact, agent):
+            saved_facts.append((fact, agent))
+            return fact
+
+        # Сбой commit/устаревшего run_id -> save_ameba_plan бросает ValueError до commit, память не пишется.
+        calendar.reset_ameba_plan('other_run')
+        with patch.object(ameba, 'check_feature'), \
+             patch.object(ameba, 'read_config', return_value={'enabled': True}), \
+             patch.object(ameba, 'read_settings', return_value=({'base_url': 'u'}, {})), \
+             patch.object(ameba, 'context_status', return_value='ready'), \
+             patch.object(ameba, 'request_ranking', AsyncMock(return_value=json.loads(json.dumps(materialized)) | {'plan_run_id': 'stale_run', 'calendar_revision': 'r1'})), \
+             patch('agent_memory.read', return_value=[]), \
+             patch('agent_memory.save', side_effect=fake_save_fact):
+            with self.assertRaises(ValueError):
+                asyncio.run(ameba.rank_all())
+        self.assertEqual(saved_facts, [])
+
+        # Успешный commit -> persistent привычка сохраняется один раз.
+        calendar.reset_ameba_plan('good_run')
+        with patch.object(ameba, 'check_feature'), \
+             patch.object(ameba, 'read_config', return_value={'enabled': True}), \
+             patch.object(ameba, 'read_settings', return_value=({'base_url': 'u'}, {})), \
+             patch.object(ameba, 'context_status', return_value='ready'), \
+             patch.object(ameba, 'request_ranking', AsyncMock(return_value=materialized | {'plan_run_id': 'good_run', 'calendar_revision': 'r1'})), \
+             patch('agent_memory.read', return_value=[]), \
+             patch('agent_memory.save', side_effect=fake_save_fact):
+            out = asyncio.run(ameba.rank_all())
+        self.assertEqual(out['memory_saved_count'], 1)
+        self.assertEqual(len(saved_facts), 1)
+        self.assertEqual(saved_facts[0][0]['key'], 'ameba.morning')
+
+    def test_manual_shift_applies_or_marks_needs_replan(self):
+        task = Task(id=1, title='Лабораторная', status='todo', completed_work_minutes=0)
+        with Session(self.engine) as session:
+            session.add(task)
+            session.add(TaskContext(task_id=1, subject='', status='ready', task_snapshot=monocle_context.snapshot(task),
+                                    usage=json.dumps({'context_policy': 5, 'full_markdown': 'ok'})))
+            session.commit()
+
+        cand = proposal_payload(
+            [1],
+            [assess(1, 120, 120)],
+            [work_period(1, '2026-11-23', '2026-11-23', [('2026-11-23', 120)])],
+        )
+        prop, issues, days, budgets = planning.validate_proposal(
+            cand, [{'id': 1, 'title': 'Лабораторная', 'completed_work_minutes': 0}], empty_week(), NOW,
+        )
+        self.assertEqual(issues, [])
+        res = planning.materialize_plan(prop, [{'id': 1, 'title': 'Лабораторная', 'completed_work_minutes': 0}], days, budgets, empty_week(), NOW)
+        with Session(self.engine) as session:
+            session.add(TaskRanking(snapshot='initial', result=json.dumps(res | {'plan_run_id': 'r0'})))
+            session.commit()
+
+        async def fake_run_ranking(body, endpoint='/rank'):
+            if endpoint != '/refresh':
+                raise AssertionError('Expected /refresh')
+            try:
+                updated = planning.refresh_schedule(
+                    body['previous_plan'],
+                    body['tasks'],
+                    planning.restore_week(body.get('weekly_schedule'), body['timezone']),
+                    NOW,
+                    adjustments=body.get('manual_adjustments'),
+                )
+            except ValueError as exc:
+                raise ameba.HTTPException(409, str(exc)) from None
+            return updated | {'plan_run_id': 'r_ref', 'calendar_revision': 'rev1'}
+
+        calendar.reset_ameba_plan('r_ref')
+        with patch.object(ameba, 'check_feature'), \
+             patch.object(ameba, 'read_config', return_value={'enabled': True}), \
+             patch.object(ameba, 'read_settings', return_value=({'base_url': 'u'}, {})), \
+             patch.object(scheduler, 'run_ranking', side_effect=fake_run_ranking), \
+             patch.object(ameba, 'read_calendar', return_value={'timezone': 'UTC', 'events': [], 'revision': 'rev1'}), \
+             patch.object(ameba, 'read_week', return_value=empty_week()), \
+             patch('agent_memory.read', return_value=[]):
+            moved = asyncio.run(ameba.adjust_plan(task_pin={'task_id': 1, 'shift_days': 1}))
+            self.assertFalse(moved['needs_replan'])
+            self.assertEqual(moved['schedule']['periods'][0]['start_date'], '2026-11-24')
+
+            # Если целевой день помечен как free, перенос туда невозможен без перепланирования -> needs_replan=True, старая дата 24 остаётся.
+            calendar.reset_ameba_plan('r_fail')
+            blocked = asyncio.run(ameba.adjust_plan(
+                day_overrides={'2026-11-25': 'free'},
+                task_pin={'task_id': 1, 'target_date': '2026-11-25'},
+            ))
+            self.assertTrue(blocked['needs_replan'])
+            self.assertTrue(blocked['needs_refresh'])
+            self.assertEqual(blocked['schedule']['periods'][0]['start_date'], '2026-11-24')
+
+    def test_refresh_saved_plan_rejects_calendar_shrink_and_preserves_old(self):
+        task = Task(id=1, title='Лабораторная', status='todo', completed_work_minutes=0)
+        with Session(self.engine) as session:
+            session.add(task)
+            session.add(TaskContext(task_id=1, subject='', status='ready', task_snapshot=monocle_context.snapshot(task),
+                                    usage=json.dumps({'context_policy': 5, 'full_markdown': 'ok'})))
+            session.commit()
+
+        cand = proposal_payload(
+            [1],
+            [assess(1, 240, 240, splittable=False)],
+            [work_period(1, '2026-11-24', '2026-11-24', [('2026-11-24', 240)])],
+        )
+        prop, issues, days, budgets = planning.validate_proposal(
+            cand, [{'id': 1, 'title': 'Лабораторная', 'completed_work_minutes': 0}], empty_week(), NOW,
+        )
+        self.assertEqual(issues, [])
+        res = planning.materialize_plan(prop, [{'id': 1, 'title': 'Лабораторная', 'completed_work_minutes': 0}], days, budgets, empty_week(), NOW)
+        with Session(self.engine) as session:
+            session.add(TaskRanking(snapshot='initial', result=json.dumps(res | {'plan_run_id': 'r0'})))
+            session.commit()
+
+        shrunk_week = empty_week(events=[
+            {'id': 'busy-1', 'kind': 'busy', 'title': 'Занято весь день', 'date': '2026-11-24', 'start': '08:00', 'end': '20:00'},
+        ])
+
+        async def fake_run_ranking(body, endpoint='/rank'):
+            try:
+                return planning.refresh_schedule(
+                    body['previous_plan'],
+                    body['tasks'],
+                    shrunk_week,
+                    NOW,
+                    adjustments=body.get('manual_adjustments'),
+                ) | {'plan_run_id': 'r_shrink', 'calendar_revision': 'rev2'}
+            except ValueError as exc:
+                raise ameba.HTTPException(409, str(exc)) from None
+
+        calendar.reset_ameba_plan('r_shrink')
+        with patch.object(ameba, 'check_feature'), \
+             patch.object(ameba, 'read_config', return_value={'enabled': True}), \
+             patch.object(ameba, 'read_settings', return_value=({'base_url': 'u'}, {})), \
+             patch.object(scheduler, 'run_ranking', side_effect=fake_run_ranking), \
+             patch.object(ameba, 'read_calendar', return_value={'timezone': 'UTC', 'events': shrunk_week['calendar_events'], 'revision': 'rev2'}), \
+             patch.object(ameba, 'read_week', return_value=shrunk_week), \
+             patch('agent_memory.read', return_value=[]):
+            refreshed = asyncio.run(ameba.refresh_saved_plan())
+        self.assertIsNone(refreshed)
+        status = ameba.ranking_status()
+        self.assertTrue(status['needs_refresh'])
+        self.assertEqual(status['schedule']['periods'][0]['start_date'], '2026-11-24')
 
     def test_scenario_g_and_plan_expiry_uses_local_date(self):
         today_local = datetime.now(timezone.utc).date().isoformat()

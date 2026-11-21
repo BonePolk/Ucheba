@@ -34,9 +34,13 @@ function resolvePlanStatus({ rankingData, liveActive, isRunning, rankError, fail
   if (isRunning || liveActive) return { tone: 'active', pulse: true, badge: 'accent', label: 'Составляет план' };
   if (rankError || failedRun) return { tone: 'danger', pulse: false, badge: 'danger', label: 'Ошибка' };
   if (!rankingData?.has_plan || rankingData?.plan_reset) return { tone: 'idle', pulse: false, badge: 'outline', label: 'Нет плана' };
-  const conflicts = rankingData?.schedule?.deadline_conflicts ?? [];
-  if (!rankingData?.schedule?.feasible || conflicts.length > 0) {
-    return { tone: 'warning', pulse: false, badge: 'warning', label: rankingData.needs_refresh ? 'Устарел · риск' : 'Есть риск' };
+  const sched = rankingData?.schedule ?? {};
+  const conflicts = sched.deadline_conflicts ?? [];
+  if (sched.feasible === false) {
+    return { tone: 'warning', pulse: false, badge: 'warning', label: rankingData.needs_refresh ? 'Устарел · конфликт' : 'Есть конфликт' };
+  }
+  if (conflicts.length > 0 || sched.fully_scheduled === false) {
+    return { tone: 'warning', pulse: false, badge: 'warning', label: rankingData.needs_refresh ? 'Устарел · риск' : 'Частичный план' };
   }
   if (rankingData?.needs_refresh) return { tone: 'warning', pulse: false, badge: 'warning', label: 'Устарел' };
   return { tone: 'success', pulse: false, badge: 'success', label: 'Актуален' };
@@ -121,6 +125,7 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
   const [risksOpen, setRisksOpen] = useState(false);
   const [wishText, setWishText] = useState('');
   const [wishResult, setWishResult] = useState(null);
+  const [needsReplanNotice, setNeedsReplanNotice] = useState(false);
 
   const ranking = useQuery({
     queryKey: ['ameba-ranking'],
@@ -157,12 +162,15 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
       });
     },
     onMutate: (feedbackText) => {
+      setNeedsReplanNotice(false);
       if (typeof feedbackText === 'string' && feedbackText.trim()) {
-        setWishText('');
         setWishResult(null);
       }
     },
-    onSuccess: async (res) => {
+    onSuccess: async (res, feedbackText) => {
+      if (typeof feedbackText === 'string' && feedbackText.trim()) {
+        setWishText('');
+      }
       if (res?.consumed_feedback) {
         setWishResult({
           memorySaved: Number(res.memory_saved_count || 0),
@@ -171,11 +179,11 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
       }
       await refresh();
     },
-    onError: async (_err, feedbackText) => {
-      if (typeof feedbackText === 'string' && feedbackText.trim()) {
-        setWishText((prev) => prev || feedbackText.trim());
-      }
+    onError: async () => {
+      queryClient.setQueryData(['ameba-live-plan'], (prev) => (prev ? { ...prev, running: false } : prev));
+      await queryClient.invalidateQueries({ queryKey: ['agent-queue'] });
     },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ['agent-queue'] }),
   });
 
   const clearPlan = useMutation({
@@ -183,6 +191,7 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
     onSuccess: async () => {
       rank.reset();
       setWishResult(null);
+      setNeedsReplanNotice(false);
       queryClient.setQueryData(['ameba-live-plan'], null);
       await refresh();
     },
@@ -201,12 +210,23 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
       method: 'PATCH',
       body: JSON.stringify(payload),
     }),
-    onSuccess: refresh,
+    onMutate: () => setNeedsReplanNotice(false),
+    onSuccess: async (res) => {
+      await refresh();
+      if (res?.needs_replan) {
+        if (!res.deferred && data?.enabled !== false && !isRunning && !queue.data?.browser_busy) {
+          rank.mutate();
+        } else {
+          setNeedsReplanNotice(true);
+        }
+      }
+    },
   });
 
   const data = ranking.data;
   const liveActive = Boolean(livePlan.data?.running || (data?.has_plan && livePlan.data?.started_at && livePlan.data.started_at > (data?.generated_at ?? '')));
   const activeSchedule = (liveActive ? livePlan.data?.schedule : null) ?? (data?.plan_reset ? null : data?.schedule);
+  const hasVisiblePlan = Boolean(activeSchedule?.periods?.length);
   const manual = data?.manual_adjustments ?? {};
   const hasManualAdjustments = Boolean(
     Object.keys(manual.day_overrides ?? {}).length
@@ -230,11 +250,24 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
   const hasRisks = conflicts.length > 0 || extraUnfitted.length > 0;
   const timelineTasks = (liveActive ? livePlan.data?.timeline : null) ?? data?.timeline ?? [];
   const titleMap = new Map(timelineTasks.map((item) => [item.id ?? item.task_id, item.title]));
+  const taskRemainingMap = {};
+  for (const item of timelineTasks) {
+    const tid = item.id ?? item.task_id;
+    const rem = item.plan?.work_max_minutes ?? item.plan?.max_minutes ?? item.plan?.planned_work_minutes;
+    if (tid != null && rem != null) taskRemainingMap[String(tid)] = Number(rem);
+  }
+  for (const item of data?.reasons ?? []) {
+    const tid = item.task_id;
+    const rem = item.plan?.work_max_minutes ?? item.plan?.max_minutes ?? item.plan?.planned_work_minutes;
+    if (tid != null && rem != null && taskRemainingMap[String(tid)] === undefined) {
+      taskRemainingMap[String(tid)] = Number(rem);
+    }
+  }
   const error = ranking.error || rank.error || clearPlan.error || feedback.error || adjustPlan.error;
   const previewDays = (activeSchedule?.daily_allocations ?? data?.calendar_schedule?.days_summary ?? []).slice(0, 7);
 
   const mainButtonLabel = isRunning
-    ? 'Составляет план…'
+    ? (hasVisiblePlan ? 'Обновляется…' : 'Составляет план…')
     : !data?.has_plan
       ? 'Построить план'
       : 'Обновить';
@@ -298,11 +331,11 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
   );
 
   return (
-    <div className="flex flex-col gap-3 max-w-[780px]">
+    <div className="flex min-h-0 min-w-0 w-full flex-1 flex-col gap-3">
       {!embedded ? (
         <PageHeader
           title="Ameba · План"
-          badge={(isRunning || status.badge !== 'success') ? <Badge variant={status.badge}>{status.label}</Badge> : undefined}
+          badge={!isRunning && status.badge !== 'success' ? <Badge variant={status.badge}>{status.label}</Badge> : undefined}
           actions={actionsBar}
         />
       ) : (
@@ -341,11 +374,27 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
         autoOpenOnActive={false}
         defaultOpen={false}
         hideSummaryWhenIdle
+        compactRunning
+        hideErrorNotice={Boolean(error)}
         open={logOpen}
         onOpenChange={setLogOpen}
       />
 
       {error && <Notice tone="error">{error.message}</Notice>}
+
+      {needsReplanNotice && !isRunning && (
+        <Notice
+          tone="warning"
+          onClose={() => setNeedsReplanNotice(false)}
+          action={(
+            <Button size="xs" variant="primary" onClick={() => rank.mutate()}>
+              Обновить
+            </Button>
+          )}
+        >
+          Изменение сохранено в ограничениях — чтобы разместить задачу по-новому, запустите перепланирование Ameba.
+        </Notice>
+      )}
 
       {rank.data?.unchanged && (
         <Notice tone="info">
@@ -460,23 +509,27 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
         </section>
       )}
 
-      <AgentTimeline
-        schedule={activeSchedule}
-        calendarOnly={!activeSchedule}
-        finished={!isRunning && !livePlan.data?.running}
-        busy={feedback.isPending || adjustPlan.isPending || isRunning}
-        onFeedback={(payload) => feedback.mutate(payload)}
-        onAdjust={(payload) => adjustPlan.mutate(payload)}
-        taskPins={manual.task_pins ?? {}}
-        estimateOverrides={manual.estimate_overrides ?? {}}
-        onRefresh={() => rank.mutate()}
-      />
+      {(hasVisiblePlan || !isRunning) && (
+        <AgentTimeline
+          schedule={activeSchedule}
+          calendarOnly={!activeSchedule}
+          finished={!isRunning && !livePlan.data?.running}
+          updating={isRunning || Boolean(livePlan.data?.running)}
+          busy={feedback.isPending || adjustPlan.isPending || isRunning}
+          onFeedback={(payload) => feedback.mutate(payload)}
+          onAdjust={(payload) => adjustPlan.mutate(payload)}
+          taskPins={manual.task_pins ?? {}}
+          estimateOverrides={manual.estimate_overrides ?? {}}
+          taskRemainingById={taskRemainingMap}
+          onRefresh={() => rank.mutate()}
+        />
+      )}
 
-      <section className="border border-[#303030] bg-[#111111] p-3 flex flex-col gap-2">
+      <section className="border border-[#303030] bg-[#111111] p-3 flex flex-col gap-2 w-full min-w-0">
         <label htmlFor="ameba-wish-input" className="text-[12px] font-medium text-[#EAEAEA]">
           Что изменить в плане?
         </label>
-        <div className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-end">
+        <div className="flex w-full min-w-0 flex-col gap-2 sm:flex-row sm:items-end">
           <Textarea
             id="ameba-wish-input"
             rows={2}
@@ -490,14 +543,14 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
                 submitWish();
               }
             }}
-            className="flex-1"
+            className="min-w-0 flex-1"
           />
           <Button
             size="default"
             variant="primary"
             disabled={!wishText.trim() || isRunning || clearPlan.isPending || queue.data?.browser_busy}
             onClick={submitWish}
-            className="shrink-0 max-sm:w-full"
+            className="shrink-0 sm:self-end max-sm:w-full"
           >
             Применить
           </Button>

@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 import json
 import logging
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
@@ -69,7 +70,7 @@ def save_adjustments(data: dict, session: Session | None = None) -> dict:
         _save_setting(session, 'ameba_feedback', clean)
     else:
         with Session(get_engine()) as local:
-            _save_setting(session, 'ameba_feedback', clean)
+            _save_setting(local, 'ameba_feedback', clean)
             local.commit()
     return clean
 
@@ -233,6 +234,62 @@ def _collect_task_state(session):
     return state, ready, waiting
 
 
+def apply_progress(current_minutes: int, update: dict) -> int:
+    """Вычисляет подтверждённый прогресс (add/set) с защитой от отрицательных значений."""
+    op = update.get('operation')
+    current = max(0, int(current_minutes or 0))
+    if op == 'add':
+        mins = int(update.get('minutes', 0))
+        if mins <= 0 or mins > 10000:
+            raise ValueError('Добавляемый прогресс должен быть больше 0 минут.')
+        total = current + mins
+    elif op == 'set':
+        mins = int(update.get('minutes', 0))
+        if mins < 0 or mins > 10000:
+            raise ValueError('Итоговый прогресс должен быть от 0 до 10000 минут.')
+        total = mins
+    elif 'completed_work_minutes' in update:
+        total = int(update['completed_work_minutes'])
+    else:
+        raise ValueError('Некорректный формат обновления прогресса.')
+    if total < 0 or total > 10000:
+        raise ValueError('Суммарный прогресс должен быть от 0 до 10000 минут.')
+    return total
+
+
+def _commit_persistent_preferences(items: list[dict]) -> int:
+    """Сохраняет подтверждённые устойчивые привычки в общую память после commit плана."""
+    if not items:
+        return 0
+    from agent_memory import read as read_facts, save as save_fact
+
+    existing = read_facts()
+    owner_keys = {f.get('key') for f in existing if f.get('agent') in ('Владелец', 'user')}
+    known_texts = {(f.get('text') or '').strip().casefold() for f in existing}
+    saved_count = 0
+    for item in items:
+        text = str(item.get('text') or '').strip()
+        if not text:
+            continue
+        norm = text.casefold()
+        if norm in known_texts:
+            continue
+        raw_key = str(item.get('key') or '').strip()
+        if not raw_key or raw_key in owner_keys or not all(c.isalnum() or c in '_.-' for c in raw_key):
+            raw_key = f'ameba.pref_{uuid4().hex[:8]}'
+        elif not raw_key.startswith('ameba.'):
+            raw_key = f'ameba.{raw_key}'[:100]
+        try:
+            save_fact({'key': raw_key, 'text': text}, 'Ameba')
+        except HTTPException as exc:
+            if exc.status_code == 422:
+                continue
+            raise
+        known_texts.add(norm)
+        saved_count += 1
+    return saved_count
+
+
 def _build_signature(session, state, include_ameba_facts: bool = True) -> str:
     from agent_memory import read as read_facts
     calendar = read_calendar()
@@ -244,7 +301,11 @@ def _build_signature(session, state, include_ameba_facts: bool = True) -> str:
     return json.dumps({
         'version': 43,
         'tasks': state,
-        'calendar': {'events': sorted(calendar['events'], key=lambda event: event['id']), 'timezone': calendar['timezone']},
+        'calendar': {
+            'revision': calendar.get('revision', ''),
+            'events': sorted(calendar['events'], key=lambda event: event['id']),
+            'timezone': calendar['timezone'],
+        },
         'facts': sorted(({'key': fact['key'], 'text': fact['text']} for fact in read_facts() if fact['agent'] in allowed_agents), key=lambda fact: fact['key']),
         'feedback': adjustments,
         'preferences': profile.get('preferences', {}),
@@ -440,6 +501,7 @@ async def refresh_saved_plan():
             async with scheduler.slot('ameba', 0):
                 with Session(get_engine()) as session:
                     signature, ready, waiting = task_state(session)
+                    pre_calendar_revision = read_calendar().get('revision')
                     saved = session.get(TaskRanking, 1)
                     if not _can_refresh_only(saved, {t['id'] for t in ready}):
                         return None
@@ -459,6 +521,8 @@ async def refresh_saved_plan():
             total_count=len(ready) + len(waiting),
         )
         with Session(get_engine()) as session:
+            if task_state(session)[0] != signature or read_calendar().get('revision') != pre_calendar_revision:
+                return None
             saved = session.get(TaskRanking, 1) or TaskRanking()
             if not read_adjustments(session)['text']:
                 saved.snapshot = task_state(session)[0]
@@ -488,8 +552,8 @@ async def _trigger_refresh():
             task = asyncio.create_task(_run_deferred_refresh(owner))
             deferred_refreshes[owner] = task
             task.add_done_callback(lambda done, key=owner: deferred_refreshes.pop(key, None) if deferred_refreshes.get(key) is done else None)
-        return
-    await refresh_saved_plan()
+        return 'deferred'
+    return 'refreshed' if (await refresh_saved_plan()) is not None else 'needs_replan'
 
 
 async def submit_feedback(task_id: int, outcome: str, actual_minutes: int | None = None, period_id: str | None = None):
@@ -552,6 +616,7 @@ async def adjust_plan(
             elif task_pin.get('target_date'):
                 adj['task_pins'][tid] = {'target_date': task_pin['target_date'], 'not_before': task_pin.get('not_before')}
             elif task_pin.get('shift_days'):
+                existing_pin = adj['task_pins'].get(tid) or {}
                 saved = session.get(TaskRanking, 1)
                 res = json.loads(saved.result) if saved and saved.result else {}
                 periods = (res.get('schedule') or {}).get('periods', [])
@@ -563,9 +628,12 @@ async def adjust_plan(
                     ),
                     None,
                 )
-                base_date = datetime.strptime(cur_date, '%Y-%m-%d').date() if cur_date else datetime.now(ZoneInfo(read_calendar()['timezone'])).date()
-                target = max(datetime.now(ZoneInfo(read_calendar()['timezone'])).date(), base_date + timedelta(days=int(task_pin['shift_days'])))
-                adj['task_pins'][tid] = {'target_date': target.isoformat(), 'not_before': target.isoformat() if int(task_pin['shift_days']) > 0 else None}
+                today_local = datetime.now(ZoneInfo(read_calendar()['timezone'])).date()
+                base_iso = existing_pin.get('target_date') or cur_date
+                base_date = datetime.strptime(base_iso, '%Y-%m-%d').date() if base_iso else today_local
+                shift = int(task_pin['shift_days'])
+                target = max(today_local, base_date + timedelta(days=shift))
+                adj['task_pins'][tid] = {'target_date': target.isoformat(), 'not_before': target.isoformat() if shift > 0 else None}
         if estimate_override:
             tid = str(estimate_override['task_id'])
             mins = estimate_override.get('remaining_minutes')
@@ -575,9 +643,15 @@ async def adjust_plan(
                 adj['estimate_overrides'][tid] = max(0, int(mins))
         save_adjustments(adj, session=session)
         session.commit()
+    refresh_status = 'refreshed'
     if has_schedule_changes:
-        await _trigger_refresh()
-    return ranking_status()
+        refresh_status = await _trigger_refresh()
+    status = ranking_status()
+    if has_schedule_changes:
+        status['refreshed'] = refresh_status == 'refreshed'
+        status['deferred'] = refresh_status == 'deferred'
+        status['needs_replan'] = refresh_status != 'refreshed'
+    return status
 
 
 async def _prepare_parallel(task_ids, **kwargs):
@@ -626,6 +700,7 @@ async def rank_all(force=False, task_id=0):
         with Session(get_engine()) as session:
             signature, ready, waiting = task_state(session)
             pre_external = _external_signature(session)
+            pre_calendar_revision = read_calendar().get('revision')
             saved = session.get(TaskRanking, 1)
             if not force and saved and saved.snapshot == signature and not plan_expired(json.loads(saved.result)):
                 return json.loads(saved.result)
@@ -639,6 +714,7 @@ async def rank_all(force=False, task_id=0):
                         result = None
                         break
                     pre_external = _external_signature(session)
+                    pre_calendar_revision = read_calendar().get('revision')
                     saved = session.get(TaskRanking, 1)
                     refresh = not force and bool(saved and saved.snapshot == signature and _can_refresh_only(saved, {t['id'] for t in ready}))
                 result = await request_ranking(ready, task_id, checked_contexts, refresh=refresh)
@@ -660,15 +736,17 @@ async def rank_all(force=False, task_id=0):
             with Session(get_engine()) as session:
                 signature, ready, waiting = task_state(session)
                 pre_external = _external_signature(session)
+                pre_calendar_revision = read_calendar().get('revision')
                 if not ready:
                     result = None
         if result is None:
             result = {
                 'task_ids': [], 'comparisons': 0, 'uncertain_comparisons': 0,
                 'explanation': 'Нет задач с готовым контекстом.', 'reasons': [],
-                'schedule': {'version': 3, 'periods': [], 'daily_allocations': [], 'deadline_conflicts': [],
-                             'remaining': [], 'feasible': True, 'min_minutes': 0, 'max_minutes': 0,
-                             'hours_label': 'выполнено', 'generated_date': datetime.now(ZoneInfo(read_calendar()['timezone'])).date().isoformat(),
+                'schedule': {'version': 3, 'valid': True, 'periods': [], 'daily_allocations': [], 'deadline_conflicts': [],
+                             'deadline_risks': [], 'remaining': [], 'feasible': True, 'fully_scheduled': True, 'remaining_minutes': 0,
+                             'min_minutes': 0, 'max_minutes': 0, 'hours_label': 'выполнено',
+                             'generated_date': datetime.now(ZoneInfo(read_calendar()['timezone'])).date().isoformat(),
                              'start_at': datetime.now(timezone.utc).isoformat(), 'timeline': [], 'timeline_error': None},
             }
         ids = result.get('task_ids', [])
@@ -678,44 +756,62 @@ async def rank_all(force=False, task_id=0):
         if ready and (not schedule or schedule.get('timeline_error') or not schedule.get('start_at') or schedule.get('version') != 3):
             raise HTTPException(502, 'Ameba не построила корректный план периодов. Предыдущий результат сохранён.')
         task_preferences = result.pop('task_preferences', []) or []
+        persistent_preferences = result.pop('persistent_preferences', []) or []
         progress_updates = result.pop('progress_updates', []) or []
-        memory_saved_count = int(result.pop('memory_saved_count', 0) or 0)
+        result.pop('memory_saved_count', None)
         result['task_ids'] = ids
         result.update(generated_at=datetime.now(timezone.utc).isoformat(), ranked_count=len(ids), pending_count=len(waiting), total_count=len(ready) + len(waiting))
         consumed_feedback = False
         task_notes_saved_count = 0
         progress_updated_count = 0
+        final_signature = signature
         with Session(get_engine()) as session:
-            if task_state(session)[0] != signature and _external_signature(session) != pre_external:
-                raise HTTPException(409, 'Задачи или контекст изменились. Повторите планирование')
+            if (
+                task_state(session)[0] != signature
+                or _external_signature(session) != pre_external
+                or read_calendar().get('revision') != pre_calendar_revision
+            ):
+                raise HTTPException(409, 'Задачи, прогресс или календарь изменились. Повторите планирование')
             adj = read_adjustments(session)
             active_ids_str = {str(t.id) for t in session.exec(select(Task).where(Task.archived == False, Task.status != 'done')).all()}
             adj['task_notes'] = {k: v for k, v in adj['task_notes'].items() if k in active_ids_str}
             adj['task_pins'] = {k: v for k, v in adj['task_pins'].items() if k in active_ids_str}
             adj['estimate_overrides'] = {k: v for k, v in adj['estimate_overrides'].items() if k in active_ids_str}
+            ready_id_set = set(ids)
             for item in task_preferences:
                 tid = item.get('task_id')
                 text = str(item.get('text') or '').strip()[:400]
-                if tid in set(ids) and text:
+                if tid in ready_id_set and text:
                     adj['task_notes'][str(tid)] = text
                     task_notes_saved_count += 1
+            seen_progress_ids: set[int] = set()
             for upd in progress_updates:
                 tid = upd.get('task_id')
-                new_mins = upd.get('completed_work_minutes')
-                if tid in set(ids) and isinstance(new_mins, int) and new_mins >= 0:
-                    task_row = session.get(Task, tid)
-                    if task_row and not task_row.archived and task_row.completed_work_minutes != new_mins:
-                        task_row.completed_work_minutes = new_mins
-                        if task_row.status == 'todo' and new_mins > 0:
-                            ctx = session.get(TaskContext, tid)
-                            was_valid = ctx is not None and context_status(task_row, ctx) == 'ready'
-                            task_row.status = 'in_progress'
-                            if was_valid:
-                                ctx.task_snapshot = snapshot(task_row)
-                                session.add(ctx)
-                        task_row.updated_at = datetime.now(timezone.utc)
-                        session.add(task_row)
-                        progress_updated_count += 1
+                if tid not in ready_id_set or tid in seen_progress_ids:
+                    continue
+                seen_progress_ids.add(tid)
+                task_row = session.get(Task, tid)
+                if not task_row or task_row.archived or task_row.status == 'done':
+                    continue
+                base_mins = upd.get('base_completed_minutes')
+                if base_mins is not None and task_row.completed_work_minutes != int(base_mins):
+                    raise HTTPException(409, 'Прогресс задачи изменился во время расчёта. Повторите планирование')
+                try:
+                    new_mins = apply_progress(task_row.completed_work_minutes, upd)
+                except ValueError as exc:
+                    raise HTTPException(422, str(exc)) from None
+                if task_row.completed_work_minutes != new_mins:
+                    task_row.completed_work_minutes = new_mins
+                    if task_row.status == 'todo' and new_mins > 0:
+                        ctx = session.get(TaskContext, tid)
+                        was_valid = ctx is not None and context_status(task_row, ctx) == 'ready'
+                        task_row.status = 'in_progress'
+                        if was_valid:
+                            ctx.task_snapshot = snapshot(task_row)
+                            session.add(ctx)
+                    task_row.updated_at = datetime.now(timezone.utc)
+                    session.add(task_row)
+                    progress_updated_count += 1
             if adj['text']:
                 consumed_feedback = True
                 adj['text'] = ''
@@ -740,6 +836,14 @@ async def rank_all(force=False, task_id=0):
                     temporary.config = '{}'
                     session.add(temporary)
             session.commit()
+        memory_saved_count = _commit_persistent_preferences(persistent_preferences)
+        if memory_saved_count > 0:
+            with Session(get_engine()) as session:
+                saved = session.get(TaskRanking, 1)
+                if saved and saved.snapshot == final_signature:
+                    saved.snapshot = task_state(session)[0]
+                    session.add(saved)
+                    session.commit()
         report('ameba', success=True)
         extras = {
             'memory_saved_count': memory_saved_count,
