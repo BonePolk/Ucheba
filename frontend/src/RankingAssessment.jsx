@@ -70,7 +70,7 @@ export default function RankingAssessment({ assessment, compact = false }) {
         <p className="text-[12px] text-[#B8B8B8] leading-snug m-0 break-words">{assessment.reason}</p>
       )}
 
-      {!compact && plan && (
+      {!compact && plan?.steps?.length > 0 && (
         <div className="flex flex-col gap-1">
           <button
             type="button"
@@ -79,11 +79,11 @@ export default function RankingAssessment({ assessment, compact = false }) {
             className="inline-flex items-center gap-1 text-[12px] text-[#929292] hover:text-[#EAEAEA] w-fit cursor-pointer"
           >
             {stepsOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-            <span>Этапы ({plan.steps?.length ?? 0})</span>
+            <span>Этапы ({plan.steps.length})</span>
           </button>
           <CollapseSection open={stepsOpen}>
             <div className="border-l border-[#303030] pl-2.5 flex flex-col gap-1 text-[12px] pt-1">
-              {plan.steps?.map((step, index) => (
+              {plan.steps.map((step, index) => (
                 <div key={index} className="text-[#DCDCDC]">
                   {index + 1}. {step.title} · <span className="text-[#929292] tabular-nums">{step.min_minutes}–{step.max_minutes} м{step.wait_minutes > 0 ? ` (+${step.wait_minutes}м)` : ''}</span>
                 </div>

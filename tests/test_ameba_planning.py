@@ -1,12 +1,10 @@
-"""Локальные тесты новой адаптивной Ameba: периоды, ёмкость, отдых, персонализация, стабильность."""
+"""Локальные тесты новой интеллектуальной Ameba: валидатор, сценарии A–L, память, изоляция и /refresh."""
 import asyncio
-from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import sys
 import tempfile
-from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -24,267 +22,277 @@ from integrations import ameba, context as monocle_context, scheduler
 from sqlalchemy import create_engine, text
 from sqlmodel import Session
 
-NOW = '2026-11-16T08:00:00+00:00'  # Понедельник
+NOW = '2026-11-23T08:00:00+00:00'  # Понедельник
 
 
 def empty_week(tz='UTC', events=None):
     return {'timezone': tz, 'days': [[] for _ in range(7)], 'events': [], 'calendar_events': events or []}
 
 
-def make_plan(task_id, work_min, work_max=None, policy='soft', effort='medium', importance='medium',
-              splittable=True, available_from=None, depends_on=None, steps=None):
-    work_max = work_max if work_max is not None else work_min
+def assess(
+    task_id,
+    total_min,
+    total_max=None,
+    *,
+    splittable=True,
+    policy='soft',
+    available_from=None,
+    depends_on=None,
+    effort='medium',
+    reason='По приоритету и срокам',
+    impact='Выполненная задача',
+    deadline_risk=None,
+):
     return {
         'task_id': task_id,
+        'total_minutes_min': total_min,
+        'total_minutes_max': total_max if total_max is not None else total_min,
+        'wait_minutes': 0,
+        'splittable': splittable,
+        'deadline_policy': policy,
         'available_from': available_from,
         'depends_on': depends_on or [],
-        'deadline_policy': policy,
-        'importance': importance,
         'effort': effort,
-        'splittable': splittable,
-        'steps': steps or [{'title': 'Основная работа', 'min_minutes': work_min, 'max_minutes': work_max, 'wait_minutes': 0}],
-        'assumptions': [],
-        'expected_result': 'Задача выполнена',
-        'reward': None,
-        'reward_unit': '',
+        'reason': reason,
+        'impact': impact,
+        'deadline_risk': deadline_risk,
     }
 
 
-def calc_plans(items, completed=None, profile=None, tasks=None, adjustments=None):
-    return planning.calculate(
-        json.dumps({'plans': items}),
-        [item['task_id'] for item in items],
-        completed=completed,
-        profile=profile,
-        tasks=tasks,
-        adjustments=adjustments,
-    )
-
-
-def rest_args(**overrides):
-    base = {
-        'sleep_hours': 8,
-        'preferred_daily_minutes': None,
-        'prefer_free_evenings': False,
-        'max_heavy_days_in_row': 2,
-        'preferred_weekdays': [],
-        'light_weekdays': [],
-        'day_overrides': [],
-        'assumption': 'Базовый режим для тестов',
+def work_period(task_id, start_date, end_date, allocs, goal='Выполнить работу', hint=None, reason='Удобный период'):
+    return {
+        'kind': 'work',
+        'task_id': task_id,
+        'start_date': start_date,
+        'end_date': end_date,
+        'allocations': [{'date': d, 'minutes': m} for d, m in allocs],
+        'goal': goal,
+        'context_hint': hint,
+        'reason': reason,
     }
-    return json.dumps(base | overrides)
 
 
-def order_args(task_ids, keep=True, period_notes=None):
-    return json.dumps({'task_ids': task_ids, 'keep_previous_plan': keep, 'period_notes': period_notes or []})
+def rest_period(start_date, end_date, goal='Свободный день для восстановления', reason='Без лишней нагрузки'):
+    return {
+        'kind': 'rest',
+        'task_id': None,
+        'start_date': start_date,
+        'end_date': end_date,
+        'allocations': [],
+        'goal': goal,
+        'context_hint': None,
+        'reason': reason,
+    }
 
 
-class PlanningScenarios(unittest.TestCase):
-    def test_scenario_1_busy_university_week(self):
-        # Пн и Вт: по 6 ч обязательных пар (09:00-12:00 и 13:00-16:00), Ср и Чт: свободные дни.
+def proposal_payload(task_ids, tasks, periods, preferences=None, progress_updates=None, explanation='Согласованный план недели.'):
+    return {
+        'task_ids': task_ids,
+        'tasks': tasks,
+        'periods': periods,
+        'preferences': preferences or [],
+        'progress_updates': progress_updates or [],
+        'explanation': explanation,
+    }
+
+
+class ValidationAndScenarios(unittest.TestCase):
+    def test_scenario_a_move_after_university(self):
         events = []
-        for d in ('2026-11-16', '2026-11-17'):
-            events.append({'id': f'lec1-{d}', 'kind': 'busy', 'title': 'Лекции', 'date': d, 'start': '09:00', 'end': '12:00'})
-            events.append({'id': f'lec2-{d}', 'kind': 'busy', 'title': 'Практика', 'date': d, 'start': '13:00', 'end': '16:00'})
-        week = planning.with_rest(empty_week(events=events), NOW, rest_args())
-        days = planning.analyze_days(week, NOW, horizon_days=7)
-
-        # После 6 ч пар при ~5 ч физически свободного вечера реалистичная ёмкость существенно ограничена.
-        self.assertGreater(days[0]['physical_free_minutes'], 200)
-        self.assertLessEqual(days[0]['realistic_capacity_minutes'], 90)
-        self.assertGreaterEqual(days[2]['realistic_capacity_minutes'], 240)
-
-        plans = calc_plans([make_plan(1, 300, 360, effort='medium')])
-        tasks = [{'id': 1, 'title': 'Лабораторная'}]
-        schedule = planning.reorder(order_args([1]), plans, [1], week, NOW, tasks=tasks)
-        alloc_by_date = {d['date']: d['allocated_minutes'] for d in schedule['daily_allocations']}
-        # Основная нагрузка НЕ идёт на загруженные Пн/Вт, а уходит на свободные Ср/Чт.
-        self.assertGreater(alloc_by_date['2026-11-18'] + alloc_by_date['2026-11-19'],
-                           alloc_by_date['2026-11-16'] + alloc_by_date['2026-11-17'])
-
-    def test_scenario_2_competing_deadlines(self):
-        week = planning.with_rest(empty_week(), NOW, rest_args())
-        plans = calc_plans([
-            make_plan(1, 240, 300, policy='soft', effort='medium', splittable=True),
-            make_plan(2, 120, 150, policy='finish_before', effort='high', splittable=False),
-            make_plan(3, 180, 210, policy='expires', effort='medium', splittable=True),
-        ])
+        for d in ('2026-11-23', '2026-11-25', '2026-11-27'):
+            events.append({'id': f'uni-{d}', 'kind': 'busy', 'title': 'Университет', 'date': d, 'start': '09:00', 'end': '15:00'})
         tasks = [
-            {'id': 1, 'title': 'Большой проект без срока'},
-            {'id': 2, 'title': 'Срочный тест', 'deadline': '2026-11-17T20:00:00Z'},
-            {'id': 3, 'title': 'Эссе к среде', 'deadline': '2026-11-18T22:00:00Z'},
+            {'id': 42, 'title': 'Переезд', 'completed_work_minutes': 0},
+            {'id': 43, 'title': 'Лабораторная', 'completed_work_minutes': 0},
         ]
-        # Порядок передан с мягкой задачей на 1 месте — алгоритм всё равно защитит конкурирующие дедлайны.
-        schedule = planning.reorder(order_args([1, 2, 3]), plans, [1, 2, 3], week, NOW, tasks=tasks)
-        self.assertTrue(schedule['feasible'])
-        self.assertFalse([c for c in schedule['deadline_conflicts'] if c['infeasible']])
-        self.assertEqual([r['remaining_work_minutes'] for r in schedule['remaining']], [0, 0, 0])
-        alloc = schedule['daily_allocations']
-        t2_last = max(d['date'] for d in alloc if any(t['task_id'] == 2 for t in d['tasks']))
-        t3_last = max(d['date'] for d in alloc if any(t['task_id'] == 3 for t in d['tasks']))
-        self.assertLessEqual(t2_last, '2026-11-17')
-        self.assertLessEqual(t3_last, '2026-11-18')
-
-    def test_scenario_3_very_large_project(self):
-        week = planning.with_rest(empty_week(), NOW, rest_args())
-        steps = [
-            {'title': 'Изучить теорию', 'min_minutes': 240, 'max_minutes': 300, 'wait_minutes': 0},
-            {'title': 'Написать код', 'min_minutes': 480, 'max_minutes': 600, 'wait_minutes': 0},
-            {'title': 'Оформить отчёт', 'min_minutes': 240, 'max_minutes': 300, 'wait_minutes': 0},
-        ]
-        plans = calc_plans([
-            make_plan(1, 960, 1200, policy='soft', effort='high', splittable=True, steps=steps),
-            make_plan(2, 90, 90, policy='finish_before', effort='low', splittable=False),
-        ])
-        tasks = [
-            {'id': 1, 'title': 'Курсовой проект'},
-            {'id': 2, 'title': 'Короткий отчёт', 'deadline': '2026-11-18T18:00:00Z'},
-        ]
-        schedule = planning.reorder(order_args([2, 1]), plans, [1, 2], week, NOW, tasks=tasks)
-        project_periods = [p for p in schedule['periods'] if any(t['task_id'] == 1 for t in p['tasks'])]
-        self.assertGreaterEqual(len(project_periods), 2)
-        self.assertEqual(len(schedule['task_ids']), 2)  # Не плодит отдельные подзадачи
-        self.assertTrue(all(d['allocated_minutes'] <= d['realistic_capacity_minutes'] for d in schedule['daily_allocations']))
-        self.assertTrue(any('теори' in t['goal'].lower() or 'код' in t['goal'].lower()
-                            for p in project_periods for t in p['tasks'] if t['task_id'] == 1))
-
-    def test_scenario_4_missed_day_replanning(self):
-        week = planning.with_rest(empty_week(), NOW, rest_args())
-        plans = calc_plans([make_plan(1, 420, 480)])
-        tasks = [{'id': 1, 'title': 'Большая задача'}]
-        yesterday_now = '2026-11-15T08:00:00+00:00'
-        prev = planning.reorder(order_args([1]), plans, [1], week, yesterday_now, tasks=tasks)
-        # На следующий день пользователь ничего не подтвердил (completed_work_minutes=0) — работа не сваливается целиком на сегодня.
-        today_plan = planning.reorder(order_args([1]), plans, [1], week, NOW, previous=prev, tasks=tasks)
-        today_alloc = today_plan['daily_allocations'][0]
-        self.assertLessEqual(today_alloc['allocated_minutes'], today_alloc['plannable_minutes'])
-        self.assertEqual(today_plan['remaining'][0]['remaining_work_minutes'], 0)
-
-    def test_scenario_5_fatigue_and_recovery(self):
-        week = planning.with_rest(empty_week(), NOW, rest_args(max_heavy_days_in_row=2))
-        plans = calc_plans([make_plan(1, 900, 1080, effort='high', splittable=True)])
-        tasks = [{'id': 1, 'title': 'Длинная подготовка'}]
-        schedule = planning.reorder(order_args([1]), plans, [1], week, NOW, tasks=tasks)
-        # После тяжёлых дней присутствуют облегчённые дни или периоды восстановления с соответствующими рекомендациями.
-        has_recovery_or_light = any(
-            p['kind'] in ('light', 'recovery', 'free') or d['allocated_minutes'] <= 150
-            for p in schedule['periods'] for d in p['days_summary']
+        cand = proposal_payload(
+            [42, 43],
+            [
+                assess(42, 150, 180, splittable=True, effort='medium', reason='Можно перевозить постепенно'),
+                assess(43, 210, 240, splittable=True, effort='high', reason='Требуется спокойный день'),
+            ],
+            [
+                work_period(
+                    42, '2026-11-23', '2026-11-27',
+                    [('2026-11-23', 45), ('2026-11-25', 60), ('2026-11-27', 45)],
+                    goal='Постепенно перевезти основные вещи',
+                    hint='После университета в дни, когда поездка по дороге',
+                ),
+                work_period(
+                    43, '2026-11-24', '2026-11-26',
+                    [('2026-11-24', 120), ('2026-11-26', 100)],
+                    goal='Сделать основную часть лабораторной в свободные дни',
+                    hint=None,
+                ),
+                rest_period('2026-11-28', '2026-11-29', goal='Свободные выходные'),
+            ],
         )
-        self.assertTrue(has_recovery_or_light)
+        prop, issues, days, budgets = planning.validate_proposal(cand, tasks, empty_week(events=events), NOW)
+        self.assertEqual(issues, [])
+        res = planning.materialize_plan(prop, tasks, days, budgets, empty_week(events=events), NOW)
+        self.assertEqual(res['schedule']['version'], 3)
+        move_period = next(p for p in res['schedule']['periods'] if p['task_id'] == 42)
+        self.assertIn('После университета', move_period['context_hint'])
 
-    def test_scenario_6_infeasible_deadline_protects_rest(self):
-        week = planning.with_rest(empty_week(), NOW, rest_args())
-        plans = calc_plans([
-            make_plan(1, 1500, 1800, policy='expires', effort='high'),
-            make_plan(2, 90, 90, policy='finish_before', effort='low'),
-        ])
-        tasks = [
-            {'id': 1, 'title': 'Невозможный диплом за 2 дня', 'deadline': '2026-11-17T20:00:00Z'},
-            {'id': 2, 'title': 'Реалистичная задача', 'deadline': '2026-11-17T20:00:00Z'},
-        ]
-        schedule = planning.reorder(order_args([1, 2]), plans, [1, 2], week, NOW, tasks=tasks)
-        self.assertFalse(schedule['feasible'])
-        infeasible = [c for c in schedule['deadline_conflicts'] if c['infeasible']]
-        self.assertEqual([c['task_id'] for c in infeasible], [1])
-        self.assertGreater(infeasible[0]['deficit_minutes'], 0)
-        self.assertTrue(infeasible[0]['reason'])
-        self.assertEqual(infeasible[0]['options'], [])
-        # Сон/отдых и достижимая задача 2 защищены.
-        self.assertTrue(all(d['allocated_minutes'] <= d['realistic_capacity_minutes'] for d in schedule['daily_allocations']))
-        t2_assigned = sum(t['minutes'] for d in schedule['daily_allocations'] for t in d['tasks'] if t['task_id'] == 2)
-        self.assertEqual(t2_assigned, 90)
-
-    def test_scenario_7_personalization_adaptation(self):
-        # Одно наблюдение меняет прогноз минимально (консервативное сглаживание).
-        single = planning.derive_adaptation({'observations': [
-            {'outcome': 'done', 'planned_minutes': 60, 'actual_minutes': 120, 'category': 'Программирование', 'effort': 'high', 'busy_day': True, 'weekday': 0},
-        ]})
-        self.assertLess(single['global_factor'], 1.25)
-
-        # Серия подтверждённых наблюдений адаптирует оценки категории, ёмкость загруженных дней и резерв.
-        series = [
-            {'outcome': 'done', 'planned_minutes': 100, 'actual_minutes': 170, 'category': 'Программирование', 'effort': 'high', 'busy_day': True, 'weekday': 0},
-            {'outcome': 'done', 'planned_minutes': 120, 'actual_minutes': 190, 'category': 'Программирование', 'effort': 'high', 'busy_day': False, 'weekday': 5},
-            {'outcome': 'too_hard', 'planned_minutes': 90, 'actual_minutes': 140, 'category': 'Программирование', 'effort': 'high', 'busy_day': True, 'weekday': 0},
-            {'outcome': 'missed', 'planned_minutes': 90, 'actual_minutes': None, 'category': 'Программирование', 'effort': 'medium', 'busy_day': True, 'weekday': 1},
-            {'outcome': 'done', 'planned_minutes': 60, 'actual_minutes': 60, 'category': 'Чтение', 'effort': 'low', 'busy_day': False, 'weekday': 5},
-        ]
-        profile = {'observations': series}
-        adapt = planning.derive_adaptation(profile)
-        self.assertGreater(adapt['category_factors']['программирование'], 1.2)
-        self.assertLess(adapt['busy_day_factor'], 0.92)
-        self.assertGreater(adapt['reserve_ratio'], 0.24)
-
-        plans = calc_plans(
-            [make_plan(1, 100, 100, effort='high'), make_plan(2, 100, 100, effort='low')],
-            profile=profile,
-            tasks=[{'id': 1, 'title': 'Код', 'category': 'Программирование'}, {'id': 2, 'title': 'Статья', 'category': 'Чтение'}],
-        )
-        self.assertGreater(plans[1]['work_max_minutes'], plans[2]['work_max_minutes'])
-
-        # Явное предпочтение пользователя перекрывает статистический потолок.
-        explicit = planning.derive_adaptation({'preferences': {'preferred_daily_minutes': 240, 'reserve_ratio': 0.2}, 'observations': series})
-        self.assertEqual(explicit['comfortable_daily_minutes'], 240)
-        self.assertEqual(explicit['reserve_ratio'], 0.2)
-
-    def test_scenario_8_calendar_changes_and_special_events(self):
-        # 1. Событие на весь день с маркером дедлайна НЕ блокирует день.
-        # 2. Пересекающиеся события не удваиваются.
-        # 3. available_from и depends_on соблюдаются строго.
+    def test_scenario_b_heavy_lab_on_free_days(self):
         events = [
-            {'id': 'dl-marker', 'kind': 'busy', 'title': 'Дедлайн отчёта', 'date': '2026-11-16', 'start': '00:00', 'end': '24:00'},
-            {'id': 'm1', 'kind': 'busy', 'title': 'Пара 1', 'date': '2026-11-17', 'start': '10:00', 'end': '12:00'},
-            {'id': 'm2', 'kind': 'busy', 'title': 'Совпадающая встреча', 'date': '2026-11-17', 'start': '11:00', 'end': '13:00'},
+            {'id': f'u-{d}', 'kind': 'busy', 'title': 'Пары', 'date': d, 'start': '09:00', 'end': '17:00'}
+            for d in ('2026-11-23', '2026-11-24', '2026-11-25', '2026-11-26', '2026-11-27')
         ]
-        week = planning.with_rest(empty_week(events=events), NOW, rest_args())
-        days = planning.analyze_days(week, NOW, horizon_days=7)
-        self.assertEqual(days[0]['busy_minutes'], 0)
-        self.assertEqual(len(days[0]['markers']), 1)
-        self.assertEqual(days[1]['busy_minutes'], 180)  # 10:00-13:00 объединённо, а не 240
+        tasks = [{'id': 1, 'title': 'Тяжёлая лабораторная', 'deadline': '2026-11-30T18:00:00Z', 'completed_work_minutes': 0}]
+        # Попытка назначить 4 часа в плотный учебный день отклоняется валидатором.
+        bad = proposal_payload(
+            [1],
+            [assess(1, 300, 360, policy='finish_before', effort='high')],
+            [work_period(1, '2026-11-23', '2026-11-23', [('2026-11-23', 240)])],
+        )
+        _, bad_issues, _, _ = planning.validate_proposal(bad, tasks, empty_week(events=events), NOW)
+        self.assertTrue(any(i['code'] == 'over_capacity' for i in bad_issues))
 
-        plans = calc_plans([
-            make_plan(1, 120, 120, available_from='2026-11-19T00:00:00+00:00'),
-            make_plan(2, 90, 90, depends_on=[1]),
-        ])
-        tasks = [{'id': 1, 'title': 'Открывается 19-го'}, {'id': 2, 'title': 'После 1'}]
-        schedule = planning.reorder(order_args([1, 2]), plans, [1, 2], week, NOW, tasks=tasks)
-        t1_dates = [d['date'] for d in schedule['daily_allocations'] if any(t['task_id'] == 1 for t in d['tasks'])]
-        t2_dates = [d['date'] for d in schedule['daily_allocations'] if any(t['task_id'] == 2 for t in d['tasks'])]
-        self.assertTrue(all(date >= '2026-11-19' for date in t1_dates))
-        self.assertGreaterEqual(min(t2_dates), max(t1_dates))
+        # Размещение основной части на свободные выходные принимается.
+        good = proposal_payload(
+            [1],
+            [assess(1, 300, 360, policy='finish_before', effort='high')],
+            [work_period(1, '2026-11-28', '2026-11-29', [('2026-11-28', 180), ('2026-11-29', 150)])],
+        )
+        prop, issues, _, _ = planning.validate_proposal(good, tasks, empty_week(events=events), NOW)
+        self.assertEqual(issues, [])
+        self.assertIsNotNone(prop)
 
-        # Добавление обязательного события снижает доступную ёмкость дня.
-        extra = deepcopy(week)
-        extra['calendar_events'].append({'id': 'm3', 'kind': 'busy', 'title': 'Доп. семинар', 'date': '2026-11-17', 'start': '14:00', 'end': '18:00'})
-        days_after = planning.analyze_days(extra, NOW, horizon_days=7)
-        self.assertLess(days_after[1]['realistic_capacity_minutes'], days[1]['realistic_capacity_minutes'])
+    def test_scenario_c_overload_requires_honest_risk(self):
+        tasks = [{'id': 1, 'title': 'Подготовка к экзамену', 'deadline': '2026-11-24T22:00:00Z', 'completed_work_minutes': 0}]
+        # Если помещено меньше минимума до дедлайна, но deadline_risk=null -> отклоняется.
+        dishonest = proposal_payload(
+            [1],
+            [assess(1, 720, 720, policy='expires', effort='high', deadline_risk=None)],
+            [work_period(1, '2026-11-23', '2026-11-24', [('2026-11-23', 180), ('2026-11-24', 180)])],
+        )
+        _, issues, _, _ = planning.validate_proposal(dishonest, tasks, empty_week(), NOW)
+        self.assertTrue(any(i['code'] == 'missing_deadline_risk' for i in issues))
 
-    def test_scenario_9_plan_stability(self):
-        week = planning.with_rest(empty_week(), NOW, rest_args())
-        tasks = [{'id': 1, 'title': 'Первая'}, {'id': 2, 'title': 'Вторая'}, {'id': 3, 'title': 'Третья'}]
-        raw_plans = [make_plan(1, 180, 210), make_plan(2, 180, 210), make_plan(3, 180, 210)]
-        first = planning.reorder(order_args([1, 2, 3]), calc_plans(raw_plans), [1, 2, 3], week, NOW, tasks=tasks)
-        # Пользователь выполнил 45 мин по первой задаче.
-        updated_plans = calc_plans(raw_plans, completed={1: 45})
-        second = planning.reorder(order_args([1, 2, 3], keep=True), updated_plans, [1, 2, 3], week, NOW, previous=first, tasks=tasks)
-        self.assertEqual(second['replan_mode'], 'minor_adjustment')
-        first_t3_days = {d['date'] for d in first['daily_allocations'] if any(t['task_id'] == 3 for t in d['tasks'])}
-        second_t3_days = {d['date'] for d in second['daily_allocations'] if any(t['task_id'] == 3 for t in d['tasks'])}
-        self.assertEqual(first_t3_days, second_t3_days)
+        honest = proposal_payload(
+            [1],
+            [assess(1, 720, 720, policy='expires', effort='high', deadline_risk='Доступно ~6 ч из 12 ч; фокус на основных темах')],
+            [work_period(1, '2026-11-23', '2026-11-24', [('2026-11-23', 180), ('2026-11-24', 180)])],
+        )
+        prop, issues, days, budgets = planning.validate_proposal(honest, tasks, empty_week(), NOW)
+        self.assertEqual(issues, [])
+        res = planning.materialize_plan(prop, tasks, days, budgets, empty_week(), NOW)
+        self.assertFalse(res['schedule']['feasible'])
+        self.assertGreater(res['schedule']['remaining'][0]['remaining_work_minutes'], 0)
 
-    def test_scenario_10_flexibility_no_exact_hours(self):
-        week = planning.with_rest(empty_week(), NOW, rest_args())
-        plans = calc_plans([make_plan(1, 180, 240)])
-        schedule = planning.reorder(order_args([1]), plans, [1], week, NOW, tasks=[{'id': 1, 'title': 'ЛР'}])
-        self.assertEqual(schedule['version'], 2)
-        self.assertNotIn('blocks', schedule)
-        self.assertTrue(schedule['periods'])
-        for period in schedule['periods']:
-            self.assertIn('start_date', period)
-            self.assertIn('end_date', period)
-            self.assertIn('hours_label', period)
-            self.assertNotIn('start_time', period)
-        self.assertEqual(calendar.ameba_events(datetime(2026, 11, 16).date(), datetime(2026, 11, 23).date()), [])
+    def test_scenario_f_progress_subtracted_once_and_refresh(self):
+        tasks = [{'id': 1, 'title': 'Лабораторная', 'completed_work_minutes': 120}]
+        cand = proposal_payload(
+            [1],
+            [assess(1, 360, 360)],
+            [work_period(1, '2026-11-23', '2026-11-24', [('2026-11-23', 120), ('2026-11-24', 120)])],
+        )
+        prop, issues, days, budgets = planning.validate_proposal(cand, tasks, empty_week(), NOW)
+        self.assertEqual(issues, [])
+        self.assertEqual(budgets[1]['rem_max'], 240)
+        res = planning.materialize_plan(prop, tasks, days, budgets, empty_week(), NOW)
+        self.assertEqual(res['timeline'][0]['plan']['work_max_minutes'], 240)
+
+        # Попытка назначить 300 мин при остатке 240 мин отклоняется.
+        over = proposal_payload(
+            [1],
+            [assess(1, 360, 360)],
+            [work_period(1, '2026-11-23', '2026-11-24', [('2026-11-23', 150), ('2026-11-24', 150)])],
+        )
+        _, over_issues, _, _ = planning.validate_proposal(over, tasks, empty_week(), NOW)
+        self.assertTrue(any(i['code'] == 'overallocated_task' for i in over_issues))
+
+        # /refresh без LLM уменьшает аллокации при новом подтверждённом прогрессе, сохраняя выбранные дни.
+        refreshed = planning.refresh_schedule(
+            res,
+            [{'id': 1, 'title': 'Лабораторная', 'completed_work_minutes': 240}],
+            empty_week(),
+            NOW,
+        )
+        self.assertEqual(refreshed['timeline'][0]['plan']['work_max_minutes'], 120)
+        self.assertEqual(refreshed['schedule']['periods'][0]['minutes'], 120)
+
+    def test_scenario_h_validator_catches_model_errors(self):
+        tasks = [
+            {'id': 1, 'title': 'Неделимая контрольная', 'deadline': '2026-11-24T20:00:00Z', 'completed_work_minutes': 0},
+            {'id': 2, 'title': 'Вторая задача', 'completed_work_minutes': 0},
+        ]
+        bad = proposal_payload(
+            [1, 2, 999],
+            [
+                assess(1, 90, 90, splittable=False, policy='expires'),
+                assess(2, 60, 60, depends_on=[1]),
+            ],
+            [
+                # Дробление неделимой задачи + работа после дедлайна + конфликт с rest.
+                work_period(1, '2026-11-24', '2026-11-25', [('2026-11-24', 45), ('2026-11-25', 45)]),
+                # Зависимая задача раньше базовой.
+                work_period(2, '2026-11-23', '2026-11-23', [('2026-11-23', 60)]),
+                rest_period('2026-11-25', '2026-11-25'),
+            ],
+        )
+        _, issues, _, _ = planning.validate_proposal(bad, tasks, empty_week(), NOW)
+        codes = {i['code'] for i in issues}
+        self.assertIn('unknown_task', codes)
+        bad['task_ids'] = [1, 2]
+        _, issues2, _, _ = planning.validate_proposal(bad, tasks, empty_week(), NOW)
+        codes2 = {i['code'] for i in issues2}
+        self.assertTrue({'indivisible_split', 'after_deadline', 'rest_day_conflict', 'dependency_order_violation'} <= codes2)
+
+    def test_scenario_i_manual_pins_enforced(self):
+        tasks = [{'id': 1, 'title': 'Лабораторная', 'completed_work_minutes': 0}]
+        adjustments = {'task_pins': {'1': {'target_date': '2026-11-28', 'not_before': '2026-11-28'}}}
+        wrong = proposal_payload(
+            [1],
+            [assess(1, 120, 120)],
+            [work_period(1, '2026-11-24', '2026-11-24', [('2026-11-24', 120)])],
+        )
+        _, issues, _, _ = planning.validate_proposal(wrong, tasks, empty_week(), NOW, adjustments=adjustments)
+        codes = {i['code'] for i in issues}
+        self.assertIn('violates_not_before', codes)
+        self.assertIn('violates_task_pin', codes)
+
+        ok = proposal_payload(
+            [1],
+            [assess(1, 120, 120)],
+            [work_period(1, '2026-11-28', '2026-11-28', [('2026-11-28', 120)])],
+        )
+        _, ok_issues, _, _ = planning.validate_proposal(ok, tasks, empty_week(), NOW, adjustments=adjustments)
+        self.assertEqual(ok_issues, [])
+
+    def test_scenario_l_available_from_and_morning_deadline(self):
+        # Контрольная открывается Чт 14:00, закрывается Пт 11:00.
+        tasks = [{
+            'id': 1,
+            'title': 'Контрольная',
+            'deadline': '2026-11-27T11:00:00+00:00',
+            'completed_work_minutes': 0,
+        }]
+        early = proposal_payload(
+            [1],
+            [assess(1, 90, 90, splittable=False, policy='expires', available_from='2026-11-26T14:00:00+00:00')],
+            [work_period(1, '2026-11-25', '2026-11-25', [('2026-11-25', 90)])],
+        )
+        _, early_issues, _, _ = planning.validate_proposal(early, tasks, empty_week(), NOW)
+        self.assertTrue(any(i['code'] == 'before_available_from' for i in early_issues))
+
+        # Слишком много в пятницу до 11:00 (с 07:00 до 11:00 всего 240 мин).
+        morning_overflow = proposal_payload(
+            [1],
+            [assess(1, 300, 300, splittable=False, policy='expires', available_from='2026-11-26T14:00:00+00:00')],
+            [work_period(1, '2026-11-27', '2026-11-27', [('2026-11-27', 300)])],
+        )
+        _, ovf_issues, _, _ = planning.validate_proposal(morning_overflow, tasks, empty_week(), NOW)
+        self.assertTrue(any(i['code'] == 'deadline_day_over_capacity' for i in ovf_issues))
+
+        valid_test = proposal_payload(
+            [1],
+            [assess(1, 90, 90, splittable=False, policy='expires', available_from='2026-11-26T14:00:00+00:00')],
+            [work_period(1, '2026-11-26', '2026-11-26', [('2026-11-26', 90)])],
+        )
+        _, valid_issues, _, _ = planning.validate_proposal(valid_test, tasks, empty_week(), NOW)
+        self.assertEqual(valid_issues, [])
 
     def test_strict_openai_tool_schemas(self):
         def check_strict(node):
@@ -300,13 +308,13 @@ class PlanningScenarios(unittest.TestCase):
                 for item in node:
                     check_strict(item)
 
-        for tool in (planning.TOOL, planning.REST_TOOL, planning.ORDER_TOOL, planning.READ_TOOL, ameba_service.CONTEXT_TOOL):
+        for tool in ameba_service.AMEBA_TOOLS:
             self.assertTrue(tool['strict'])
             check_strict(tool['parameters'])
 
 
 class AgentLoop(unittest.IsolatedAsyncioTestCase):
-    async def run_agent(self, actions):
+    async def run_agent(self, actions, *, user_feedback='', memory_items=None, memory_mock=None):
         from contextlib import asynccontextmanager
         from common.codex_harness import TurnOutcome
 
@@ -331,8 +339,11 @@ class AgentLoop(unittest.IsolatedAsyncioTestCase):
         async def fake_serve(adapter):
             yield {'mcp_servers': {}}
 
+        step_iter = iter(actions)
+
         async def fake_turn(thread_arg, prompt_input, *, adapter=None, **kwargs):
-            for idx, (name, arguments) in enumerate(actions, start=1):
+            turn_actions = next(step_iter, [])
+            for idx, (name, arguments) in enumerate(turn_actions, start=1):
                 await adapter.respond({
                     'jsonrpc': '2.0',
                     'id': idx,
@@ -344,18 +355,7 @@ class AgentLoop(unittest.IsolatedAsyncioTestCase):
             if adapter.fatal_error is not None:
                 raise adapter.fatal_error
             return TurnOutcome(
-                text=json.dumps({
-                    'task_ids': [1],
-                    'explanation': 'Гибкий план периодов',
-                    'reasons': [{
-                        'task_id': 1,
-                        'reason': 'Приоритет',
-                        'time_estimate': '3–4 ч',
-                        'effort': 'Средняя',
-                        'impact': 'Готовая работа',
-                        'deadline_risk': None,
-                    }],
-                }),
+                text='done',
                 completed=True,
                 status='completed',
                 error_detail=None,
@@ -363,30 +363,91 @@ class AgentLoop(unittest.IsolatedAsyncioTestCase):
                 terminal_result=adapter.terminal_result,
             )
 
+        mem_fn = memory_mock or AsyncMock(return_value=memory_items or [])
         with patch.object(ameba_service, 'datetime', Clock), \
              patch.object(ameba_service, 'Progress', MagicMock()), \
-             patch.object(ameba_service, 'memory_tool', AsyncMock(return_value=[])), \
+             patch.object(ameba_service, 'memory_request', AsyncMock(return_value=memory_items or [])), \
+             patch.object(ameba_service, 'memory_tool', mem_fn), \
              patch.object(ameba_service, 'open_codex', fake_open_codex), \
              patch.object(ameba_service, 'scratch_env', fake_scratch), \
              patch.object(ameba_service, 'serve_mcp', fake_serve), \
              patch.object(ameba_service, 'run_codex_turn', side_effect=fake_turn):
             return await ameba_service.rank.__wrapped__({
-                'api_key': 'synthetic', 'config': {'model': 'fixture'}, 'tasks': [{'id': 1, 'title': 'Лабораторная'}],
-                'now': NOW, 'weekly_schedule': empty_week(),
+                'api_key': 'synthetic',
+                'config': {'model': 'fixture'},
+                'tasks': [{'id': 1, 'title': 'Лабораторная', 'completed_work_minutes': 0}],
+                'now': NOW,
+                'weekly_schedule': empty_week(),
+                'user_feedback': user_feedback,
             })
 
-    async def test_agent_produces_flexible_periods_and_refresh_works_without_llm(self):
-        plan_input = make_plan(1, 200, 240)
-        result = await self.run_agent([
-            ('read_user_memory', {}),
-            ('read_current_plan', {}),
-            ('plan_tasks', {'plans': [plan_input]}),
-            ('plan_rest', json.loads(rest_args())),
-            ('reorder_tasks', json.loads(order_args([1]))),
-        ])
-        self.assertEqual(result['schedule']['version'], 2)
-        self.assertTrue(result['schedule']['periods'])
+    async def test_scenario_d_once_preference_does_not_write_memory(self):
+        mem_mock = AsyncMock(return_value=[])
+        cand = proposal_payload(
+            [1],
+            [assess(1, 180, 180)],
+            [
+                work_period(1, '2026-11-24', '2026-11-25', [('2026-11-24', 90), ('2026-11-25', 90)]),
+                rest_period('2026-11-27', '2026-11-27', goal='Пятница свободна по пожеланию'),
+            ],
+            preferences=[{'text': 'Эту пятницу оставить свободной', 'scope': 'once', 'task_id': None, 'key': None}],
+        )
+        res = await self.run_agent(
+            [[('propose_plan', cand)]],
+            user_feedback='Эту пятницу оставь свободной',
+            memory_mock=mem_mock,
+        )
+        self.assertEqual(res['schedule']['version'], 3)
+        self.assertEqual(res['memory_saved_count'], 0)
+        mem_mock.assert_not_called()
 
+    async def test_scenario_e_persistent_habit_saved_without_duplicates(self):
+        mem_mock = AsyncMock(return_value={'ok': True})
+        existing = [{'key': 'user.1', 'agent': 'Владелец', 'text': 'Учусь по утрам'}]
+        cand = proposal_payload(
+            [1],
+            [assess(1, 120, 120)],
+            [work_period(1, '2026-11-28', '2026-11-28', [('2026-11-28', 120)])],
+            preferences=[
+                {'text': 'Учусь по утрам', 'scope': 'persistent', 'task_id': None, 'key': 'user.1'},  # дубль факта владельца
+                {'text': 'Обычно сложную работу предпочитаю делать в свободные дни', 'scope': 'persistent', 'task_id': None, 'key': 'hard_on_free_days'},
+            ],
+        )
+        res = await self.run_agent(
+            [[('propose_plan', cand)]],
+            user_feedback='Обычно сложную работу делаю в свободные дни',
+            memory_items=existing,
+            memory_mock=mem_mock,
+        )
+        self.assertEqual(res['memory_saved_count'], 1)
+        mem_mock.assert_awaited_once()
+        saved_args = mem_mock.await_args.args[1]
+        self.assertTrue(saved_args['key'].startswith('ameba.'))
+
+    async def test_scenario_h_one_repair_succeeds_and_second_failure_stops(self):
+        bad = proposal_payload(
+            [1],
+            [assess(1, 120, 120)],
+            [work_period(1, '2026-11-23', '2026-11-23', [('2026-11-23', 500)])],  # over_capacity
+        )
+        good = proposal_payload(
+            [1],
+            [assess(1, 120, 120)],
+            [work_period(1, '2026-11-23', '2026-11-24', [('2026-11-23', 60), ('2026-11-24', 60)])],
+        )
+        res = await self.run_agent([[('propose_plan', bad), ('propose_plan', good)]])
+        self.assertEqual(res['schedule']['version'], 3)
+
+        with self.assertRaisesRegex(Exception, 'после исправления'):
+            await self.run_agent([[('propose_plan', bad), ('propose_plan', bad)]])
+
+    async def test_refresh_works_without_llm(self):
+        cand = proposal_payload(
+            [1],
+            [assess(1, 240, 240)],
+            [work_period(1, '2026-11-23', '2026-11-24', [('2026-11-23', 120), ('2026-11-24', 120)])],
+        )
+        result = await self.run_agent([[('propose_plan', cand)]])
         with patch.object(ameba_service, 'open_codex', side_effect=AssertionError('LLM must not run')):
             refreshed = await ameba_service.refresh_plan({
                 'previous_plan': result,
@@ -396,12 +457,7 @@ class AgentLoop(unittest.IsolatedAsyncioTestCase):
                 'now': NOW,
             })
         self.assertEqual(refreshed['timeline'][0]['plan']['work_max_minutes'], 180)
-        self.assertEqual(refreshed['schedule']['version'], 2)
-
-    async def test_identical_failed_action_stops_after_three_attempts(self):
-        with self.assertRaisesRegex(Exception, 'трижды'):
-            await self.run_agent([('read_user_memory', {}), ('read_current_plan', {})] +
-                                 [('plan_tasks', {'plans': []})] * 3)
+        self.assertEqual(refreshed['schedule']['version'], 3)
 
 
 class Storage(unittest.TestCase):
@@ -426,7 +482,7 @@ class Storage(unittest.TestCase):
         self.directory.cleanup()
 
     def test_failed_run_retains_previous_plan(self):
-        old = {'run_id': 'old', 'schedule': {'version': 2, 'start_at': NOW, 'periods': []}, 'revision': 'r1'}
+        old = {'run_id': 'old', 'schedule': {'version': 3, 'start_at': NOW, 'periods': []}, 'revision': 'r1'}
         with Session(self.engine) as session:
             session.add(IntegrationSetting(name='ameba_plan', config=json.dumps(old)))
             session.commit()
@@ -439,7 +495,7 @@ class Storage(unittest.TestCase):
 
     def test_plan_and_ranking_rollback_together_and_late_run_is_rejected(self):
         calendar.reset_ameba_plan('new')
-        result = {'schedule': {'version': 2, 'start_at': NOW, 'periods': []}}
+        result = {'schedule': {'version': 3, 'start_at': NOW, 'periods': []}}
         with Session(self.engine) as session:
             session.add(TaskRanking(result='new'))
             calendar.save_ameba_plan('new', result, 'r2', session)
@@ -451,12 +507,12 @@ class Storage(unittest.TestCase):
                 calendar.save_ameba_plan('late', result, 'r2', session)
 
     def test_backend_rejects_timeline_error_without_replacing_saved_result(self):
-        previous = {'task_ids': [1], 'schedule': {'version': 2, 'start_at': NOW, 'periods': []}}
+        previous = {'task_ids': [1], 'schedule': {'version': 3, 'start_at': NOW, 'periods': []}}
         with Session(self.engine) as session:
             session.add(Task(id=1, title='Работа'))
             session.add(TaskRanking(snapshot='old', result=json.dumps(previous)))
             session.commit()
-        invalid = {'task_ids': [1], 'schedule': {'version': 2, 'start_at': NOW, 'periods': [], 'timeline_error': 'invalid'}}
+        invalid = {'task_ids': [1], 'schedule': {'version': 3, 'start_at': NOW, 'periods': [], 'timeline_error': 'invalid'}}
         with patch.object(ameba, 'check_feature'), \
              patch.object(ameba, 'read_config', return_value={'enabled': True}), \
              patch.object(ameba, 'task_state', return_value=('new', [{'id': 1}], [])), \
@@ -467,54 +523,51 @@ class Storage(unittest.TestCase):
         with Session(self.engine) as session:
             self.assertEqual(json.loads(session.get(TaskRanking, 1).result), previous)
 
-    def test_feedback_and_adjustments_persist_and_refresh(self):
-        task = Task(id=1, title='Лаба', category='Программирование', status='todo')
+    def test_backend_applies_task_preferences_and_progress_without_touching_memory(self):
+        task = Task(id=1, title='Переезд', status='todo', completed_work_minutes=0)
         with Session(self.engine) as session:
             session.add(task)
-            session.add(TaskContext(task_id=1, subject='cs', status='ready', task_snapshot=monocle_context.snapshot(task),
+            session.add(TaskContext(task_id=1, subject='', status='ready', task_snapshot=monocle_context.snapshot(task),
                                     usage=json.dumps({'context_policy': 5, 'full_markdown': 'ok'})))
             session.commit()
 
-        plan = calc_plans([make_plan(1, 180, 180)])[1]
-        saved_result = {
-            'task_ids': [1],
-            'timeline': [{'id': 1, 'title': 'Лаба', 'plan': plan}],
-            'reasons': [{'task_id': 1, 'reason': 'ok', 'time_estimate': '3 ч', 'effort': 'Средняя', 'impact': 'Зачёт', 'deadline_risk': None}],
-            'schedule': planning.reorder(order_args([1]), {1: plan}, [1], empty_week(), NOW, tasks=[{'id': 1, 'title': 'Лаба'}]),
-        }
-        with Session(self.engine) as session:
-            session.add(TaskRanking(snapshot='snap', result=json.dumps(saved_result)))
-            session.commit()
+        cand = proposal_payload(
+            [1],
+            [assess(1, 180, 180)],
+            [work_period(1, '2026-11-23', '2026-11-25', [('2026-11-23', 60), ('2026-11-25', 60)])],
+            preferences=[{'text': 'Удобно перевозить после университета', 'scope': 'task', 'task_id': 1, 'key': None}],
+            progress_updates=[{'task_id': 1, 'completed_work_minutes': 60}],
+        )
+        prop, issues, days, budgets = planning.validate_proposal(
+            cand, [{'id': 1, 'title': 'Переезд', 'completed_work_minutes': 0}], empty_week(), NOW, has_feedback=True,
+        )
+        self.assertEqual(issues, [])
+        materialized = planning.materialize_plan(prop, [{'id': 1, 'title': 'Переезд', 'completed_work_minutes': 0}], days, budgets, empty_week(), NOW)
+        fake_res = materialized | {'plan_run_id': 'run1', 'calendar_revision': 'rev1', 'memory_saved_count': 0}
 
-        async def fake_call(service, endpoint, body, timeout=None):
-            return await ameba_service.refresh_plan(body)
-
+        calendar.reset_ameba_plan('run1')
         with patch.object(ameba, 'check_feature'), \
-             patch.object(ameba, 'read_config', return_value={'enabled': True, 'model': 'm', 'auth_mode': 'api_key'}), \
+             patch.object(ameba, 'read_config', return_value={'enabled': True}), \
              patch.object(ameba, 'read_settings', return_value=({'base_url': 'u'}, {})), \
-             patch.object(ameba, 'resolve_agent_auth', return_value=({'enabled': True, 'model': 'm', 'base_url': 'u', 'auth_mode': 'api_key'}, '')), \
-             patch.object(scheduler, 'call', side_effect=fake_call), \
+             patch.object(ameba, 'context_status', return_value='ready'), \
+             patch.object(ameba, 'request_ranking', AsyncMock(return_value=fake_res)), \
              patch('agent_memory.read', return_value=[]):
-            status = asyncio.run(ameba.submit_feedback(1, 'partial', actual_minutes=60, period_id=saved_result['schedule']['periods'][0]['id']))
-            self.assertTrue(status['feedback_saved'])
-            self.assertEqual(status['observations_count'], 1)
-            with Session(self.engine) as session:
-                self.assertEqual(session.get(Task, 1).completed_work_minutes, 60)
-                self.assertEqual(session.get(Task, 1).status, 'in_progress')
+            ameba.save_plan_feedback('уже перевёз треть, остальное после пар')
+            out = asyncio.run(ameba.rank_all())
+        self.assertEqual(out['task_notes_saved_count'], 1)
+        self.assertEqual(out['progress_updated_count'], 1)
+        with Session(self.engine) as session:
+            self.assertEqual(session.get(Task, 1).completed_work_minutes, 60)
+            self.assertEqual(session.get(Task, 1).status, 'in_progress')
+            self.assertEqual(ameba.read_adjustments(session)['task_notes']['1'], 'Удобно перевозить после университета')
 
-            today_iso = datetime.now(timezone.utc).date().isoformat()
-            adjusted = asyncio.run(ameba.adjust_plan(day_overrides={today_iso: 'free'}))
-            self.assertEqual(adjusted['manual_adjustments']['day_overrides'][today_iso], 'free')
-            first_day = next(d for d in adjusted['schedule']['daily_allocations'] if d['date'] == today_iso)
-            self.assertEqual(first_day['allocated_minutes'], 0)
-
-    def test_plan_expiry_uses_local_date_not_hour(self):
+    def test_scenario_g_and_plan_expiry_uses_local_date(self):
         today_local = datetime.now(timezone.utc).date().isoformat()
         yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
         with patch.object(ameba, 'read_calendar', return_value={'timezone': 'UTC'}):
-            self.assertTrue(ameba.plan_expired({'schedule': {'version': 1, 'generated_date': today_local}}))
-            self.assertTrue(ameba.plan_expired({'schedule': {'version': 2, 'generated_date': yesterday}}))
-            self.assertFalse(ameba.plan_expired({'schedule': {'version': 2, 'generated_date': today_local}}))
+            self.assertTrue(ameba.plan_expired({'schedule': {'version': 2, 'generated_date': today_local}}))
+            self.assertTrue(ameba.plan_expired({'schedule': {'version': 3, 'generated_date': yesterday}}))
+            self.assertFalse(ameba.plan_expired({'schedule': {'version': 3, 'generated_date': today_local}}))
 
     def test_migration_preserves_existing_task(self):
         with Session(self.engine) as session:

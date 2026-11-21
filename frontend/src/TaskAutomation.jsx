@@ -19,6 +19,7 @@ import utc from 'dayjs/plugin/utc';
 import { agentRequest, deleteTask, request, saveTask } from './api';
 import AgentProgress from './AgentProgress';
 import AgentProblemReport from './AgentProblemReport';
+import { formatDateRange } from './AgentTimeline';
 import ArrodesWorkspace from './ArrodesWorkspace';
 import ContextBrowser from './ContextBrowser';
 import ContextFiles from './ContextFiles';
@@ -234,7 +235,9 @@ export default function TaskAutomation({ task, features = {} }) {
   const amebaPos = (ranking.data?.task_ids ?? []).indexOf(task.id);
   const rankNumber = amebaPos >= 0 ? amebaPos + 1 : null;
   const assessment = (ranking.data?.reasons ?? []).find((r) => r.task_id === task.id) ?? null;
-  const scheduledPeriods = (ranking.data?.schedule?.periods ?? []).filter((p) => p.tasks?.some((t) => t.task_id === task.id));
+  const scheduledPeriods = (ranking.data?.schedule?.periods ?? []).filter(
+    (p) => p.task_id === task.id || p.tasks?.some((t) => t.task_id === task.id),
+  );
   const overdue = !task.archived && task.status !== 'done' && task.deadline && dayjs.utc(task.deadline).valueOf() < Date.now();
   const summaryText = context.data?.full_markdown || context.data?.summary || '';
   const hasSeparateSummary = Boolean(
@@ -533,10 +536,11 @@ export default function TaskAutomation({ task, features = {} }) {
                 <div className="flex flex-wrap items-center gap-1.5 text-[12px]">
                   <span className="text-[#929292]">Периоды:</span>
                   {scheduledPeriods.map((p) => {
-                    const entry = p.tasks.find((t) => t.task_id === task.id);
+                    const entry = p.tasks?.find((t) => t.task_id === task.id);
+                    const hours = p.hours_label || entry?.hours_label;
                     return (
                       <a key={p.id} href="/ameba" className="px-2 py-0.5 max-md:px-2.5 max-md:py-1.5 border border-[#303030] bg-[#171717] hover:border-[#7F49B4]">
-                        {p.start_date === p.end_date ? p.start_date : `${p.start_date}..${p.end_date}`} · {entry?.hours_label}
+                        {formatDateRange(p.start_date, p.end_date)}{hours ? ` · ${hours}` : ''}
                       </a>
                     );
                   })}

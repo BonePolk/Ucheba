@@ -4,76 +4,31 @@ import {
   ChevronDown,
   ChevronRight,
   MoreHorizontal,
-  SlidersHorizontal,
 } from 'lucide-react';
-import { calendarColors } from './calendarColors';
 import { Button, IconButton } from '@/components/ui/button';
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
-import { Badge, EmptyState, Notice } from '@/components/ui/surface';
-import { HintTooltip } from '@/components/ui/tooltip';
+import { Badge, EmptyState } from '@/components/ui/surface';
 import { CollapseSection, LAYOUT_TRANSITION, motion, useReducedMotion } from '@/lib/motion';
 
-const LOAD_META = {
-  free: { label: 'Свободно', variant: 'default', accent: '#454545' },
-  light: { label: 'Лёгкая', variant: 'success', accent: calendarColors.break },
-  medium: { label: 'Средняя', variant: 'accent', accent: calendarColors.task },
-  high: { label: 'Высокая', variant: 'warning', accent: '#c96f28' },
-  overload: { label: 'Перегрузка', variant: 'danger', accent: '#c93b3b' },
-};
-
-const KIND_LABELS = {
-  work: null,
-  light: 'Облегчённый',
-  recovery: 'Восстановление',
-  free: 'Выходной',
-};
-
-const OUTCOMES = [
-  { value: 'done', label: 'Выполнено полностью', optionalMinutes: true },
-  { value: 'partial', label: 'Сделана часть…', optionalMinutes: false },
-  { value: 'too_hard', label: 'Идёт тяжелее оценки…', optionalMinutes: false },
-  { value: 'missed', label: 'Не вышло позаниматься', optionalMinutes: true },
-];
-
 const MONTHS_SHORT = ['янв', 'фев', 'мар', 'апр', 'мая', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
-const MONTHS_LONG = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
 const WEEKDAYS = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
 
-const LEGACY_BOILERPLATE = new Set([
-  'Нагрузку можно распределять равномерно в удобное время внутри этих дней.',
-  'Отдых, личные дела и необязательный резерв для незавершённых мелочей.',
-  'Сниженная нагрузка для восстановления после серии напряжённых дней; избегайте новых сложных задач.',
-  'Облегчённый режим: только лёгкое повторение и сохранение свободного времени.',
-  'Высокая нагрузка: не добавляйте лишних сложных задач и защитите ночной сон и вечерний отдых.',
-  'Вечера после плотных занятий желательно оставить свободными для восстановления.',
-  'Работайте комфортными подходами в выбранное вами время с регулярными паузами.',
-  'Сформирован первый адаптивный план периодов без жёстких почасовых слотов.',
-]);
-
-function isLegacyBoilerplate(text) {
-  if (!text) return false;
-  const trimmed = String(text).trim();
-  return LEGACY_BOILERPLATE.has(trimmed)
-    || /^День насыщен обязательными делами \([^)]+\), планируйте только посильный минимум\.$/.test(trimmed);
-}
+const OUTCOMES = [
+  { value: 'done', label: 'Отметить выполненной', optionalMinutes: true },
+  { value: 'partial', label: 'Сделана часть…', optionalMinutes: false },
+  { value: 'too_hard', label: 'Идёт тяжелее оценки…', optionalMinutes: false },
+];
 
 export function parseIsoDate(iso) {
   const [y, m, d] = iso.split('-').map(Number);
   return new Date(Date.UTC(y, m - 1, d));
-}
-
-export function addIsoDays(iso, offset) {
-  const dt = parseIsoDate(iso);
-  dt.setUTCDate(dt.getUTCDate() + offset);
-  return dt.toISOString().slice(0, 10);
 }
 
 export function formatDateRange(startIso, endIso) {
@@ -85,26 +40,14 @@ export function formatDateRange(startIso, endIso) {
   const eMon = end.getUTCMonth();
   const sWd = WEEKDAYS[start.getUTCDay()];
   const eWd = WEEKDAYS[end.getUTCDay()];
-  if (startIso === endIso) return `${sDay} ${MONTHS_LONG[sMon]} · ${sWd}`;
-  if (sMon === eMon) return `${sDay}–${eDay} ${MONTHS_LONG[sMon]} · ${sWd}–${eWd}`;
-  return `${sDay} ${MONTHS_SHORT[sMon]} – ${eDay} ${MONTHS_SHORT[eMon]} · ${sWd}–${eWd}`;
+  if (startIso === endIso) return `${sWd} · ${sDay} ${MONTHS_SHORT[sMon]}`;
+  if (sMon === eMon) return `${sWd}–${eWd} · ${sDay}–${eDay} ${MONTHS_SHORT[sMon]}`;
+  return `${sWd}–${eWd} · ${sDay} ${MONTHS_SHORT[sMon]} – ${eDay} ${MONTHS_SHORT[eMon]}`;
 }
 
 export function formatShortDate(iso) {
   const d = parseIsoDate(iso);
   return `${d.getUTCDate()} ${MONTHS_SHORT[d.getUTCMonth()]}`;
-}
-
-function formatDeadline(iso, zone) {
-  if (!iso) return null;
-  const date = new Date(iso);
-  return date.toLocaleString('ru-RU', {
-    timeZone: zone || undefined,
-    day: 'numeric',
-    month: 'short',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
 }
 
 export function durationLabel(minutes) {
@@ -115,7 +58,6 @@ export function durationLabel(minutes) {
 }
 
 export default function AgentTimeline({
-  tasks = [],
   finished = true,
   schedule,
   calendarOnly = false,
@@ -125,80 +67,30 @@ export default function AgentTimeline({
   taskPins = {},
   estimateOverrides = {},
   onRefresh,
-  hideConflicts = false,
 }) {
   const reduced = useReducedMotion();
   const [expanded, setExpanded] = useState(false);
-  const [changesOpen, setChangesOpen] = useState(false);
-  const [openDetails, setOpenDetails] = useState({});
+  const [openReasons, setOpenReasons] = useState({});
   const [feedbackDraft, setFeedbackDraft] = useState(null);
   const [customMinutes, setCustomMinutes] = useState('');
   const [estimateDraft, setEstimateDraft] = useState(null);
   const [estimateInput, setEstimateInput] = useState('');
 
   const periods = schedule?.periods ?? [];
-  const conflicts = schedule?.deadline_conflicts ?? [];
-  const infeasibleConflicts = conflicts.filter((item) => item.infeasible);
-  const tightConflicts = conflicts.filter((item) => !item.infeasible);
   const todayIso = schedule?.generated_date || new Date().toISOString().slice(0, 10);
-  const tomorrowIso = addIsoDays(todayIso, 1);
 
   if (calendarOnly || !periods.length) {
-    const previewDays = schedule?.days_summary ?? [];
-    const estimated = tasks.filter((t) => t.plan);
     return (
-      <div className="flex flex-col gap-3">
-        {!finished && estimated.length > 0 && (
-          <div className="border border-[#303030] bg-[#111111] p-3 flex flex-col gap-1.5">
-            <div className="text-[12px] font-medium text-[#929292]">Предварительная оценка</div>
-            <div className="divide-y divide-[#1E1E1E]">
-              {estimated.map((task) => (
-                <div key={task.id} className="flex items-center justify-between gap-2 py-1 text-[12px]">
-                  <span className="truncate text-[#EAEAEA]">{task.title}</span>
-                  <Badge variant="accent">{task.plan.hours_label || task.plan.time_estimate}</Badge>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {previewDays.length > 0 ? (
-          <div className="border border-[#303030] bg-[#111111] p-3 flex flex-col gap-2.5">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-[12px] font-medium text-[#EAEAEA]">Ближайшие дни по календарю</span>
-              {finished && onRefresh && (
-                <Button size="sm" variant="primary" onClick={onRefresh}>Построить план</Button>
-              )}
-            </div>
-            <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
-              {previewDays.slice(0, 7).map((day) => (
-                <div key={day.date} className="border border-[#262626] bg-[#0D0D0D] px-2.5 py-2 flex flex-col gap-0.5">
-                  <div className="text-[12px] font-semibold text-[#EAEAEA]">
-                    {formatShortDate(day.date)} · {WEEKDAYS[parseIsoDate(day.date).getUTCDay()]}
-                  </div>
-                  <div className="text-[11px] text-[#929292]">
-                    {day.busy_minutes > 0 ? `Занято ${durationLabel(day.busy_minutes)}` : 'Свободно'}
-                  </div>
-                  {day.markers?.length > 0 && (
-                    <div className="text-[11px] text-[#D4A24C] truncate">{day.markers.map((m) => m.title).join(', ')}</div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        ) : (
-          <EmptyState
-            icon={<CalendarDays className="h-5 w-5" />}
-            title={finished ? 'План ещё не построен' : 'Ameba оценивает задачи…'}
-            action={finished && onRefresh ? <Button variant="primary" onClick={onRefresh}>Построить план</Button> : undefined}
-          />
-        )}
-      </div>
+      <EmptyState
+        icon={<CalendarDays className="h-5 w-5" />}
+        title={finished ? 'План ещё не построен' : 'Ameba составляет план…'}
+        description={finished ? 'Нажмите «Построить план», чтобы получить распределение задач по ближайшим дням.' : undefined}
+        action={finished && onRefresh ? <Button variant="primary" onClick={onRefresh}>Построить план</Button> : undefined}
+      />
     );
   }
 
-  const visiblePeriods = expanded ? periods : periods.slice(0, 6);
-  const planChanges = (schedule.plan_changes ?? []).filter((change) => !isLegacyBoilerplate(change));
+  const visiblePeriods = expanded ? periods : periods.slice(0, 10);
 
   function openFeedback(taskId, periodId, outcome) {
     setEstimateDraft(null);
@@ -219,396 +111,302 @@ export default function AgentTimeline({
     setCustomMinutes('');
   }
 
-  function openEstimateEditor(task, periodId, manualVal) {
+  function openEstimateEditor(taskId, minutesValue, periodId) {
     setFeedbackDraft(null);
-    setEstimateDraft({ taskId: task.task_id, periodId });
-    setEstimateInput(manualVal !== undefined ? String(manualVal) : String(task.minutes ?? ''));
+    setEstimateDraft({ taskId, periodId });
+    setEstimateInput(minutesValue !== undefined ? String(minutesValue) : '');
   }
 
-  function toggleDetails(periodId) {
-    setOpenDetails((prev) => ({ ...prev, [periodId]: !prev[periodId] }));
+  function toggleReason(key) {
+    setOpenReasons((prev) => ({ ...prev, [key]: !prev[key] }));
   }
 
-  function relativeBadge(period) {
-    if (period.start_date <= todayIso && todayIso <= period.end_date) return 'Сейчас';
-    if (period.start_date === tomorrowIso && period.end_date === tomorrowIso) return 'Завтра';
-    return null;
+  function renderTaskMenu(taskId, periodId, defaultMinutes) {
+    if (!onFeedback && !onAdjust) return null;
+    const isPinned = Boolean(taskPins[String(taskId)]);
+    const manualVal = estimateOverrides[String(taskId)];
+
+    return (
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <IconButton
+            size="icon-sm"
+            variant="ghost"
+            aria-label="Действия с задачей"
+            disabled={busy}
+          >
+            <MoreHorizontal className="h-3.5 w-3.5" />
+          </IconButton>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          {onFeedback && OUTCOMES.map((item) => (
+            <DropdownMenuItem
+              key={item.value}
+              onClick={() => {
+                if (item.value === 'done') {
+                  onFeedback({ task_id: taskId, period_id: periodId, outcome: 'done', actual_minutes: null });
+                } else {
+                  openFeedback(taskId, periodId, item.value);
+                }
+              }}
+            >
+              {item.label}
+            </DropdownMenuItem>
+          ))}
+          {onAdjust && (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={() => onAdjust({ task_pin: { task_id: taskId, shift_days: -1 } })}>
+                Перенести раньше (−1 д)
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => onAdjust({ task_pin: { task_id: taskId, shift_days: 1 } })}>
+                Перенести позже (+1 д)
+              </DropdownMenuItem>
+              {isPinned && (
+                <DropdownMenuItem onClick={() => onAdjust({ task_pin: { task_id: taskId, clear: true } })}>
+                  Снять перенос
+                </DropdownMenuItem>
+              )}
+              <DropdownMenuItem onClick={() => openEstimateEditor(taskId, manualVal ?? defaultMinutes, periodId)}>
+                Изменить остаток времени…
+              </DropdownMenuItem>
+              {manualVal !== undefined && (
+                <DropdownMenuItem onClick={() => onAdjust({ estimate_override: { task_id: taskId, remaining_minutes: null } })}>
+                  Сбросить ручной остаток
+                </DropdownMenuItem>
+              )}
+            </>
+          )}
+          <DropdownMenuSeparator />
+          <DropdownMenuItem asChild>
+            <a href={`/?task=${taskId}`}>Открыть задачу</a>
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    );
+  }
+
+  function renderInlineEditors(taskId, periodId) {
+    const editingThis = feedbackDraft?.taskId === taskId && feedbackDraft?.periodId === periodId;
+    const editingEstThis = estimateDraft?.taskId === taskId && estimateDraft?.periodId === periodId;
+    const activeOutcome = editingThis ? OUTCOMES.find((o) => o.value === feedbackDraft.outcome) : null;
+
+    return (
+      <>
+        <CollapseSection open={editingThis}>
+          {editingThis && (
+            <div className="mt-2 pt-2 border-t border-dashed border-[#303030] flex flex-wrap items-center gap-1.5">
+              <span className="text-[12px] font-medium text-[#EAEAEA]">
+                {activeOutcome?.label?.replace('…', '')}:
+              </span>
+              <Input
+                type="number"
+                min={0}
+                max={1440}
+                placeholder="Минуты"
+                aria-label="Затрачено минут"
+                value={customMinutes}
+                onChange={(event) => setCustomMinutes(event.currentTarget.value)}
+                className="w-[88px] max-md:w-[104px] h-[25px] text-[12px]"
+              />
+              <Button size="xs" variant="outline" onClick={() => submitDraft(30)}>30 мин</Button>
+              <Button size="xs" variant="outline" onClick={() => submitDraft(60)}>1 ч</Button>
+              <Button size="xs" variant="outline" onClick={() => submitDraft(120)}>2 ч</Button>
+              <Button size="xs" variant="primary" loading={busy} onClick={() => submitDraft()}>Сохранить</Button>
+              <Button size="xs" variant="ghost" onClick={() => setFeedbackDraft(null)}>✕</Button>
+            </div>
+          )}
+        </CollapseSection>
+
+        <CollapseSection open={editingEstThis}>
+          {editingEstThis && (
+            <div className="mt-2 pt-2 border-t border-dashed border-[#303030] flex flex-wrap items-center gap-1.5">
+              <span className="text-[12px] text-[#929292]">Осталось минут:</span>
+              <Input
+                type="number"
+                min={0}
+                max={10000}
+                placeholder="Минуты"
+                aria-label="Осталось минут"
+                value={estimateInput}
+                onChange={(event) => setEstimateInput(event.currentTarget.value)}
+                className="w-[90px] max-md:w-[104px] h-[25px] text-[12px]"
+              />
+              <Button
+                size="xs"
+                variant="primary"
+                disabled={busy}
+                onClick={() => {
+                  const val = estimateInput.trim() === '' ? null : Math.max(0, Number(estimateInput));
+                  onAdjust?.({ estimate_override: { task_id: taskId, remaining_minutes: val } });
+                  setEstimateDraft(null);
+                }}
+              >
+                Сохранить
+              </Button>
+              <Button size="xs" variant="ghost" onClick={() => setEstimateDraft(null)}>✕</Button>
+            </div>
+          )}
+        </CollapseSection>
+      </>
+    );
   }
 
   return (
-    <div className="flex flex-col gap-3">
-      {!hideConflicts && infeasibleConflicts.length > 0 && (
-        <Notice tone="warning" title="Недостаточно времени до сроков">
-          <div className="flex flex-col gap-1.5 mt-1">
-            {infeasibleConflicts.map((item) => (
-              <div key={item.task_id}>
-                <div className="font-medium text-[#EAEAEA]">{item.reason}</div>
-              </div>
-            ))}
-          </div>
-        </Notice>
-      )}
+    <div className="flex flex-col gap-2">
+      {visiblePeriods.map((period) => {
+        const isCurrent = period.start_date <= todayIso && todayIso <= period.end_date;
+        const dateLabel = formatDateRange(period.start_date, period.end_date);
+        const isRest = period.kind === 'rest' || period.kind === 'free' || period.kind === 'recovery' || period.kind === 'light';
 
-      {!hideConflicts && tightConflicts.length > 0 && !infeasibleConflicts.length && (
-        <Notice tone="warning">
-          <div className="flex flex-col gap-1">
-            {tightConflicts.map((item) => (
-              <div key={item.task_id}>{item.reason}</div>
-            ))}
-          </div>
-        </Notice>
-      )}
-
-      {planChanges.length > 0 && (
-        <div className="border border-[#242424] bg-[#0D0D0D] px-3 py-1.5 text-[12px]">
-          {planChanges.length === 1 ? (
-            <div className="text-[#929292] truncate">
-              <span className="text-[#EAEAEA] font-medium">Изменение: </span>
-              {planChanges[0]}
-            </div>
-          ) : (
-            <div>
-              <button
-                type="button"
-                onClick={() => setChangesOpen(!changesOpen)}
-                aria-expanded={changesOpen}
-                className="inline-flex items-center gap-1.5 text-[#929292] hover:text-[#EAEAEA] cursor-pointer"
-              >
-                {changesOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-                <span>Изменения ({planChanges.length})</span>
-              </button>
-              <CollapseSection open={changesOpen}>
-                <ul className="list-disc pl-4 m-0 mt-1 space-y-0.5 text-[#929292]">
-                  {planChanges.map((change, i) => <li key={i}>{change}</li>)}
-                </ul>
-              </CollapseSection>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Dense vertical period feed */}
-      <div className="border border-[#303030] bg-[#111111] divide-y divide-[#242424]">
-        {visiblePeriods.map((period) => {
-          const load = LOAD_META[period.load_level] || LOAD_META.medium;
-          const isCurrent = period.start_date <= todayIso && todayIso <= period.end_date;
-          const rel = relativeBadge(period);
-          const commitments = (period.days_summary ?? []).flatMap((day) =>
-            (day.commitments ?? []).map((c) => ({ ...c, date: day.date })),
-          );
-          const markers = (period.days_summary ?? []).flatMap((day) =>
-            (day.markers ?? []).map((m) => ({ ...m, date: day.date })),
-          );
-          const accent = period.kind === 'free' ? LOAD_META.free.accent : period.kind !== 'work' ? LOAD_META.light.accent : load.accent;
-          const detailsVisible = Boolean(openDetails[period.id]);
-          const dayHints = (period.day_hints ?? []).filter((hint) => !isLegacyBoilerplate(hint));
-          const restNote = isLegacyBoilerplate(period.rest_note) ? null : period.rest_note;
-          const hasHiddenHints = !isCurrent && Boolean(dayHints.length || restNote);
-          const hasDetails = Boolean(hasHiddenHints || markers.length || commitments.length);
-
+        if (isRest && !period.task_id && !(period.tasks?.length > 0)) {
+          const reasonOpen = Boolean(openReasons[period.id]);
           return (
-            <motion.section
+            <motion.article
               key={period.id}
               layout={reduced ? false : 'position'}
               transition={reduced ? { duration: 0.01 } : LAYOUT_TRANSITION}
-              className="grid grid-cols-1 md:grid-cols-[170px_minmax(0,1fr)] gap-2.5 px-3 py-2.5 border-l-2"
+              className="border border-[#242424] bg-[#0D0D0D] px-3 py-2 flex flex-col gap-1"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2 text-[12px]">
+                <span className="text-[#929292]">{dateLabel}</span>
+                {isCurrent && <Badge variant="outline">Сейчас</Badge>}
+              </div>
+              <div className="text-[13px] text-[#B8B8B8]">{period.goal || period.title}</div>
+              {period.reason && (
+                <div>
+                  <button
+                    type="button"
+                    aria-expanded={reasonOpen}
+                    onClick={() => toggleReason(period.id)}
+                    className="inline-flex items-center gap-1 text-[11px] text-[#787878] hover:text-[#EAEAEA] cursor-pointer"
+                  >
+                    {reasonOpen ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                    <span>Почему так</span>
+                  </button>
+                  <CollapseSection open={reasonOpen}>
+                    <p className="mt-1 text-[12px] text-[#929292] leading-snug m-0">{period.reason}</p>
+                  </CollapseSection>
+                </div>
+              )}
+            </motion.article>
+          );
+        }
+
+        // Новый формат v3: один период привязан к одной задаче period.task_id.
+        if (period.task_id) {
+          const reasonOpen = Boolean(openReasons[period.id]);
+          const hasRisk = Boolean(period.deadline_risk);
+          const isPinned = Boolean(taskPins[String(period.task_id)]);
+          const manualVal = estimateOverrides[String(period.task_id)];
+
+          return (
+            <motion.article
+              key={period.id}
+              layout={reduced ? false : 'position'}
+              transition={reduced ? { duration: 0.01 } : LAYOUT_TRANSITION}
+              className="border border-[#303030] border-l-2 bg-[#111111] px-3 py-2.5 flex flex-col gap-1"
               style={{
-                borderLeftColor: accent,
-                background: isCurrent ? '#141118' : undefined,
+                borderLeftColor: hasRisk ? '#D4A24C' : isCurrent ? '#7F49B4' : '#3A3A3A',
+                background: isCurrent ? '#141118' : '#111111',
               }}
             >
-              {/* Left period date/load rail */}
-              <div className="flex flex-row flex-wrap md:flex-col items-center md:items-start justify-between md:justify-start gap-1.5 min-w-0">
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <span className="text-[13px] font-semibold text-[#EAEAEA]">
-                    {formatDateRange(period.start_date, period.end_date)}
-                  </span>
-                  {rel && <Badge variant={isCurrent ? 'accent' : 'outline'}>{rel}</Badge>}
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-1.5 min-w-0 text-[12px] text-[#929292]">
+                  <span>{dateLabel}</span>
+                  {isCurrent && <Badge variant="accent">Сейчас</Badge>}
+                  {isPinned && <Badge variant="info">Закреплено</Badge>}
+                  {manualVal !== undefined && <Badge variant="info">Ост. {manualVal} м</Badge>}
                 </div>
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <Badge variant={load.variant}>{load.label}</Badge>
-                  {period.kind === 'work' && (
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {period.hours_label && (
                     <span className="text-[12px] font-medium text-[#B8B8B8] tabular-nums">{period.hours_label}</span>
                   )}
+                  {renderTaskMenu(period.task_id, period.id, period.minutes)}
                 </div>
-                {KIND_LABELS[period.kind] && (
-                  <span className="text-[11px] text-[#6EBE86]">{KIND_LABELS[period.kind]}</span>
-                )}
               </div>
 
-              {/* Right period focus & tasks */}
-              <div className="min-w-0 flex flex-col gap-2">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="text-[13px] font-semibold text-[#EAEAEA] min-w-0 break-words">
-                    {period.title}
-                  </div>
-                  <div className="flex flex-wrap items-center gap-1 shrink-0">
-                    {hasDetails && (
-                      <Button
-                        size="xs"
-                        variant="ghost"
-                        aria-expanded={detailsVisible}
-                        onClick={() => toggleDetails(period.id)}
-                      >
-                        {detailsVisible ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-                        <span>{detailsVisible ? 'Свернуть' : (hasHiddenHints ? 'Подробности' : 'Календарь')}</span>
-                      </Button>
-                    )}
-                    {onAdjust && (
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button size="xs" variant="outline" disabled={busy} leftIcon={<SlidersHorizontal className="h-3 w-3" />}>
-                            Режим
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent>
-                          <DropdownMenuLabel>Режим дней</DropdownMenuLabel>
-                          <DropdownMenuLabel className="text-[#EAEAEA]">{formatDateRange(period.start_date, period.end_date)}</DropdownMenuLabel>
-                          <DropdownMenuSeparator />
-                          <DropdownMenuItem
-                            onClick={() => onAdjust({
-                              day_overrides: Object.fromEntries((period.days_summary ?? []).map((d) => [d.date, 'light'])),
-                            })}
-                          >
-                            Облегчённый
-                          </DropdownMenuItem>
-                          <DropdownMenuItem
-                            onClick={() => onAdjust({
-                              day_overrides: Object.fromEntries((period.days_summary ?? []).map((d) => [d.date, 'focused'])),
-                            })}
-                          >
-                            Фокусный
-                          </DropdownMenuItem>
-                          <DropdownMenuItem
-                            onClick={() => onAdjust({
-                              day_overrides: Object.fromEntries((period.days_summary ?? []).map((d) => [d.date, 'free'])),
-                            })}
-                          >
-                            Выходной
-                          </DropdownMenuItem>
-                          <DropdownMenuItem
-                            onClick={() => onAdjust({
-                              day_overrides: Object.fromEntries((period.days_summary ?? []).map((d) => [d.date, 'auto'])),
-                            })}
-                          >
-                            Авто
-                          </DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    )}
-                  </div>
+              <a
+                href={`/?task=${period.task_id}`}
+                className="text-[14px] font-medium text-[#EAEAEA] hover:text-[#CFA9F5] hover:underline break-words w-fit"
+              >
+                {period.title}
+              </a>
+
+              {period.goal && (
+                <p className="text-[12px] text-[#C8C8C8] leading-snug m-0 break-words">{period.goal}</p>
+              )}
+
+              {period.context_hint && (
+                <p className="text-[12px] text-[#B98CE8] leading-snug m-0 break-words">{period.context_hint}</p>
+              )}
+
+              {period.reason && (
+                <div className="pt-0.5">
+                  <button
+                    type="button"
+                    aria-expanded={reasonOpen}
+                    onClick={() => toggleReason(period.id)}
+                    className="inline-flex items-center gap-1 text-[11px] text-[#8A8A8A] hover:text-[#EAEAEA] cursor-pointer"
+                  >
+                    {reasonOpen ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                    <span>Почему так</span>
+                  </button>
+                  <CollapseSection open={reasonOpen}>
+                    <p className="mt-1 text-[12px] text-[#929292] leading-snug m-0 break-words">{period.reason}</p>
+                  </CollapseSection>
                 </div>
+              )}
 
-                {period.tasks?.length > 0 && (
-                  <div className="flex flex-col divide-y divide-[#1E1E1E] border border-[#242424] bg-[#0D0D0D]">
-                    {period.tasks.map((task) => {
-                      const editingThis = feedbackDraft?.taskId === task.task_id && feedbackDraft?.periodId === period.id;
-                      const editingEstThis = estimateDraft?.taskId === task.task_id && estimateDraft?.periodId === period.id;
-                      const dlText = formatDeadline(task.deadline, schedule.timezone);
-                      const isPinned = Boolean(taskPins[String(task.task_id)]);
-                      const manualVal = estimateOverrides[String(task.task_id)];
-                      const activeOutcome = editingThis ? OUTCOMES.find((o) => o.value === feedbackDraft.outcome) : null;
-
-                      return (
-                        <div key={task.task_id} className="px-2.5 py-1.5 flex flex-col gap-1.5">
-                          <div className="flex flex-wrap items-start justify-between gap-2">
-                            <div className="min-w-0 flex-1">
-                              <div className="flex flex-wrap items-center gap-1.5">
-                                <a href={`/?task=${task.task_id}`} className="text-[13px] font-medium text-[#EAEAEA] hover:text-[#CFA9F5] hover:underline">
-                                  {task.title}
-                                </a>
-                                <Badge variant="accent" className="tabular-nums">{task.hours_label}</Badge>
-                                {!task.completes_task && (
-                                  <HintTooltip label="Доля оставшейся работы по задаче в этом периоде">
-                                    <Badge variant="outline" className="tabular-nums cursor-help">
-                                      часть · ~{task.share_percent}%
-                                    </Badge>
-                                  </HintTooltip>
-                                )}
-                                {isPinned && <Badge variant="info">Перенесена</Badge>}
-                                {manualVal !== undefined && <Badge variant="info">Ост. {manualVal}м</Badge>}
-                                {dlText && (
-                                  <span className={`text-[11px] tabular-nums ${task.deadline_policy === 'soft' ? 'text-[#929292]' : 'text-[#D4A24C]'}`}>
-                                    до {dlText}{task.deadline_policy === 'expires' ? ' (строго)' : ''}
-                                  </span>
-                                )}
-                              </div>
-                              {task.goal && (
-                                <HintTooltip label={task.goal}>
-                                  <div className="text-[11px] text-[#929292] mt-0.5 line-clamp-2 sm:line-clamp-1">{task.goal}</div>
-                                </HintTooltip>
-                              )}
-                            </div>
-
-                            {(onFeedback || onAdjust) && (
-                              <div className="flex items-center gap-1 shrink-0 max-sm:w-full max-sm:justify-between max-sm:pt-1">
-                                {onFeedback && (
-                                  <DropdownMenu>
-                                    <DropdownMenuTrigger asChild>
-                                      <Button size="xs" variant="accent-subtle" disabled={busy}>Отметить прогресс</Button>
-                                    </DropdownMenuTrigger>
-                                    <DropdownMenuContent>
-                                      {OUTCOMES.map((item) => (
-                                        <DropdownMenuItem key={item.value} onClick={() => openFeedback(task.task_id, period.id, item.value)}>
-                                          {item.label}
-                                        </DropdownMenuItem>
-                                      ))}
-                                    </DropdownMenuContent>
-                                  </DropdownMenu>
-                                )}
-                                {onAdjust && (
-                                  <DropdownMenu>
-                                    <DropdownMenuTrigger asChild>
-                                      <IconButton size="icon-sm" variant="ghost" aria-label={`Корректировка: ${task.title}`} disabled={busy}>
-                                        <MoreHorizontal className="h-3.5 w-3.5" />
-                                      </IconButton>
-                                    </DropdownMenuTrigger>
-                                    <DropdownMenuContent>
-                                      <DropdownMenuItem onClick={() => onAdjust({ task_pin: { task_id: task.task_id, shift_days: -1 } })}>
-                                        Перенести на день раньше (−1 д)
-                                      </DropdownMenuItem>
-                                      <DropdownMenuItem onClick={() => onAdjust({ task_pin: { task_id: task.task_id, shift_days: 1 } })}>
-                                        Перенести на день позже (+1 д)
-                                      </DropdownMenuItem>
-                                      {isPinned && (
-                                        <DropdownMenuItem onClick={() => onAdjust({ task_pin: { task_id: task.task_id, clear: true } })}>
-                                          Сбросить перенос
-                                        </DropdownMenuItem>
-                                      )}
-                                      <DropdownMenuSeparator />
-                                      <DropdownMenuItem onClick={() => openEstimateEditor(task, period.id, manualVal)}>
-                                        Изменить остаток времени…
-                                      </DropdownMenuItem>
-                                      {manualVal !== undefined && (
-                                        <DropdownMenuItem onClick={() => onAdjust({ estimate_override: { task_id: task.task_id, remaining_minutes: null } })}>
-                                          Сбросить ручной остаток
-                                        </DropdownMenuItem>
-                                      )}
-                                    </DropdownMenuContent>
-                                  </DropdownMenu>
-                                )}
-                              </div>
-                            )}
-                          </div>
-
-                          <CollapseSection open={editingThis}>
-                            {editingThis && (
-                              <div className="flex flex-wrap items-center gap-1.5 border-t border-dashed border-[#303030] pt-1.5">
-                                <span className="text-[12px] font-medium text-[#EAEAEA]">
-                                  {activeOutcome?.label?.replace('…', '')}:
-                                </span>
-                                <span className="text-[12px] text-[#929292]">
-                                  Сколько минут потратили{activeOutcome?.optionalMinutes ? ' (необяз.)' : ''}:
-                                </span>
-                                <Input
-                                  type="number"
-                                  min={0}
-                                  max={1440}
-                                  placeholder={activeOutcome?.optionalMinutes ? 'необяз.' : 'Минуты'}
-                                  value={customMinutes}
-                                  onChange={(event) => setCustomMinutes(event.currentTarget.value)}
-                                  className="w-[92px] max-md:w-[104px] h-[25px] text-[12px]"
-                                />
-                                <Button size="xs" variant="outline" onClick={() => submitDraft(30)}>30 мин</Button>
-                                <Button size="xs" variant="outline" onClick={() => submitDraft(60)}>1 ч</Button>
-                                <Button size="xs" variant="outline" onClick={() => submitDraft(120)}>2 ч</Button>
-                                <Button size="xs" variant="primary" loading={busy} onClick={() => submitDraft()}>Сохранить</Button>
-                                <Button size="xs" variant="ghost" onClick={() => setFeedbackDraft(null)}>✕</Button>
-                              </div>
-                            )}
-                          </CollapseSection>
-
-                          <CollapseSection open={editingEstThis}>
-                            {editingEstThis && (
-                              <div className="flex flex-wrap items-center gap-1.5 border-t border-dashed border-[#303030] pt-1.5">
-                                <span className="text-[12px] text-[#929292]">Осталось минут:</span>
-                                <Input
-                                  type="number"
-                                  min={0}
-                                  max={10000}
-                                  placeholder="Минуты"
-                                  value={estimateInput}
-                                  onChange={(event) => setEstimateInput(event.currentTarget.value)}
-                                  className="w-[90px] max-md:w-[104px] h-[25px] text-[12px]"
-                                />
-                                <Button
-                                  size="xs"
-                                  variant="primary"
-                                  disabled={busy}
-                                  onClick={() => {
-                                    const val = estimateInput.trim() === '' ? null : Math.max(0, Number(estimateInput));
-                                    onAdjust?.({ estimate_override: { task_id: task.task_id, remaining_minutes: val } });
-                                    setEstimateDraft(null);
-                                  }}
-                                >
-                                  Сохранить
-                                </Button>
-                                <Button size="xs" variant="ghost" onClick={() => setEstimateDraft(null)}>✕</Button>
-                              </div>
-                            )}
-                          </CollapseSection>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-
-                {period.risks?.length > 0 && (
-                  <div className="flex flex-col gap-0.5">
-                    {period.risks.map((risk, idx) => (
-                      <div key={idx} className="text-[11px] text-[#D4A24C]">{risk}</div>
-                    ))}
-                  </div>
-                )}
-
-                {isCurrent && (dayHints.length > 0 || restNote) && (
-                  <div className="flex flex-col gap-1 text-[12px]">
-                    {dayHints.map((hint, idx) => (
-                      <div key={idx} className="text-[#B8B8B8]">• {hint}</div>
-                    ))}
-                    {restNote && (
-                      <div className="text-[#6EBE86]">{restNote}</div>
-                    )}
-                  </div>
-                )}
-
-                <CollapseSection open={detailsVisible}>
-                  <div className="border-t border-[#242424] pt-2 flex flex-col gap-1.5 text-[12px]">
-                    {!isCurrent && dayHints.map((hint, idx) => (
-                      <div key={idx} className="text-[#B8B8B8]">• {hint}</div>
-                    ))}
-                    {!isCurrent && restNote && (
-                      <div className="text-[#6EBE86]">{restNote}</div>
-                    )}
-                    {markers.length > 0 && (
-                      <div className="text-[#D4A24C]">
-                        {markers.map((m) => `${formatShortDate(m.date)} — ${m.title}`).join('; ')}
-                      </div>
-                    )}
-                    {commitments.length > 0 && (
-                      <div className="flex flex-col gap-0.5 border-l border-[#303030] pl-2">
-                        <span className="text-[11px] text-[#929292]">
-                          Календарь ({commitments.length}) · {durationLabel(period.days_summary.reduce((s, d) => s + (d.busy_minutes || 0), 0))}
-                        </span>
-                        {commitments.map((c, idx) => (
-                          <div key={`${c.id}-${c.date}-${idx}`} className="text-[11px] text-[#929292] tabular-nums">
-                            {formatShortDate(c.date)} · {c.all_day ? 'Весь день' : `${c.start}–${c.end}`} — {c.title}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </CollapseSection>
-              </div>
-            </motion.section>
+              {renderInlineEditors(period.task_id, period.id)}
+            </motion.article>
           );
-        })}
-      </div>
+        }
 
-      {periods.length > 6 && (
+        // Совместимость со старым форматом v2 (несколько задач в одном периоде).
+        return (
+          <motion.article
+            key={period.id}
+            layout={reduced ? false : 'position'}
+            transition={reduced ? { duration: 0.01 } : LAYOUT_TRANSITION}
+            className="border border-[#303030] border-l-2 bg-[#111111] px-3 py-2.5 flex flex-col gap-2"
+            style={{
+              borderLeftColor: isCurrent ? '#7F49B4' : '#3A3A3A',
+              background: isCurrent ? '#141118' : '#111111',
+            }}
+          >
+            <div className="flex items-center justify-between gap-2 text-[12px] text-[#929292]">
+              <div className="flex items-center gap-1.5">
+                <span>{dateLabel}</span>
+                {isCurrent && <Badge variant="accent">Сейчас</Badge>}
+              </div>
+              {period.hours_label && <span className="tabular-nums text-[#B8B8B8]">{period.hours_label}</span>}
+            </div>
+            <div className="flex flex-col divide-y divide-[#222222]">
+              {(period.tasks ?? []).map((task) => (
+                <div key={task.task_id} className="py-1.5 first:pt-0 last:pb-0">
+                  <div className="flex items-center justify-between gap-2">
+                    <a href={`/?task=${task.task_id}`} className="text-[13px] font-medium text-[#EAEAEA] hover:text-[#CFA9F5] hover:underline min-w-0 break-words">
+                      {task.title}
+                    </a>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {task.hours_label && <span className="text-[12px] text-[#929292] tabular-nums">{task.hours_label}</span>}
+                      {renderTaskMenu(task.task_id, period.id, task.minutes)}
+                    </div>
+                  </div>
+                  {task.goal && <p className="text-[12px] text-[#929292] m-0 mt-0.5 break-words">{task.goal}</p>}
+                  {renderInlineEditors(task.task_id, period.id)}
+                </div>
+              ))}
+            </div>
+          </motion.article>
+        );
+      })}
+
+      {periods.length > 10 && (
         <div>
           <Button size="sm" variant="subtle" onClick={() => setExpanded(!expanded)}>
-            {expanded ? 'Свернуть' : `Все периоды (${periods.length})`}
+            {expanded ? 'Свернуть' : `Показать все (${periods.length})`}
           </Button>
         </div>
       )}

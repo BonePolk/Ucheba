@@ -243,6 +243,7 @@ export default function AgentProgress({
   taskId = 0,
   providers = [],
   active = false,
+  autoOpenOnActive = true,
   defaultOpen,
   hideSummaryWhenIdle = false,
   open,
@@ -268,12 +269,12 @@ export default function AgentProgress({
   };
 
   useEffect(() => {
-    if (active) {
+    if (active && autoOpenOnActive) {
       client.setQueryData(openKey, true);
       if (!isControlled) setInternalOpened(true);
       onOpenChange?.(true);
     }
-  }, [active, client, taskId, providerList]);
+  }, [active, autoOpenOnActive, client, taskId, providerList]);
 
   const runs = entries.filter((entry) => entry.run);
   const agentCounts = new Map();

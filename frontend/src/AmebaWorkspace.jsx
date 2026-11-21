@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   AlertTriangle,
   ArrowRight,
+  CalendarDays,
   ChevronDown,
   ChevronRight,
   MoreHorizontal,
@@ -12,7 +13,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { agentRequest, request } from './api';
-import AgentTimeline, { durationLabel } from './AgentTimeline';
+import AgentTimeline, { durationLabel, formatShortDate } from './AgentTimeline';
 import AgentProgress from './AgentProgress';
 import { Button, IconButton } from '@/components/ui/button';
 import {
@@ -23,21 +24,22 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Textarea } from '@/components/ui/input';
-import { Badge, Notice, PageHeader, SectionHeader, StatusIndicator } from '@/components/ui/surface';
+import { Badge, Notice, PageHeader, StatusIndicator } from '@/components/ui/surface';
 import { HintTooltip } from '@/components/ui/tooltip';
 import { CollapseSection, LiveHorizon } from '@/lib/motion';
 
+const WEEKDAYS_RU = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
+
 function resolvePlanStatus({ rankingData, liveActive, isRunning, rankError, failedRun }) {
-  if (isRunning || liveActive) return { tone: 'active', pulse: true, badge: 'accent', label: 'Расчёт' };
+  if (isRunning || liveActive) return { tone: 'active', pulse: true, badge: 'accent', label: 'Составляет план' };
   if (rankError || failedRun) return { tone: 'danger', pulse: false, badge: 'danger', label: 'Ошибка' };
   if (!rankingData?.has_plan || rankingData?.plan_reset) return { tone: 'idle', pulse: false, badge: 'outline', label: 'Нет плана' };
   const conflicts = rankingData?.schedule?.deadline_conflicts ?? [];
-  const unfitted = (rankingData?.schedule?.remaining ?? []).some((r) => r.remaining_work_minutes > 0);
-  if (!rankingData?.schedule?.feasible || conflicts.length > 0 || unfitted) {
-    return { tone: 'warning', pulse: false, badge: 'warning', label: rankingData.needs_refresh ? 'Устарел · риски' : 'Есть риски' };
+  if (!rankingData?.schedule?.feasible || conflicts.length > 0) {
+    return { tone: 'warning', pulse: false, badge: 'warning', label: rankingData.needs_refresh ? 'Устарел · риск' : 'Есть риск' };
   }
   if (rankingData?.needs_refresh) return { tone: 'warning', pulse: false, badge: 'warning', label: 'Устарел' };
-  return { tone: 'success', pulse: false, badge: 'success', label: 'Готов' };
+  return { tone: 'success', pulse: false, badge: 'success', label: 'Актуален' };
 }
 
 export function AmebaSummaryBar({ ranking, queue, rank, livePlan, onRefresh }) {
@@ -54,60 +56,42 @@ export function AmebaSummaryBar({ ranking, queue, rank, livePlan, onRefresh }) {
     rankError: rank?.error,
     failedRun: false,
   });
-  const reservePct = activeSchedule?.reserve_ratio != null ? Math.round(activeSchedule.reserve_ratio * 100) : null;
-  const focusPeriod = periods.find((p) => p.kind === 'work') ?? periods[0];
-  const topTaskId = data?.task_ids?.[0];
-  const topTaskReason = data?.reasons?.find((r) => r.task_id === topTaskId);
+  const focusPeriod = periods.find((p) => (p.kind === 'work' || p.tasks?.length > 0)) ?? periods[0];
   const horizonTone = status.badge === 'warning' ? 'warning' : status.badge === 'danger' ? 'danger' : 'accent';
-  const actionLabel = isRunning ? 'Считает…' : !data?.has_plan ? 'Построить план' : 'Пересчитать';
+  const actionLabel = isRunning ? 'Думает…' : !data?.has_plan ? 'Построить план' : 'Обновить';
   const actionVariant = !data?.has_plan || data?.needs_refresh ? 'primary' : 'default';
 
   return (
     <div className="relative overflow-hidden border border-[#303030] bg-[#111111] px-3 py-2 flex flex-wrap items-center justify-between gap-2">
       <LiveHorizon active={isRunning || liveActive} tone={horizonTone} />
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 min-w-0 text-[12px]">
+      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 min-w-0 text-[12px]">
         <div className="flex items-center gap-2 shrink-0">
           <StatusIndicator tone={status.tone} pulse={status.pulse} />
           <span className="font-semibold text-[#EAEAEA]">Ameba</span>
-          <Badge variant={status.badge}>{status.label}</Badge>
+          {(isRunning || status.badge !== 'success') && (
+            <Badge variant={status.badge}>{status.label}</Badge>
+          )}
         </div>
 
-        {activeSchedule?.hours_label && (
-          <strong className="font-medium text-[#EAEAEA] tabular-nums">{activeSchedule.hours_label}</strong>
-        )}
-
-        {reservePct != null && (
-          <span className="text-[#929292] tabular-nums">резерв {reservePct}%</span>
-        )}
-
-        {data?.pending_count > 0 && (
-          <HintTooltip label="Задачи, для которых Monocle ещё собирает или уточняет контекст">
-            <span className="text-[#D4A24C] tabular-nums cursor-help">Ждут Monocle: {data.pending_count}</span>
-          </HintTooltip>
+        {focusPeriod && (
+          <span className="text-[#B8B8B8] truncate max-w-[300px]">{focusPeriod.title}</span>
         )}
 
         {conflicts.length > 0 && (
           <HintTooltip label={conflicts.map((c) => c.reason).join('\n')}>
             <Badge variant="warning" className="cursor-help">
               <AlertTriangle className="h-3 w-3" />
-              Риски: {conflicts.length}
+              Есть риск ({conflicts.length})
             </Badge>
           </HintTooltip>
         )}
 
-        {focusPeriod ? (
-          <span className="text-[#B8B8B8] truncate max-w-[260px]">{focusPeriod.title}</span>
-        ) : data?.explanation ? (
-          <span className="text-[#929292] truncate max-w-[260px]">{data.explanation}</span>
-        ) : topTaskReason ? (
-          <span className="text-[#929292] truncate max-w-[200px]">{topTaskReason.time_estimate}</span>
-        ) : null}
+        {data?.pending_count > 0 && (
+          <span className="text-[#929292] tabular-nums">· ждут Monocle: {data.pending_count}</span>
+        )}
       </div>
 
       <div className="flex items-center gap-1.5 shrink-0 max-sm:w-full">
-        {rank?.data?.unchanged && (
-          <span className="text-[11px] text-[#929292] hidden xl:inline">План актуален</span>
-        )}
         <Button
           size="sm"
           variant={actionVariant}
@@ -133,10 +117,10 @@ export function AmebaSummaryBar({ ranking, queue, rank, livePlan, onRefresh }) {
 export default function AmebaWorkspace({ features = {}, embedded = false }) {
   const queryClient = useQueryClient();
   const [logOpen, setLogOpen] = useState(false);
-  const [mobileRisksOpen, setMobileRisksOpen] = useState(false);
+  const [calendarOpen, setCalendarOpen] = useState(false);
+  const [risksOpen, setRisksOpen] = useState(false);
   const [wishText, setWishText] = useState('');
-  const [submittedWish, setSubmittedWish] = useState('');
-  const [wishSuccess, setWishSuccess] = useState(false);
+  const [wishResult, setWishResult] = useState(null);
 
   const ranking = useQuery({
     queryKey: ['ameba-ranking'],
@@ -174,30 +158,22 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
     },
     onMutate: (feedbackText) => {
       if (typeof feedbackText === 'string' && feedbackText.trim()) {
-        setSubmittedWish(feedbackText.trim());
         setWishText('');
-        setWishSuccess(false);
+        setWishResult(null);
       }
     },
     onSuccess: async (res) => {
-      setSubmittedWish('');
-      if (res?.consumed_feedback) setWishSuccess(true);
+      if (res?.consumed_feedback) {
+        setWishResult({
+          memorySaved: Number(res.memory_saved_count || 0),
+          progressUpdated: Number(res.progress_updated_count || 0),
+        });
+      }
       await refresh();
     },
     onError: async (_err, feedbackText) => {
-      setSubmittedWish('');
       if (typeof feedbackText === 'string' && feedbackText.trim()) {
-        try {
-          const latest = await queryClient.fetchQuery({
-            queryKey: ['ameba-ranking'],
-            queryFn: () => request('/integrations/ameba/ranking'),
-          });
-          if (!latest?.feedback) {
-            setWishText((prev) => prev || feedbackText.trim());
-          }
-        } catch {
-          setWishText((prev) => prev || feedbackText.trim());
-        }
+        setWishText((prev) => prev || feedbackText.trim());
       }
     },
   });
@@ -206,8 +182,7 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
     mutationFn: () => request('/integrations/ameba/plan', { method: 'DELETE' }),
     onSuccess: async () => {
       rank.reset();
-      setSubmittedWish('');
-      setWishSuccess(false);
+      setWishResult(null);
       queryClient.setQueryData(['ameba-live-plan'], null);
       await refresh();
     },
@@ -232,12 +207,12 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
   const data = ranking.data;
   const liveActive = Boolean(livePlan.data?.running || (data?.has_plan && livePlan.data?.started_at && livePlan.data.started_at > (data?.generated_at ?? '')));
   const activeSchedule = (liveActive ? livePlan.data?.schedule : null) ?? (data?.plan_reset ? null : data?.schedule);
-  const activeTimeline = (liveActive ? livePlan.data?.timeline : null) ?? data?.timeline ?? [];
   const manual = data?.manual_adjustments ?? {};
   const hasManualAdjustments = Boolean(
     Object.keys(manual.day_overrides ?? {}).length
     || Object.keys(manual.task_pins ?? {}).length
-    || Object.keys(manual.estimate_overrides ?? {}).length,
+    || Object.keys(manual.estimate_overrides ?? {}).length
+    || Object.keys(manual.task_notes ?? {}).length,
   );
   const isRunning = Boolean(queue.data?.ameba_running || rank.isPending);
   const status = resolvePlanStatus({
@@ -248,36 +223,33 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
     failedRun: ranking.error,
   });
 
-  const unfitted = (activeSchedule?.remaining ?? []).filter((r) => r.remaining_work_minutes > 0);
-  const titleMap = new Map(activeTimeline.map((item) => [item.id ?? item.task_id, item.title]));
   const conflicts = activeSchedule?.deadline_conflicts ?? [];
-  const hasSidebar = unfitted.length > 0 || conflicts.length > 0;
+  const unfitted = (activeSchedule?.remaining ?? []).filter((r) => r.remaining_work_minutes > 0);
+  const conflictIds = new Set(conflicts.map((c) => c.task_id));
+  const extraUnfitted = unfitted.filter((u) => !conflictIds.has(u.task_id));
+  const hasRisks = conflicts.length > 0 || extraUnfitted.length > 0;
+  const timelineTasks = (liveActive ? livePlan.data?.timeline : null) ?? data?.timeline ?? [];
+  const titleMap = new Map(timelineTasks.map((item) => [item.id ?? item.task_id, item.title]));
   const error = ranking.error || rank.error || clearPlan.error || feedback.error || adjustPlan.error;
-  const reservePct = activeSchedule?.reserve_ratio != null ? Math.round(activeSchedule.reserve_ratio * 100) : 22;
-  const actionSize = embedded ? 'sm' : 'default';
+  const previewDays = (activeSchedule?.daily_allocations ?? data?.calendar_schedule?.days_summary ?? []).slice(0, 7);
 
   const mainButtonLabel = isRunning
-    ? 'Расчёт плана…'
+    ? 'Составляет план…'
     : !data?.has_plan
       ? 'Построить план'
-      : data?.needs_refresh
-        ? 'Пересчитать план'
-        : 'Пересчитать';
+      : 'Обновить';
   const mainButtonVariant = !data?.has_plan || data?.needs_refresh ? 'primary' : 'default';
-
-  const activeWishNotice = isRunning ? (submittedWish || data?.feedback || '') : '';
-  const pendingWish = !isRunning ? (data?.feedback || '') : '';
 
   function submitWish() {
     const trimmed = wishText.trim();
-    if (!trimmed || clearPlan.isPending || queue.data?.browser_busy) return;
+    if (!trimmed || isRunning || clearPlan.isPending || queue.data?.browser_busy) return;
     rank.mutate(trimmed);
   }
 
   const actionsBar = (
     <>
       <Button
-        size={actionSize}
+        size={embedded ? 'sm' : 'default'}
         variant={mainButtonVariant}
         leftIcon={<RefreshCw className={`h-3.5 w-3.5 ${isRunning ? 'animate-spin' : ''}`} />}
         loading={rank.isPending && !queue.data?.ameba_running}
@@ -288,19 +260,25 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
       </Button>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
-          <IconButton size={embedded ? 'icon-sm' : 'icon'} variant="default" aria-label="Дополнительные действия">
+          <IconButton size={embedded ? 'icon-sm' : 'icon'} variant="default" aria-label="Дополнительно">
             <MoreHorizontal className="h-3.5 w-3.5" />
           </IconButton>
         </DropdownMenuTrigger>
-        <DropdownMenuContent>
+        <DropdownMenuContent align="end">
           <DropdownMenuItem onClick={() => setLogOpen(!logOpen)}>
             <Terminal className="h-3.5 w-3.5" />
-            {logOpen ? 'Скрыть журнал Ameba' : 'Журнал Ameba'}
+            {logOpen ? 'Скрыть журнал' : 'Журнал работы'}
           </DropdownMenuItem>
+          {previewDays.length > 0 && (
+            <DropdownMenuItem onClick={() => setCalendarOpen(!calendarOpen)}>
+              <CalendarDays className="h-3.5 w-3.5" />
+              {calendarOpen ? 'Скрыть занятость недели' : 'Занятость недели'}
+            </DropdownMenuItem>
+          )}
           {hasManualAdjustments && (
             <DropdownMenuItem disabled={isRunning} onClick={() => adjustPlan.mutate({ reset: true })}>
               <RotateCcw className="h-3.5 w-3.5" />
-              Сбросить ручные правки
+              Сбросить корректировки
             </DropdownMenuItem>
           )}
           <DropdownMenuSeparator />
@@ -308,7 +286,7 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
             danger
             disabled={!data?.has_plan || isRunning || clearPlan.isPending}
             onClick={() => {
-              if (window.confirm('Удалить сохранённый план Ameba и ручные корректировки?')) clearPlan.mutate();
+              if (window.confirm('Удалить сохранённый план Ameba?')) clearPlan.mutate();
             }}
           >
             <Trash2 className="h-3.5 w-3.5" />
@@ -320,11 +298,11 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
   );
 
   return (
-    <div className="flex flex-col gap-3">
+    <div className="flex flex-col gap-3 max-w-[780px]">
       {!embedded ? (
         <PageHeader
-          title="План · Ameba"
-          badge={<Badge variant={status.badge}>{status.label}</Badge>}
+          title="Ameba · План"
+          badge={(isRunning || status.badge !== 'success') ? <Badge variant={status.badge}>{status.label}</Badge> : undefined}
           actions={actionsBar}
         />
       ) : (
@@ -332,8 +310,7 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
           <LiveHorizon active={isRunning || liveActive} tone={status.badge === 'warning' ? 'warning' : status.badge === 'danger' ? 'danger' : 'accent'} />
           <div className="flex items-center gap-2">
             <StatusIndicator tone={status.tone} pulse={status.pulse} />
-            <span className="text-[13px] font-semibold text-[#EAEAEA]">Ameba</span>
-            <Badge variant={status.badge}>{status.label}</Badge>
+            <span className="text-[13px] font-semibold text-[#EAEAEA]">Ameba · План</span>
           </div>
           <div className="flex flex-wrap items-center gap-1.5">{actionsBar}</div>
         </div>
@@ -344,7 +321,7 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
           tone="warning"
           action={(
             <Button size="xs" variant="outline" asChild>
-              <a href="/profile?tab=agents">Открыть настройки агентов →</a>
+              <a href="/profile?tab=agents">Настройки агентов →</a>
             </Button>
           )}
         >
@@ -354,20 +331,157 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
 
       {Boolean(queue.data?.agents_busy ?? queue.data?.browser_busy) && !isRunning && (
         <Notice tone="info">
-          Сейчас работают другие агенты — Ameba запустится после их завершения.
+          Сейчас работают другие агенты — Ameba запустится сразу после их завершения.
         </Notice>
       )}
 
-      {/* One-time wish box */}
-      <section className="border border-[#303030] bg-[#111111] p-3 flex flex-col gap-2">
-        <div className="text-[13px] font-semibold text-[#EAEAEA]">Разовое пожелание к плану</div>
+      <AgentProgress
+        providers={['ameba']}
+        active={rank.isPending}
+        autoOpenOnActive={false}
+        defaultOpen={false}
+        hideSummaryWhenIdle
+        open={logOpen}
+        onOpenChange={setLogOpen}
+      />
 
+      {error && <Notice tone="error">{error.message}</Notice>}
+
+      {rank.data?.unchanged && (
+        <Notice tone="info">
+          {rank.data.status === 'running' ? 'Ameba уже работает с этими данными.' : 'Изменений нет — план уже актуален.'}
+        </Notice>
+      )}
+
+      {wishResult && (
+        <Notice
+          tone="success"
+          onClose={() => setWishResult(null)}
+          action={wishResult.memorySaved > 0 ? (
+            <Button size="xs" variant="outline" asChild>
+              <a href="/profile?tab=memory">Память →</a>
+            </Button>
+          ) : undefined}
+        >
+          {wishResult.memorySaved > 0
+            ? 'План обновлён; устойчивое предпочтение сохранено в память.'
+            : wishResult.progressUpdated > 0
+              ? 'План обновлён с учётом выполненного времени.'
+              : 'План обновлён с учётом пожелания.'}
+        </Notice>
+      )}
+
+      {data?.feedback && !isRunning && (
+        <Notice
+          tone="warning"
+          action={(
+            <div className="flex items-center gap-1.5">
+              <Button size="xs" variant="primary" onClick={() => rank.mutate()}>Применить</Button>
+              <Button size="xs" variant="ghost" onClick={() => adjustPlan.mutate({ clear_feedback: true })}>Сбросить</Button>
+            </div>
+          )}
+        >
+          Ожидает применения: «{data.feedback}»
+        </Notice>
+      )}
+
+      <CollapseSection open={calendarOpen}>
+        {previewDays.length > 0 && (
+          <div className="border border-[#262626] bg-[#0D0D0D] p-2.5 grid grid-cols-2 sm:grid-cols-4 md:grid-cols-7 gap-1.5">
+            {previewDays.map((day) => {
+              const dt = new Date(`${day.date}T12:00:00`);
+              return (
+                <div key={day.date} className="border border-[#222222] bg-[#111111] px-2 py-1.5 flex flex-col gap-0.5">
+                  <div className="text-[11px] font-medium text-[#EAEAEA]">
+                    {WEEKDAYS_RU[dt.getDay()]} · {formatShortDate(day.date)}
+                  </div>
+                  <div className="text-[11px] text-[#929292] tabular-nums">
+                    {day.busy_minutes > 0 ? `Занято ${durationLabel(day.busy_minutes)}` : 'Свободно'}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </CollapseSection>
+
+      {data?.has_plan && !data?.plan_reset && (data.explanation || data.pending_count > 0) && (
+        <div className="text-[12px] text-[#B8B8B8] leading-snug px-0.5 flex flex-col gap-1">
+          {data.explanation && <p className="m-0 break-words">{data.explanation}</p>}
+          {data.pending_count > 0 && (
+            <span className="text-[11px] text-[#929292]">
+              Ещё {data.pending_count} задач ожидают разбора Monocle.
+            </span>
+          )}
+        </div>
+      )}
+
+      {hasRisks && (
+        <section className="border border-[#4A391D] border-l-2 border-l-[#D4A24C] bg-[#1B160D] px-3 py-2 flex flex-col gap-1.5">
+          <button
+            type="button"
+            aria-expanded={risksOpen}
+            onClick={() => setRisksOpen((prev) => !prev)}
+            className="w-full flex items-center justify-between gap-2 text-left text-[12px] text-[#EAEAEA] cursor-pointer"
+          >
+            <span className="inline-flex items-center gap-2 min-w-0 font-medium">
+              <AlertTriangle className="h-3.5 w-3.5 text-[#D4A24C] shrink-0" aria-hidden="true" />
+              <span className="truncate">
+                {conflicts.length > 0
+                  ? `${conflicts[0].title}: есть риск не успеть${conflicts.length + extraUnfitted.length > 1 ? ` (+ ещё ${conflicts.length + extraUnfitted.length - 1})` : ''}`
+                  : `Часть задач не поместилась в план (${extraUnfitted.length})`}
+              </span>
+            </span>
+            {risksOpen ? <ChevronDown className="h-4 w-4 text-[#929292] shrink-0" /> : <ChevronRight className="h-4 w-4 text-[#929292] shrink-0" />}
+          </button>
+
+          <CollapseSection open={risksOpen}>
+            <div className="pt-1 border-t border-[#4A391D]/60 flex flex-col gap-2 text-[12px]">
+              {conflicts.map((c) => (
+                <div key={c.task_id} className="flex flex-col gap-0.5">
+                  <a href={`/?task=${c.task_id}`} className="font-medium text-[#EAEAEA] hover:underline w-fit">
+                    {c.title || titleMap.get(c.task_id) || `Задача #${c.task_id}`}
+                  </a>
+                  <span className="text-[#DCDCDC]">{c.reason}</span>
+                </div>
+              ))}
+              {extraUnfitted.map((item) => (
+                <div key={item.task_id} className="flex items-center justify-between gap-2">
+                  <a href={`/?task=${item.task_id}`} className="text-[#EAEAEA] hover:underline truncate">
+                    {titleMap.get(item.task_id) ?? `Задача #${item.task_id}`}
+                  </a>
+                  <span className="text-[#D4A24C] tabular-nums shrink-0">
+                    ост. {durationLabel(item.remaining_work_minutes)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </CollapseSection>
+        </section>
+      )}
+
+      <AgentTimeline
+        schedule={activeSchedule}
+        calendarOnly={!activeSchedule}
+        finished={!isRunning && !livePlan.data?.running}
+        busy={feedback.isPending || adjustPlan.isPending || isRunning}
+        onFeedback={(payload) => feedback.mutate(payload)}
+        onAdjust={(payload) => adjustPlan.mutate(payload)}
+        taskPins={manual.task_pins ?? {}}
+        estimateOverrides={manual.estimate_overrides ?? {}}
+        onRefresh={() => rank.mutate()}
+      />
+
+      <section className="border border-[#303030] bg-[#111111] p-3 flex flex-col gap-2">
+        <label htmlFor="ameba-wish-input" className="text-[12px] font-medium text-[#EAEAEA]">
+          Что изменить в плане?
+        </label>
         <div className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-end">
           <Textarea
+            id="ameba-wish-input"
             rows={2}
             maxLength={4000}
-            aria-label="Разовое пожелание к плану"
-            placeholder="Например: пятницу сделай облегчённой, сложные задачи ставь до 18:00"
+            placeholder="Например: освободи пятницу, переезд растяни на неделю, уже сделал половину лабораторной"
             value={wishText}
             onChange={(event) => setWishText(event.currentTarget.value)}
             onKeyDown={(event) => {
@@ -381,217 +495,14 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
           <Button
             size="default"
             variant="primary"
-            disabled={!wishText.trim() || clearPlan.isPending || queue.data?.browser_busy}
+            disabled={!wishText.trim() || isRunning || clearPlan.isPending || queue.data?.browser_busy}
             onClick={submitWish}
             className="shrink-0 max-sm:w-full"
           >
-            Учесть в плане
+            Применить
           </Button>
         </div>
-
-        {activeWishNotice && (
-          <div className="flex items-center gap-2 border-t border-[#222222] pt-2 text-[12px] text-[#DFC4F8]">
-            <StatusIndicator tone="active" pulse />
-            <span className="break-words">Ameba учитывает пожелание и сохраняет правила в память: «{activeWishNotice}»</span>
-          </div>
-        )}
-
-        {pendingWish && (
-          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[#222222] pt-2 text-[12px]">
-            <span className="text-[#D4A24C] break-words">Ожидает применения: «{pendingWish}»</span>
-            <div className="flex items-center gap-1.5 shrink-0">
-              <Button
-                size="xs"
-                variant="primary"
-                disabled={clearPlan.isPending || queue.data?.browser_busy}
-                onClick={() => rank.mutate()}
-              >
-                Запустить расчёт
-              </Button>
-              <Button
-                size="xs"
-                variant="ghost"
-                disabled={adjustPlan.isPending}
-                onClick={() => adjustPlan.mutate({ clear_feedback: true })}
-              >
-                Отменить
-              </Button>
-            </div>
-          </div>
-        )}
       </section>
-
-      <AgentProgress
-        providers={['ameba']}
-        active={rank.isPending}
-        defaultOpen={false}
-        hideSummaryWhenIdle
-        open={logOpen}
-        onOpenChange={setLogOpen}
-      />
-
-      {wishSuccess && (
-        <Notice
-          tone="success"
-          onClose={() => setWishSuccess(false)}
-          action={(
-            <Button size="xs" variant="outline" asChild>
-              <a href="/profile?tab=memory">Проверить память →</a>
-            </Button>
-          )}
-        >
-          Ameba пересчитала план с учётом пожелания и обновила память.
-        </Notice>
-      )}
-
-      {rank.data?.unchanged && (
-        <Notice tone="info">
-          {rank.data.status === 'running' ? 'Ameba уже работает с этими данными.' : 'Данные не изменились — план уже актуален.'}
-        </Notice>
-      )}
-      {error && <Notice tone="error">{error.message}</Notice>}
-
-      {/* Open Plan Summary Card */}
-      {data?.has_plan && !data?.plan_reset && (
-        <section className="border border-[#303030] bg-[#111111] px-3.5 py-2.5 flex flex-col gap-1.5 text-[12px]">
-          {data.explanation && (
-            <p className="text-[#EAEAEA] leading-snug m-0 whitespace-pre-wrap break-words">{data.explanation}</p>
-          )}
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[#929292] tabular-nums">
-            {activeSchedule?.hours_label && (
-              <span>Объём работ: <strong className="text-[#EAEAEA] font-medium">{activeSchedule.hours_label}</strong></span>
-            )}
-            <span>
-              Задач в плане: <strong className="text-[#EAEAEA] font-medium">{data.ranked_count ?? 0}</strong>
-              {data.pending_count > 0 && (
-                <span className="text-[#D4A24C]"> (ещё {data.pending_count} ждут разбора Monocle)</span>
-              )}
-            </span>
-            <span>Защищённый резерв: <strong className="text-[#EAEAEA] font-medium">{reservePct}%</strong></span>
-            {unfitted.length > 0 && (
-              <span className="text-[#D4A24C]">Не поместилось: {unfitted.length}</span>
-            )}
-            {conflicts.length > 0 && (
-              <span className="text-[#D4A24C]">Конфликтов сроков: {conflicts.length}</span>
-            )}
-          </div>
-          {(activeSchedule?.adaptation_summary || data?.observations_count > 0) && (
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-[#7D7D7D]">
-              {activeSchedule?.adaptation_summary && <span>{activeSchedule.adaptation_summary}</span>}
-              {data.observations_count > 0 && (
-                <span className="tabular-nums">
-                  {activeSchedule?.adaptation_summary ? '· ' : ''}Откликов: {data.observations_count}
-                </span>
-              )}
-            </div>
-          )}
-          {hasManualAdjustments && (
-            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[#222222] pt-1.5 mt-0.5">
-              <span className="text-[11px] text-[#6FA3CC]">Есть ручные правки.</span>
-              <Button
-                size="xs"
-                variant="outline"
-                leftIcon={<RotateCcw className="h-3 w-3" />}
-                disabled={isRunning || adjustPlan.isPending}
-                onClick={() => adjustPlan.mutate({ reset: true })}
-              >
-                Сбросить ручные правки
-              </Button>
-            </div>
-          )}
-        </section>
-      )}
-
-      {/* Tabs + Conditional Risks Sidebar */}
-      {(() => {
-        const risksContent = hasSidebar ? (
-          <>
-            {unfitted.length > 0 && (
-              <div className="border border-[#303030] bg-[#111111] p-3 flex flex-col gap-2">
-                <SectionHeader title="Не поместилось" meta={`${unfitted.length}`} />
-                <div className="flex flex-col divide-y divide-[#1E1E1E]">
-                  {unfitted.map((item) => (
-                    <div key={item.task_id} className="py-1.5 flex items-center justify-between gap-2 text-[12px]">
-                      <a href={`/?task=${item.task_id}`} className="truncate hover:underline text-[#EAEAEA]">
-                        {titleMap.get(item.task_id) ?? `Задача #${item.task_id}`}
-                      </a>
-                      <Badge variant="warning" className="tabular-nums shrink-0">
-                        {durationLabel(item.remaining_work_minutes)}
-                      </Badge>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {conflicts.length > 0 && (
-              <div className="border border-[#303030] bg-[#111111] p-3 flex flex-col gap-2">
-                <SectionHeader title="Риски дедлайнов" meta={`${conflicts.length}`} />
-                <div className="flex flex-col gap-2">
-                  {conflicts.map((c) => (
-                    <div key={c.task_id} className="border-l-2 border-[#D4A24C] pl-2 text-[12px]">
-                      <div className="font-medium text-[#EAEAEA]">{c.reason}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </>
-        ) : null;
-
-        const riskParts = [
-          unfitted.length > 0 ? `Не поместилось: ${unfitted.length}` : null,
-          conflicts.length > 0 ? `Риски сроков: ${conflicts.length}` : null,
-        ].filter(Boolean);
-
-        return (
-          <div className={hasSidebar ? 'grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_300px] gap-4 items-start' : 'grid grid-cols-1'}>
-            {hasSidebar && (
-              <div className="xl:hidden flex flex-col gap-2">
-                <button
-                  type="button"
-                  aria-expanded={mobileRisksOpen}
-                  onClick={() => setMobileRisksOpen((prev) => !prev)}
-                  className="w-full border border-[#4A391D] border-l-2 border-l-[#D4A24C] bg-[#1B160D] px-3 py-2 flex items-center justify-between gap-2 text-left text-[12px] text-[#EAEAEA] cursor-pointer"
-                >
-                  <span className="inline-flex items-center gap-2 min-w-0 font-medium">
-                    <AlertTriangle className="h-3.5 w-3.5 text-[#D4A24C] shrink-0" aria-hidden="true" />
-                    <span className="truncate">{riskParts.join(' · ')}</span>
-                  </span>
-                  {mobileRisksOpen ? <ChevronDown className="h-4 w-4 text-[#929292] shrink-0" /> : <ChevronRight className="h-4 w-4 text-[#929292] shrink-0" />}
-                </button>
-                <CollapseSection open={mobileRisksOpen}>
-                  <div className="flex flex-col gap-3">
-                    {risksContent}
-                  </div>
-                </CollapseSection>
-              </div>
-            )}
-
-            <div className="min-w-0">
-              <AgentTimeline
-                tasks={activeTimeline}
-                schedule={activeSchedule ?? data?.calendar_schedule}
-                calendarOnly={!activeSchedule}
-                finished={!livePlan.data?.running && !queue.data?.ameba_running}
-                busy={feedback.isPending || adjustPlan.isPending || rank.isPending}
-                onFeedback={(payload) => feedback.mutate(payload)}
-                onAdjust={(payload) => adjustPlan.mutate(payload)}
-                taskPins={manual.task_pins ?? {}}
-                estimateOverrides={manual.estimate_overrides ?? {}}
-                onRefresh={() => rank.mutate()}
-                hideConflicts={hasSidebar}
-              />
-            </div>
-
-            {hasSidebar && (
-              <aside className="hidden xl:flex flex-col gap-3">
-                {risksContent}
-              </aside>
-            )}
-          </div>
-        );
-      })()}
     </div>
   );
 }

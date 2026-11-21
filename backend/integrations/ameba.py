@@ -2,7 +2,6 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 import json
 import logging
-from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
@@ -43,7 +42,7 @@ def _save_setting(session: Session, name: str, data: dict) -> None:
 
 
 def read_adjustments(session: Session | None = None) -> dict:
-    default = {'text': '', 'day_overrides': {}, 'task_pins': {}, 'estimate_overrides': {}}
+    default = {'text': '', 'day_overrides': {}, 'task_pins': {}, 'estimate_overrides': {}, 'task_notes': {}}
     if session is not None:
         raw = _load_setting(session, 'ameba_feedback', default)
     else:
@@ -54,6 +53,7 @@ def read_adjustments(session: Session | None = None) -> dict:
         'day_overrides': dict(raw.get('day_overrides') or {}),
         'task_pins': dict(raw.get('task_pins') or {}),
         'estimate_overrides': dict(raw.get('estimate_overrides') or {}),
+        'task_notes': dict(raw.get('task_notes') or {}),
     }
 
 
@@ -63,12 +63,13 @@ def save_adjustments(data: dict, session: Session | None = None) -> dict:
         'day_overrides': {k: v for k, v in (data.get('day_overrides') or {}).items() if v in ('normal', 'light', 'free', 'focused')},
         'task_pins': dict(data.get('task_pins') or {}),
         'estimate_overrides': {str(k): max(0, int(v)) for k, v in (data.get('estimate_overrides') or {}).items() if v is not None},
+        'task_notes': {str(k): str(v).strip()[:400] for k, v in (data.get('task_notes') or {}).items() if str(v or '').strip()},
     }
     if session is not None:
         _save_setting(session, 'ameba_feedback', clean)
     else:
         with Session(get_engine()) as local:
-            _save_setting(local, 'ameba_feedback', clean)
+            _save_setting(session, 'ameba_feedback', clean)
             local.commit()
     return clean
 
@@ -148,8 +149,9 @@ def record_observation(
         for p in schedule.get('periods', []):
             if p.get('id') == period_id:
                 t_item = next((t for t in p.get('tasks', []) if t.get('task_id') == task.id), None)
-                if t_item and outcome in ('partial', 'missed', 'too_hard') and t_item.get('minutes'):
-                    planned_minutes = int(t_item['minutes'])
+                planned_val = t_item.get('minutes') if t_item else (p.get('minutes') if p.get('task_id') == task.id else None)
+                if planned_val and outcome in ('partial', 'missed', 'too_hard'):
+                    planned_minutes = int(planned_val)
                 if p.get('start_date'):
                     target_date = datetime.strptime(p['start_date'], '%Y-%m-%d').date()
                 break
@@ -185,12 +187,14 @@ def record_task_completion(session: Session, task: Task) -> None:
 def _collect_task_state(session):
     tasks = session.exec(select(Task).where(Task.archived == False, Task.status != 'done').order_by(Task.id)).all()
     subtasks_map = subtasks_service.list_for_tasks(session, [task.id for task in tasks])
+    task_notes = read_adjustments(session).get('task_notes', {})
     ready, waiting, state = [], [], []
     for task in tasks:
         context = session.get(TaskContext, task.id)
         usage = json.loads(context.usage) if context else {}
         valid = context_status(task, context) == 'ready'
         task_subs = subtasks_service.serialize_for_agent(subtasks_map.get(task.id, []))
+        task_note = task_notes.get(str(task.id), '')
         state.append({
             'task': snapshot(task),
             'id': task.id,
@@ -202,6 +206,7 @@ def _collect_task_state(session):
             } if context else None,
             'ready': valid,
             'completed_work_minutes': task.completed_work_minutes,
+            'task_note': task_note,
             'subtasks': [
                 {'title': s['title'], 'done': s['done'], 'estimated_minutes': s['estimated_minutes']}
                 for s in task_subs
@@ -209,8 +214,10 @@ def _collect_task_state(session):
         })
         if valid:
             ready.append({
-                'id': task.id, 'title': task.title, 'description': task.description or '',
+                'id': task.id, 'title': task['title'] if isinstance(task, dict) else task.title,
+                'description': task.description or '',
                 'category': task.category, 'subject': context.subject, 'owner_notes': context.owner_notes,
+                'task_note': task_note,
                 'sources': usage.get('sources', []),
                 'full_context': usage['full_markdown'],
                 'time_estimate': usage.get('time_estimate'),
@@ -235,7 +242,7 @@ def _build_signature(session, state, include_ameba_facts: bool = True) -> str:
     provider_base = read_settings('ai_provider', apply_feature=False)[0].get('base_url')
     allowed_agents = ('Владелец', 'user', 'Ameba') if include_ameba_facts else ('Владелец', 'user')
     return json.dumps({
-        'version': 42,
+        'version': 43,
         'tasks': state,
         'calendar': {'events': sorted(calendar['events'], key=lambda event: event['id']), 'timezone': calendar['timezone']},
         'facts': sorted(({'key': fact['key'], 'text': fact['text']} for fact in read_facts() if fact['agent'] in allowed_agents), key=lambda fact: fact['key']),
@@ -324,7 +331,7 @@ def calendar_schedule():
 
 def plan_expired(result):
     schedule = result.get('schedule') or {}
-    if schedule.get('version') != 2 or not schedule.get('generated_date'):
+    if schedule.get('version') != 3 or not schedule.get('generated_date'):
         return True
     zone = ZoneInfo(read_calendar()['timezone'])
     today_iso = datetime.now(zone).date().isoformat()
@@ -344,7 +351,7 @@ def ranking_status():
         return result | {
             'enabled': bool(read_config('ameba').get('enabled')),
             'plan_reset': plan_reset,
-            'has_plan': bool(result.get('schedule') and result['schedule'].get('version') == 2),
+            'has_plan': bool(result.get('schedule') and result['schedule'].get('version') in (2, 3)),
             'task_ids': ids,
             'ranked_count': len(ids),
             'reasons': [item for item in result.get('reasons', []) if item['task_id'] in ids],
@@ -377,6 +384,7 @@ async def clear_plan():
             adj['day_overrides'] = {}
             adj['task_pins'] = {}
             adj['estimate_overrides'] = {}
+            adj['task_notes'] = {}
             save_adjustments(adj, session=session)
             session.commit()
     return {'ok': True}
@@ -402,7 +410,7 @@ async def request_ranking(tasks, task_id=0, checked_contexts=(), refresh=False):
         'previous_plan': previous,
         'user_feedback': adjustments['text'],
         'manual_adjustments': adjustments,
-        'adaptation_profile': profile,
+        'recent_observations': profile.get('observations', [])[-10:],
         'checked_contexts': list(checked_contexts),
     }, endpoint='/refresh' if refresh else '/rank')
 
@@ -412,7 +420,7 @@ def _can_refresh_only(saved, ready_ids: set[int]) -> bool:
         return False
     prev = json.loads(saved.result)
     sched = prev.get('schedule') or {}
-    if sched.get('version') != 2:
+    if sched.get('version') != 3:
         return False
     prev_ids = {item.get('id') for item in prev.get('timeline', []) if item.get('plan')}
     return bool(prev_ids) and ready_ids <= prev_ids
@@ -547,7 +555,14 @@ async def adjust_plan(
                 saved = session.get(TaskRanking, 1)
                 res = json.loads(saved.result) if saved and saved.result else {}
                 periods = (res.get('schedule') or {}).get('periods', [])
-                cur_date = next((p['start_date'] for p in periods if any(t['task_id'] == int(tid) for t in p.get('tasks', []))), None)
+                cur_date = next(
+                    (
+                        p['start_date']
+                        for p in periods
+                        if p.get('task_id') == int(tid) or any(t.get('task_id') == int(tid) for t in p.get('tasks', []))
+                    ),
+                    None,
+                )
                 base_date = datetime.strptime(cur_date, '%Y-%m-%d').date() if cur_date else datetime.now(ZoneInfo(read_calendar()['timezone'])).date()
                 target = max(datetime.now(ZoneInfo(read_calendar()['timezone'])).date(), base_date + timedelta(days=int(task_pin['shift_days'])))
                 adj['task_pins'][tid] = {'target_date': target.isoformat(), 'not_before': target.isoformat() if int(task_pin['shift_days']) > 0 else None}
@@ -648,45 +663,73 @@ async def rank_all(force=False, task_id=0):
                 if not ready:
                     result = None
         if result is None:
-            with Session(get_engine()) as session:
-                wish_text = read_adjustments(session)['text'].strip()
-            if wish_text:
-                from agent_memory import save as save_fact
-                save_fact({'key': 'ameba.wish_' + uuid4().hex[:8], 'text': wish_text}, 'Ameba')
             result = {
                 'task_ids': [], 'comparisons': 0, 'uncertain_comparisons': 0,
                 'explanation': 'Нет задач с готовым контекстом.', 'reasons': [],
-                'schedule': {'version': 2, 'periods': [], 'daily_allocations': [], 'deadline_conflicts': [],
+                'schedule': {'version': 3, 'periods': [], 'daily_allocations': [], 'deadline_conflicts': [],
                              'remaining': [], 'feasible': True, 'min_minutes': 0, 'max_minutes': 0,
                              'hours_label': 'выполнено', 'generated_date': datetime.now(ZoneInfo(read_calendar()['timezone'])).date().isoformat(),
-                             'start_at': datetime.now(timezone.utc).isoformat(), 'timeline_error': None},
+                             'start_at': datetime.now(timezone.utc).isoformat(), 'timeline': [], 'timeline_error': None},
             }
         ids = result.get('task_ids', [])
         if len(ids) != len(ready) or set(ids) != {task['id'] for task in ready}:
             raise HTTPException(502, 'Ameba вернула неполный порядок задач')
         schedule = result.get('schedule')
-        if ready and (not schedule or schedule.get('timeline_error') or not schedule.get('start_at') or schedule.get('version') != 2):
+        if ready and (not schedule or schedule.get('timeline_error') or not schedule.get('start_at') or schedule.get('version') != 3):
             raise HTTPException(502, 'Ameba не построила корректный план периодов. Предыдущий результат сохранён.')
+        task_preferences = result.pop('task_preferences', []) or []
+        progress_updates = result.pop('progress_updates', []) or []
+        memory_saved_count = int(result.pop('memory_saved_count', 0) or 0)
         result['task_ids'] = ids
         result.update(generated_at=datetime.now(timezone.utc).isoformat(), ranked_count=len(ids), pending_count=len(waiting), total_count=len(ready) + len(waiting))
         consumed_feedback = False
+        task_notes_saved_count = 0
+        progress_updated_count = 0
         with Session(get_engine()) as session:
             if task_state(session)[0] != signature and _external_signature(session) != pre_external:
                 raise HTTPException(409, 'Задачи или контекст изменились. Повторите планирование')
             adj = read_adjustments(session)
+            active_ids_str = {str(t.id) for t in session.exec(select(Task).where(Task.archived == False, Task.status != 'done')).all()}
+            adj['task_notes'] = {k: v for k, v in adj['task_notes'].items() if k in active_ids_str}
+            adj['task_pins'] = {k: v for k, v in adj['task_pins'].items() if k in active_ids_str}
+            adj['estimate_overrides'] = {k: v for k, v in adj['estimate_overrides'].items() if k in active_ids_str}
+            for item in task_preferences:
+                tid = item.get('task_id')
+                text = str(item.get('text') or '').strip()[:400]
+                if tid in set(ids) and text:
+                    adj['task_notes'][str(tid)] = text
+                    task_notes_saved_count += 1
+            for upd in progress_updates:
+                tid = upd.get('task_id')
+                new_mins = upd.get('completed_work_minutes')
+                if tid in set(ids) and isinstance(new_mins, int) and new_mins >= 0:
+                    task_row = session.get(Task, tid)
+                    if task_row and not task_row.archived and task_row.completed_work_minutes != new_mins:
+                        task_row.completed_work_minutes = new_mins
+                        if task_row.status == 'todo' and new_mins > 0:
+                            ctx = session.get(TaskContext, tid)
+                            was_valid = ctx is not None and context_status(task_row, ctx) == 'ready'
+                            task_row.status = 'in_progress'
+                            if was_valid:
+                                ctx.task_snapshot = snapshot(task_row)
+                                session.add(ctx)
+                        task_row.updated_at = datetime.now(timezone.utc)
+                        session.add(task_row)
+                        progress_updated_count += 1
             if adj['text']:
                 consumed_feedback = True
                 adj['text'] = ''
+            if consumed_feedback or task_notes_saved_count or progress_updated_count:
                 save_adjustments(adj, session=session)
                 session.flush()
             saved = session.get(TaskRanking, 1) or TaskRanking()
-            final_signature = task_state(session)[0] if (consumed_feedback or task_state(session)[0] != signature) else signature
+            final_signature = task_state(session)[0] if (consumed_feedback or task_notes_saved_count or progress_updated_count or task_state(session)[0] != signature) else signature
             saved.snapshot = final_signature
             saved.result = json.dumps(result, ensure_ascii=False)
             session.add(saved)
             for tid in ids:
                 task = session.get(Task, tid)
-                task.ai_details = json.dumps({'version': 42, 'status': 'ranked'})
+                task.ai_details = json.dumps({'version': 43, 'status': 'ranked'})
                 task.ai_scored_at = datetime.now(timezone.utc)
                 session.add(task)
             if result.get('plan_run_id'):
@@ -698,7 +741,12 @@ async def rank_all(force=False, task_id=0):
                     session.add(temporary)
             session.commit()
         report('ameba', success=True)
-        return result | ({'consumed_feedback': True} if consumed_feedback else {})
+        extras = {
+            'memory_saved_count': memory_saved_count,
+            'task_notes_saved_count': task_notes_saved_count,
+            'progress_updated_count': progress_updated_count,
+        }
+        return result | extras | ({'consumed_feedback': True} if consumed_feedback else {})
 
 
 async def evaluate(task_id=None):
@@ -722,7 +770,7 @@ async def evaluate_task(task_id):
     context = await prepare(task_id)
     original = context['task_snapshot']
     if context['status'] != 'ready':
-        metrics = {'version': 42, 'status': 'needs_context', 'reason': ' '.join(context['questions'])}
+        metrics = {'version': 43, 'status': 'needs_context', 'reason': ' '.join(context['questions'])}
         with Session(get_engine()) as session:
             task = session.get(Task, task_id)
             if not task:
@@ -737,4 +785,4 @@ async def evaluate_task(task_id):
     result = await rank_all(task_id=task_id)
     ids = result['task_ids']
     return result | {'rank': ids.index(task_id) + 1 if task_id in ids else None,
-                     'metrics': {'status': 'ranked', 'version': 42}}
+                     'metrics': {'status': 'ranked', 'version': 43}}
