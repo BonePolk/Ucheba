@@ -29,6 +29,7 @@ DEFAULTS = {
         'enabled': False,
         'auth_mode': 'api_key',
         'model': 'gpt-6-luna',
+        'context_window': None,
         'reasoning_effort': 'medium',
         'custom_instructions': '',
         'auto_replan': True,

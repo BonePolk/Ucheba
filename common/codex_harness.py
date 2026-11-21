@@ -1,8 +1,9 @@
 """Общий Codex harness (openai-codex SDK + изолированный MCP) для всех агентов."""
 import asyncio
-from collections import deque
+from collections import OrderedDict, deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+import inspect
 import json
 import logging
 import os
@@ -12,6 +13,7 @@ import socket
 import struct
 import subprocess
 import tempfile
+import time
 import types
 from typing import Any
 
@@ -38,6 +40,310 @@ BUSY_IDLE_TIMEOUT = 600
 MCP_TOOL_TIMEOUT = 180
 USER_WAIT_TOOLS = frozenset({'ask_user', 'browser_wait_for_user'})
 UNBOUNDED_TOOLS = frozenset({'ask_user', 'browser_wait_for_user', 'delete_silo_file'})
+
+MODEL_CAP_TTL = 1800
+MODEL_CAP_MISS_TTL = 300
+MODEL_CAP_CACHE_SIZE = 128
+MODEL_PROBE_TIMEOUT = 4.0
+
+_CTX_WINDOW_KEYS = (
+    'context_window', 'contextWindow', 'context_length', 'contextLength',
+    'max_context_window', 'maxContextWindow', 'max_context_length',
+    'max_context_tokens', 'max_model_len', 'max_position_embeddings', 'n_ctx',
+)
+_PROVIDER_CTX_KEYS = _CTX_WINDOW_KEYS + ('context', 'max_context')
+_INPUT_TOKEN_KEYS = ('max_input_tokens', 'maxInputTokens', 'input_token_limit', 'inputTokenLimit', 'max_prompt_tokens', 'input')
+_OUTPUT_TOKEN_KEYS = ('max_output_tokens', 'maxOutputTokens', 'output_token_limit', 'outputTokenLimit', 'max_completion_tokens', 'output')
+_CTX_ERROR_MARKERS = ('context_length_exceeded', 'context length', 'context window', 'maximum context', 'too many tokens', 'prompt is too long', 'input exceeds')
+
+_MODEL_CAP_CACHE: OrderedDict[tuple, tuple[float, dict]] = OrderedDict()
+_PROVIDER_PROBED_CACHE: OrderedDict[tuple, float] = OrderedDict()
+_RUNTIME_CAP_OVERRIDES: OrderedDict[tuple, tuple[float, int, str]] = OrderedDict()
+
+
+@dataclass(frozen=True)
+class ModelCapabilities:
+    model: str = ''
+    context_window: int | None = None
+    theoretical_context_window: int | None = None
+    max_input_tokens: int | None = None
+    max_output_tokens: int | None = None
+    source: str = 'unknown'
+
+    @property
+    def effective_limit(self) -> int | None:
+        vals = [v for v in (self.context_window, self.max_input_tokens) if type(v) is int and v > 0]
+        return min(vals) if vals else None
+
+
+def _safe_int(val, *, minimum: int = 1, maximum: int = 10_000_000) -> int | None:
+    return val if type(val) is int and minimum <= val <= maximum else None
+
+
+def _safe_str(val) -> str:
+    return val.strip() if type(val) is str else ''
+
+
+def _field(obj, *names):
+    if obj is None:
+        return None
+    extra = getattr(obj, 'model_extra', None)
+    for name in names:
+        if isinstance(obj, dict):
+            if name in obj and obj[name] is not None:
+                return obj[name]
+            continue
+        if isinstance(extra, dict) and name in extra and extra[name] is not None:
+            return extra[name]
+        val = getattr(obj, name, None)
+        if val is not None:
+            return val
+    return None
+
+
+def _collect_ints(obj, keys: tuple[str, ...], *, minimum: int) -> list[int]:
+    if obj is None:
+        return []
+    found: list[int] = []
+    for key in keys:
+        val = _safe_int(_field(obj, key), minimum=minimum)
+        if val is not None:
+            found.append(val)
+    return found
+
+
+def extract_model_limits(raw) -> dict:
+    """Извлекает подтверждённые ограничения контекста и вывода из метаданных модели или провайдера."""
+    model_id = _safe_str(_field(raw, 'id', 'model'))
+    arch = _field(raw, 'architecture')
+    nested = [item for item in (_field(raw, 'top_provider'), _field(raw, 'limits'), _field(raw, 'capabilities')) if item is not None]
+
+    top_ctx = _collect_ints(raw, _CTX_WINDOW_KEYS, minimum=4096) + _collect_ints(arch, _CTX_WINDOW_KEYS, minimum=4096)
+    nested_ctx = [val for sub in nested for val in _collect_ints(sub, _PROVIDER_CTX_KEYS, minimum=4096)]
+    ctx_candidates = ([min(top_ctx)] if top_ctx else []) + nested_ctx
+    theoretical_candidates = ([max(top_ctx)] if top_ctx else []) + nested_ctx
+
+    in_vals = _collect_ints(raw, _INPUT_TOKEN_KEYS[:5], minimum=4096) + _collect_ints(arch, _INPUT_TOKEN_KEYS[:5], minimum=4096)
+    in_vals.extend(val for sub in nested for val in _collect_ints(sub, _INPUT_TOKEN_KEYS, minimum=4096))
+
+    out_vals = _collect_ints(raw, _OUTPUT_TOKEN_KEYS[:5], minimum=256) + _collect_ints(arch, _OUTPUT_TOKEN_KEYS[:5], minimum=256)
+    out_vals.extend(val for sub in nested for val in _collect_ints(sub, _OUTPUT_TOKEN_KEYS, minimum=256))
+
+    return {
+        'model': model_id,
+        'context_window': min(ctx_candidates) if ctx_candidates else None,
+        'theoretical_context_window': max(theoretical_candidates) if theoretical_candidates else None,
+        'max_input_tokens': min(in_vals) if in_vals else None,
+        'max_output_tokens': min(out_vals) if out_vals else None,
+    }
+
+
+def _cache_put(cache: OrderedDict, key: tuple, value) -> None:
+    cache[key] = value
+    cache.move_to_end(key)
+    while len(cache) > MODEL_CAP_CACHE_SIZE:
+        cache.popitem(last=False)
+
+
+def _fresh_get(cache: OrderedDict, key: tuple):
+    item = cache.get(key)
+    if item is None:
+        return None
+    expires_at = item[0] if isinstance(item, tuple) else item
+    if expires_at <= time.monotonic():
+        cache.pop(key, None)
+        return None
+    cache.move_to_end(key)
+    return item
+
+
+def _lookup_cached_model(owner: int, source_kind: str, scope: str, model: str) -> dict | None:
+    if not model:
+        return None
+    entry = _fresh_get(_MODEL_CAP_CACHE, (owner, source_kind, scope, model))
+    if entry is not None:
+        return entry[1]
+    tail = model.rsplit('/', 1)[-1]
+    now = time.monotonic()
+    for (c_owner, c_kind, c_scope, c_mid), (exp, limits) in list(_MODEL_CAP_CACHE.items()):
+        if exp <= now:
+            _MODEL_CAP_CACHE.pop((c_owner, c_kind, c_scope, c_mid), None)
+            continue
+        if c_owner == owner and c_kind == source_kind and c_scope == scope and c_mid.rsplit('/', 1)[-1] == tail:
+            return limits
+    return None
+
+
+def cache_provider_models(base_url: str, models_iter, *, source_kind: str = 'api_key', mark_probed: bool = True) -> None:
+    owner = user_id()
+    scope = (base_url or '').strip().rstrip('/')
+    now = time.monotonic()
+    has_any = False
+    for raw in models_iter or ():
+        limits = extract_model_limits(raw)
+        mid = limits['model']
+        if not mid:
+            continue
+        has_any = True
+        has_limits = any(limits[k] is not None for k in ('context_window', 'max_input_tokens', 'max_output_tokens'))
+        ttl = MODEL_CAP_TTL if has_limits else MODEL_CAP_MISS_TTL
+        _cache_put(_MODEL_CAP_CACHE, (owner, source_kind, scope, mid), (now + ttl, limits))
+    if mark_probed:
+        _cache_put(_PROVIDER_PROBED_CACHE, (owner, source_kind, scope), now + (MODEL_CAP_TTL if has_any else MODEL_CAP_MISS_TTL))
+
+
+async def fetch_provider_model_metadata(base_url: str, api_key: str, model: str) -> dict | None:
+    owner = user_id()
+    scope = (base_url or '').strip().rstrip('/')
+    if not scope or not api_key:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=MODEL_PROBE_TIMEOUT) as client:
+            response = await client.get(
+                f'{scope}/models',
+                headers={'Authorization': f'Bearer {api_key}'},
+            )
+        if not response.is_success:
+            logging.getLogger('uvicorn.error').warning('Provider /models metadata probe returned HTTP %s', response.status_code)
+            _cache_put(_PROVIDER_PROBED_CACHE, (owner, 'api_key', scope), time.monotonic() + MODEL_CAP_MISS_TTL)
+            return None
+        payload = response.json()
+        items = payload.get('data') if isinstance(payload, dict) else (payload if isinstance(payload, list) else [])
+        if isinstance(items, list):
+            cache_provider_models(scope, items, source_kind='api_key')
+            return _lookup_cached_model(owner, 'api_key', scope, model)
+    except Exception as exc:
+        logging.getLogger('uvicorn.error').warning('Provider /models metadata probe failed: %s', type(exc).__name__)
+    _cache_put(_PROVIDER_PROBED_CACHE, (owner, 'api_key', scope), time.monotonic() + MODEL_CAP_MISS_TTL)
+    return None
+
+
+def record_runtime_context_limit(
+    auth_mode: str,
+    base_url: str,
+    model: str,
+    limit_tokens: int,
+    *,
+    source: str = 'runtime',
+    tighten_only: bool = False,
+) -> None:
+    limit = _safe_int(limit_tokens, minimum=4096)
+    if limit is None:
+        return
+    key = (user_id(), (auth_mode or '').strip(), (base_url or '').strip().rstrip('/'), (model or '').strip())
+    existing = _fresh_get(_RUNTIME_CAP_OVERRIDES, key)
+    if tighten_only and existing is not None and existing[1] <= limit:
+        return
+    _cache_put(_RUNTIME_CAP_OVERRIDES, key, (time.monotonic() + MODEL_CAP_TTL, limit, source))
+
+
+def clear_model_capability_cache() -> None:
+    _MODEL_CAP_CACHE.clear()
+    _PROVIDER_PROBED_CACHE.clear()
+    _RUNTIME_CAP_OVERRIDES.clear()
+
+
+async def _probe_codex_models(client, active_model: str, auth_mode: str) -> dict | None:
+    if client is None:
+        return None
+    owner = user_id()
+    scope = (auth_mode or '').strip()
+    if _fresh_get(_PROVIDER_PROBED_CACHE, (owner, 'codex', scope)) is None:
+        models_fn = getattr(client, 'models', None)
+        if callable(models_fn):
+            try:
+                res = models_fn()
+                page = await asyncio.wait_for(res, timeout=MODEL_PROBE_TIMEOUT) if inspect.isawaitable(res) else res
+                data = getattr(page, 'data', None)
+                if isinstance(data, (list, tuple)):
+                    cache_provider_models(scope, data, source_kind='codex')
+                    if not active_model:
+                        default_item = next(
+                            (m for m in data if _field(m, 'is_default', 'isDefault') is True),
+                            data[0] if len(data) == 1 else None,
+                        )
+                        if default_item is not None:
+                            return extract_model_limits(default_item)
+                else:
+                    _cache_put(_PROVIDER_PROBED_CACHE, (owner, 'codex', scope), time.monotonic() + MODEL_CAP_MISS_TTL)
+            except Exception:
+                _cache_put(_PROVIDER_PROBED_CACHE, (owner, 'codex', scope), time.monotonic() + MODEL_CAP_MISS_TTL)
+    return _lookup_cached_model(owner, 'codex', scope, active_model)
+
+
+async def detect_model_capabilities(
+    *,
+    auth_mode: str,
+    base_url: str = '',
+    api_key: str = '',
+    model: str = '',
+    config: dict | None = None,
+    client=None,
+    thread=None,
+) -> ModelCapabilities:
+    """Определяет реальное и теоретическое контекстное окно модели без фиктивных значений."""
+    owner = user_id()
+    mode = (auth_mode or 'api_key').strip()
+    scope = (base_url or '').strip().rstrip('/')
+    active_model = _safe_str(_field(thread, 'model')) or _safe_str(model)
+    cfg = config or {}
+    cfg_ctx = _safe_int(cfg.get('context_window'), minimum=4096)
+    cfg_in = _safe_int(cfg.get('max_input_tokens'), minimum=4096)
+    cfg_out = _safe_int(cfg.get('max_output_tokens'), minimum=256)
+
+    thread_cap = extract_model_limits(thread) if thread is not None else {}
+    codex_cap = await _probe_codex_models(client, active_model, mode) or {}
+    provider_cap = {}
+    if mode == 'api_key' and scope:
+        provider_cap = _lookup_cached_model(owner, 'api_key', scope, active_model) or {}
+        if not provider_cap and api_key and _fresh_get(_PROVIDER_PROBED_CACHE, (owner, 'api_key', scope)) is None:
+            provider_cap = await fetch_provider_model_metadata(scope, api_key, active_model) or {}
+
+    rt_entry = _fresh_get(_RUNTIME_CAP_OVERRIDES, (owner, mode, scope, active_model))
+    if rt_entry is None and active_model != _safe_str(model):
+        rt_entry = _fresh_get(_RUNTIME_CAP_OVERRIDES, (owner, mode, scope, _safe_str(model)))
+
+    ctx_sources: list[tuple[str, int]] = []
+    if cfg_ctx is not None:
+        ctx_sources.append(('config', cfg_ctx))
+    for src_name, cap in (('provider', provider_cap), ('codex', codex_cap), ('thread', thread_cap)):
+        val = cap.get('context_window')
+        if val is not None:
+            ctx_sources.append((src_name, val))
+    if rt_entry is not None:
+        ctx_sources.append((rt_entry[2], rt_entry[1]))
+
+    effective_ctx = min(val for _, val in ctx_sources) if ctx_sources else None
+    theo_vals = [
+        val
+        for val in (
+            provider_cap.get('theoretical_context_window'),
+            codex_cap.get('theoretical_context_window'),
+            thread_cap.get('theoretical_context_window'),
+            provider_cap.get('context_window'),
+            codex_cap.get('context_window'),
+        )
+        if val is not None
+    ]
+    theoretical_ctx = max(theo_vals) if theo_vals else effective_ctx
+
+    in_vals = [v for v in (cfg_in, provider_cap.get('max_input_tokens'), codex_cap.get('max_input_tokens'), thread_cap.get('max_input_tokens')) if v is not None]
+    out_vals = [v for v in (cfg_out, provider_cap.get('max_output_tokens'), codex_cap.get('max_output_tokens'), thread_cap.get('max_output_tokens')) if v is not None]
+    if not ctx_sources and in_vals:
+        in_source = 'config' if cfg_in is not None else ('provider' if provider_cap.get('max_input_tokens') is not None else 'codex')
+        limiting = [in_source]
+    else:
+        limiting = [name for name, val in ctx_sources if val == effective_ctx]
+    source = '+'.join(dict.fromkeys(limiting)) if limiting else 'unknown'
+
+    return ModelCapabilities(
+        model=active_model,
+        context_window=effective_ctx,
+        theoretical_context_window=theoretical_ctx,
+        max_input_tokens=min(in_vals) if in_vals else None,
+        max_output_tokens=min(out_vals) if out_vals else None,
+        source=source,
+    )
 
 
 def user_home() -> Path:
@@ -335,6 +641,11 @@ class McpToolAdapter:
         self.active_tools: list[str] = []
         self.terminal_result = None
         self.fatal_error = None
+        self.last_usage: dict | None = None
+        self.context_window: int | None = None
+        self.compaction_count: int = 0
+        self.on_token_usage = None
+        self.on_compaction = None
 
     @property
     def waiting_for_user(self) -> bool:
@@ -514,6 +825,10 @@ class TurnOutcome:
     error_detail: str | None
     usage: dict
     terminal_result: Any = None
+    last_usage: dict | None = None
+    context_window: int | None = None
+    compacted: bool = False
+    error_kind: str | None = None
 
 
 def _extract_error_info(error_obj):
@@ -522,25 +837,30 @@ def _extract_error_info(error_obj):
     info = getattr(error_obj, 'codex_error_info', None) or getattr(error_obj, 'codexErrorInfo', None)
     if info is None and isinstance(error_obj, dict):
         info = error_obj.get('codex_error_info') or error_obj.get('codexErrorInfo')
-    if info is None:
-        return None, None
-    inner = getattr(info, 'root', info)
-    kind = getattr(inner, 'type', None)
-    if kind is None and isinstance(inner, dict):
-        kind = inner.get('type') or (next(iter(inner)) if len(inner) == 1 else None)
-    elif kind is None and not isinstance(inner, str):
-        kind = type(inner).__name__
-    elif isinstance(inner, str):
-        kind = inner
-    status_code = (
-        getattr(inner, 'http_status_code', None)
-        or getattr(inner, 'httpStatusCode', None)
-        or (inner.get('http_status_code') or inner.get('httpStatusCode') if isinstance(inner, dict) else None)
-    )
-    if status_code is None and isinstance(inner, dict) and len(inner) == 1:
-        nested = next(iter(inner.values()))
-        if isinstance(nested, dict):
-            status_code = nested.get('http_status_code') or nested.get('httpStatusCode')
+    inner = getattr(info, 'root', info) if info is not None else None
+    kind = None
+    status_code = None
+    if inner is not None:
+        kind = getattr(inner, 'type', None)
+        if kind is None and isinstance(inner, dict):
+            kind = inner.get('type') or (next(iter(inner)) if len(inner) == 1 else None)
+        elif kind is None and not isinstance(inner, str):
+            kind = type(inner).__name__
+        elif isinstance(inner, str):
+            kind = inner
+        status_code = (
+            getattr(inner, 'http_status_code', None)
+            or getattr(inner, 'httpStatusCode', None)
+            or (inner.get('http_status_code') or inner.get('httpStatusCode') if isinstance(inner, dict) else None)
+        )
+        if status_code is None and isinstance(inner, dict) and len(inner) == 1:
+            nested = next(iter(inner.values()))
+            if isinstance(nested, dict):
+                status_code = nested.get('http_status_code') or nested.get('httpStatusCode')
+    if kind != 'contextWindowExceeded':
+        msg = _field(inner, 'message') or _field(error_obj, 'message')
+        if status_code == 413 or (type(msg) is str and any(m in msg.lower() for m in _CTX_ERROR_MARKERS)):
+            kind = 'contextWindowExceeded'
     return kind, status_code
 
 
@@ -612,7 +932,11 @@ async def run_codex_turn(
     completed = False
     turn_status = ''
     error_detail = None
+    error_kind = None
     usage = {'input_tokens': 0, 'output_tokens': 0}
+    last_usage = None
+    runtime_context_window = None
+    compacted = False
     watch_task = None
 
     try:
@@ -633,7 +957,7 @@ async def run_codex_turn(
         last_item_type = ''
 
         async def consume():
-            nonlocal summary_text, fallback_text, last_delta_id, completed, turn_status, error_detail, usage, idle_since, last_method, last_item_type
+            nonlocal summary_text, fallback_text, last_delta_id, completed, turn_status, error_detail, error_kind, usage, last_usage, runtime_context_window, compacted, idle_since, last_method, last_item_type
             async for event in turn.stream():
                 method = event.method
                 last_method = method
@@ -657,6 +981,7 @@ async def run_codex_turn(
                         if item_type == 'commandExecution' and item_id:
                             active_commands.add(item_id)
                         if item_type == 'contextCompaction':
+                            compacted = True
                             progress.update(current_action='Сжимает контекст диалога')
                         if item_type in ('commandExecution', 'fileChange', 'webSearch'):
                             labels = {
@@ -670,6 +995,12 @@ async def run_codex_turn(
                     else:
                         if item_id:
                             active_commands.discard(item_id)
+                        if item_type == 'contextCompaction':
+                            compacted = True
+                            if adapter is not None:
+                                adapter.compaction_count += 1
+                                if callable(adapter.on_compaction):
+                                    adapter.on_compaction()
                         if item_type == 'agentMessage':
                             if phase == 'final_answer':
                                 summary_text = item.text
@@ -684,6 +1015,13 @@ async def run_codex_turn(
                             except Exception:
                                 pass
                             break
+                elif method == 'thread/compacted':
+                    compacted = True
+                    progress.update(current_action='Сжимает контекст диалога')
+                    if adapter is not None:
+                        adapter.compaction_count += 1
+                        if callable(adapter.on_compaction):
+                            adapter.on_compaction()
                 elif method == 'item/agentMessage/delta':
                     if data.item_id in commentary:
                         comment = progress.summary(data.delta, ('commentary', data.item_id))
@@ -695,9 +1033,35 @@ async def run_codex_turn(
                 elif method == 'item/reasoning/summaryTextDelta':
                     progress.reasoning_delta(data.delta, (data.item_id, data.summary_index))
                 elif method == 'thread/tokenUsage/updated':
-                    usage_obj = data.token_usage.total
-                    usage = {'input_tokens': usage_obj.input_tokens, 'output_tokens': usage_obj.output_tokens}
-                    progress.update(token_usage=dict(usage), current_usage_known=True)
+                    tu = _field(data, 'token_usage', 'tokenUsage')
+                    total_obj = _field(tu, 'total')
+                    last_obj = _field(tu, 'last')
+                    if total_obj is not None:
+                        in_tok = _safe_int(_field(total_obj, 'input_tokens', 'inputTokens'), minimum=0)
+                        out_tok = _safe_int(_field(total_obj, 'output_tokens', 'outputTokens'), minimum=0)
+                        if in_tok is not None or out_tok is not None:
+                            usage = {'input_tokens': in_tok or 0, 'output_tokens': out_tok or 0}
+                            progress.update(token_usage=dict(usage), current_usage_known=True)
+                    if last_obj is not None:
+                        l_in = _safe_int(_field(last_obj, 'input_tokens', 'inputTokens'), minimum=0)
+                        l_out = _safe_int(_field(last_obj, 'output_tokens', 'outputTokens'), minimum=0)
+                        l_tot = _safe_int(_field(last_obj, 'total_tokens', 'totalTokens'), minimum=0)
+                        if l_in is not None or l_tot is not None:
+                            last_usage = {
+                                'input_tokens': l_in if l_in is not None else max(0, (l_tot or 0) - (l_out or 0)),
+                                'output_tokens': l_out or 0,
+                                'total_tokens': l_tot if l_tot is not None else (l_in or 0) + (l_out or 0),
+                            }
+                    ctx_win = _safe_int(_field(tu, 'model_context_window', 'modelContextWindow'), minimum=4096)
+                    if ctx_win is not None:
+                        runtime_context_window = ctx_win
+                    if adapter is not None:
+                        if last_usage is not None:
+                            adapter.last_usage = dict(last_usage)
+                        if runtime_context_window is not None:
+                            adapter.context_window = runtime_context_window
+                        if callable(adapter.on_token_usage):
+                            adapter.on_token_usage(last_usage=last_usage, total_usage=usage, context_window=runtime_context_window)
                 elif method == 'error':
                     kind, status_code = _extract_error_info(getattr(data, 'error', None))
                     will_retry = getattr(data, 'will_retry', getattr(data, 'willRetry', None))
@@ -707,11 +1071,15 @@ async def run_codex_turn(
                     )
                     if will_retry is False and not error_detail:
                         error_detail = format_turn_error(label, data)
+                        error_kind = kind
                 elif method == 'turn/completed':
                     turn_status = getattr(getattr(data.turn, 'status', None), 'value', None) or str(getattr(data.turn, 'status', ''))
                     completed = turn_status == 'completed'
                     if not completed:
                         error_detail = format_turn_error(label, data.turn)
+                        turn_kind, _ = _extract_error_info(getattr(data.turn, 'error', None))
+                        if turn_kind:
+                            error_kind = turn_kind
                     break
 
         async def watchdog():
@@ -778,6 +1146,10 @@ async def run_codex_turn(
         error_detail=error_detail,
         usage=usage,
         terminal_result=adapter.terminal_result if adapter is not None else None,
+        last_usage=last_usage,
+        context_window=runtime_context_window,
+        compacted=compacted,
+        error_kind=error_kind,
     )
 
 

@@ -16,7 +16,14 @@ sys.path[:0] = [str(ROOT), str(ROOT / 'services/ameba'), str(ROOT / 'backend')]
 import main as ameba_service
 import planning
 from common import calendar
-from common.codex_harness import TurnOutcome
+import common.codex_harness as codex_harness
+from common.codex_harness import (
+    ModelCapabilities,
+    TurnOutcome,
+    clear_model_capability_cache,
+    detect_model_capabilities,
+    extract_model_limits,
+)
 from common.database import init_db
 from common.identity import current_user_id
 from common.models.integration import IntegrationSetting, TaskContext, TaskRanking
@@ -427,6 +434,124 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(details['effective_remaining_override'], 90)
         self.assertEqual(details['task_pin'], {'mode': 'date', 'target_date': '2026-11-25'})
 
+    def test_previous_plan_preserves_more_than_16_periods_and_blocked_dates(self):
+        periods = [
+            work_period(tid, f'2026-11-{23 + (tid % 5):02d}', f'2026-11-{24 + (tid % 5):02d}', 60, goal=f'Этап {tid}')
+            for tid in range(1, 31)
+        ] + [rest_period('2026-11-28', '2026-11-28')]
+        prev_plan = {
+            'task_ids': list(range(1, 31)),
+            'explanation': 'Предыдущий подробный план.',
+            'schedule': {'version': 3, 'blocked_dates': ['2026-11-29'], 'periods': periods},
+        }
+        full_prev, by_task, truncated = ameba_service._serialize_previous_plan(prev_plan, max_tokens=200_000)
+        self.assertFalse(truncated)
+        self.assertEqual(len(full_prev['periods']), 31)
+        self.assertEqual(full_prev['blocked_dates'], ['2026-11-29'])
+        self.assertIn(25, by_task)
+
+        short_prev, short_by_task, short_trunc = ameba_service._serialize_previous_plan(
+            prev_plan, max_tokens=350, pinned_ids={29},
+        )
+        self.assertTrue(short_trunc)
+        self.assertEqual(short_prev['blocked_dates'], ['2026-11-29'])
+        self.assertEqual(short_prev['task_ids'], list(range(1, 31)))
+        self.assertTrue(any(p.get('kind') == 'rest' for p in short_prev['periods']))
+        self.assertTrue(any(p.get('task_id') == 29 for p in short_prev['periods']))
+        self.assertIn('get_task_details', short_prev['note'])
+        self.assertEqual(len(short_by_task), 30)
+
+    def test_extract_model_limits_distinguishes_theoretical_and_provider_limit(self):
+        one_m = extract_model_limits({'id': 'gemini-pro', 'context_length': 1_000_000, 'max_output_tokens': 65_536})
+        self.assertEqual((one_m['context_window'], one_m['theoretical_context_window'], one_m['max_output_tokens']), (1_000_000, 1_000_000, 65_536))
+
+        capped = extract_model_limits({
+            'id': 'gemini-pro',
+            'context_length': 1_000_000,
+            'top_provider': {'context_length': 32_000, 'max_completion_tokens': 8_192},
+        })
+        self.assertEqual((capped['context_window'], capped['theoretical_context_window'], capped['max_output_tokens']), (32_000, 1_000_000, 8_192))
+
+        io_only = extract_model_limits({'id': 'custom-m', 'input_token_limit': 1_048_576, 'output_token_limit': 32_768})
+        caps = ModelCapabilities(
+            model='custom-m',
+            context_window=io_only['context_window'],
+            max_input_tokens=io_only['max_input_tokens'],
+            max_output_tokens=io_only['max_output_tokens'],
+            source='provider',
+        )
+        self.assertEqual(caps.effective_limit, 1_048_576)
+
+
+class CapabilityDetectionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unknown_metadata_falls_back_safely_without_repeated_probes(self):
+        clear_model_capability_cache()
+        calls = 0
+
+        class FakeResp:
+            is_success = True
+            status_code = 200
+
+            def json(self):
+                return {'data': [{'id': 'opaque-model'}]}
+
+        class FakeAsyncClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def get(self, url, **kwargs):
+                nonlocal calls
+                calls += 1
+                return FakeResp()
+
+        with patch.object(codex_harness.httpx, 'AsyncClient', FakeAsyncClient):
+            caps1 = await detect_model_capabilities(
+                auth_mode='api_key', base_url='https://example.invalid/v1', api_key='k', model='opaque-model',
+            )
+            caps2 = await detect_model_capabilities(
+                auth_mode='api_key', base_url='https://example.invalid/v1', api_key='k', model='opaque-model',
+            )
+        self.assertIsNone(caps1.effective_limit)
+        self.assertEqual(caps1.source, 'unknown')
+        self.assertIsNone(caps2.effective_limit)
+        self.assertEqual(calls, 1)
+
+    async def test_context_compaction_and_token_usage_stream_events(self):
+        class FakeTurn:
+            async def stream(self):
+                for ev in (
+                    MagicMock(method='thread/tokenUsage/updated', payload={
+                        'token_usage': {
+                            'total': {'input_tokens': 12000, 'output_tokens': 400},
+                            'last': {'input_tokens': 9500, 'output_tokens': 350, 'total_tokens': 9850},
+                            'model_context_window': 128000,
+                        },
+                    }),
+                    MagicMock(method='item/started', payload=MagicMock(item=MagicMock(type='contextCompaction', phase=None, id='c1'))),
+                    MagicMock(method='item/completed', payload=MagicMock(item=MagicMock(type='contextCompaction', phase=None, id='c1'))),
+                    MagicMock(method='turn/completed', payload=MagicMock(turn=MagicMock(status='completed', error=None))),
+                ):
+                    yield ev
+
+            async def interrupt(self):
+                pass
+
+        thread = MagicMock()
+        thread.turn = AsyncMock(return_value=FakeTurn())
+        adapter = codex_harness.McpToolAdapter([], AsyncMock(), MagicMock())
+        outcome = await codex_harness.run_codex_turn(thread, 'hi', label='Ameba', progress=MagicMock(), adapter=adapter)
+        self.assertTrue(outcome.compacted)
+        self.assertEqual(outcome.context_window, 128000)
+        self.assertEqual(outcome.last_usage['input_tokens'], 9500)
+        self.assertEqual(adapter.compaction_count, 1)
+        self.assertEqual(adapter.context_window, 128000)
+
 
 class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
     async def run_agent(
@@ -443,14 +568,25 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
         persist_progress_mock=None,
         captured_prompts=None,
         captured_tools=None,
+        config=None,
+        previous_plan=None,
+        provider_metadata=None,
+        codex_models=None,
+        turn_outcomes=None,
+        keep_capability_cache=False,
     ):
         class Clock(datetime):
             @classmethod
             def now(cls, tz=None):
                 return datetime.fromisoformat(NOW)
 
+        if not keep_capability_cache:
+            clear_model_capability_cache()
+
         codex_client = MagicMock()
         codex_client.thread_start = AsyncMock(return_value=MagicMock())
+        if codex_models is not None:
+            codex_client.models = AsyncMock(return_value=MagicMock(data=codex_models))
 
         @asynccontextmanager
         async def fake_open_codex(*args, **kwargs):
@@ -465,10 +601,18 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
             yield {'mcp_servers': {}}
 
         step_iter = iter(actions)
+        outcome_iter = iter(turn_outcomes or ())
 
         async def fake_turn(thread_arg, prompt_input, *, adapter=None, **kwargs):
             if captured_prompts is not None:
                 captured_prompts.append(prompt_input.content if hasattr(prompt_input, 'content') else prompt_input)
+            forced_outcome = next(outcome_iter, None)
+            if forced_outcome is not None and not forced_outcome.completed:
+                if getattr(forced_outcome, 'compacted', False) and adapter is not None:
+                    adapter.compaction_count += 1
+                    if callable(adapter.on_compaction):
+                        adapter.on_compaction()
+                return forced_outcome
             for idx, (name, arguments) in enumerate(next(step_iter, []), start=1):
                 resp = await adapter.respond({
                     'jsonrpc': '2.0',
@@ -484,6 +628,23 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
                     break
             if adapter.fatal_error is not None:
                 raise adapter.fatal_error
+            if forced_outcome is not None:
+                if getattr(forced_outcome, 'compacted', False) and adapter is not None:
+                    adapter.compaction_count += 1
+                    if callable(adapter.on_compaction):
+                        adapter.on_compaction()
+                return TurnOutcome(
+                    text=forced_outcome.text,
+                    completed=forced_outcome.completed,
+                    status=forced_outcome.status,
+                    error_detail=forced_outcome.error_detail,
+                    usage=forced_outcome.usage,
+                    terminal_result=adapter.terminal_result,
+                    last_usage=forced_outcome.last_usage,
+                    context_window=forced_outcome.context_window,
+                    compacted=forced_outcome.compacted,
+                    error_kind=forced_outcome.error_kind,
+                )
             return TurnOutcome(
                 text='done', completed=True, status='completed', error_detail=None,
                 usage={'input_tokens': 0, 'output_tokens': 0}, terminal_result=adapter.terminal_result,
@@ -502,7 +663,7 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
         run_body = {
             'run_id': 'test-run',
             'api_key': 'synthetic',
-            'config': {'model': 'fixture'},
+            'config': config or {'model': 'fixture'},
             'tasks': tasks or [{'id': 1, 'title': 'Лабораторная', 'completed_work_minutes': 0}],
             'now': NOW,
             'weekly_schedule': empty_week(),
@@ -510,6 +671,8 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
         }
         if adjustments is not None:
             run_body['manual_adjustments'] = adjustments
+        if previous_plan is not None:
+            run_body['previous_plan'] = previous_plan
         with patch.object(ameba_service, 'datetime', Clock), \
              patch.object(ameba_service, 'Progress', MagicMock()), \
              patch.object(ameba_service, 'memory_request', AsyncMock(return_value=memory_items or [])), \
@@ -519,6 +682,7 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
              patch.object(ameba_service, 'open_codex', fake_open_codex), \
              patch.object(ameba_service, 'scratch_env', fake_scratch), \
              patch.object(ameba_service, 'serve_mcp', fake_serve), \
+             patch.object(codex_harness, 'fetch_provider_model_metadata', AsyncMock(return_value=provider_metadata)), \
              patch.object(ameba_service, 'run_codex_turn', side_effect=fake_turn):
             return await ameba_service.rank.__wrapped__(run_body)
 
@@ -777,6 +941,219 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([(t['id'], t['completed_work_minutes']) for t in recovered], [(1, 30), (2, 0)])
         self.assertEqual(recovered[0]['full_context'], 'Полное условие лабораторной работы')
         self.assertEqual(res['plans'][1]['completed_work_minutes'], 30)
+
+    async def test_verified_1m_model_sends_full_context_and_30_previous_periods(self):
+        # Сценарий A и E: 1M-модель получает ~80K токенов контекста 14 задач и 30 периодов без искусственной обрезки.
+        ids14 = list(range(1, 15))
+        block = 'Detailed requirements and schedule notes for task planning. ' * 380  # ~22.8K ASCII chars -> ~5.7K tok * 14 ~= 80K tok
+        tasks14 = [
+            {
+                'id': tid,
+                'title': f'Задача #{tid}',
+                'priority': 'high' if tid <= 4 else 'medium',
+                'status': 'in_progress' if tid == 1 else 'todo',
+                'deadline': '2026-11-29T18:00:00Z',
+                'completed_work_minutes': 15 if tid == 1 else 0,
+                'full_context': f'Уникальный контекст задачи #{tid}: {block}',
+            }
+            for tid in ids14
+        ]
+        periods30 = [
+            work_period((i % 14) + 1, f'2026-11-{23 + (i % 5):02d}', f'2026-11-{24 + (i % 5):02d}', 45, goal=f'Этап плана #{i + 1}')
+            for i in range(30)
+        ]
+        prev30 = {
+            'task_ids': ids14,
+            'explanation': 'Предыдущий план с 30 периодами.',
+            'schedule': {'version': 3, 'blocked_dates': ['2026-11-29'], 'periods': periods30},
+        }
+        plan14 = proposal_payload(
+            ids14,
+            [task_item(tid, 60) for tid in ids14],
+            [work_period(tid, '2026-11-23', '2026-11-28', 60) for tid in ids14],
+        )
+        prompts = []
+        res = await self.run_agent(
+            [[('propose_plan', plan14)]],
+            tasks=tasks14,
+            previous_plan=prev30,
+            provider_metadata={'model': 'gemini-pro', 'context_window': 1_000_000, 'theoretical_context_window': 1_000_000, 'max_input_tokens': None, 'max_output_tokens': 65_536},
+            config={'model': 'gemini-pro'},
+            captured_prompts=prompts,
+        )
+        self.assertEqual(res['task_ids'], ids14)
+        self.assertEqual(len(prompts), 1)
+        payload = json.loads(prompts[0].split('\n', 1)[1])
+        self.assertEqual(len(payload['tasks']), 14)
+        self.assertTrue(all('full_context' in t and 'has_more_details' not in t for t in payload['tasks']))
+        self.assertEqual(payload['tasks'][0]['status'], 'in_progress')
+        self.assertEqual(len(payload['previous_plan']['periods']), 30)
+        self.assertEqual(payload['previous_plan']['blocked_dates'], ['2026-11-29'])
+        self.assertNotIn('truncated', payload['previous_plan'])
+
+    async def test_small_context_model_stays_within_budget_and_uses_retrieval(self):
+        # Сценарий B: модель 32K удерживает первый промпт в реальном бюджете, сохраняя все ID и детали в get_task_details.
+        ids14 = list(range(1, 15))
+        block = 'Detailed requirements and schedule notes for task planning. ' * 380
+        tasks14 = [
+            {
+                'id': tid,
+                'title': f'Задача #{tid}',
+                'priority': 'medium',
+                'completed_work_minutes': 0,
+                'summary': f'Кратко #{tid}',
+                'full_context': f'Подробности #{tid}: {block}',
+            }
+            for tid in ids14
+        ]
+        plan14 = proposal_payload(
+            ids14, [task_item(tid, 45) for tid in ids14],
+            [work_period(tid, '2026-11-23', '2026-11-28', 45) for tid in ids14],
+        )
+        prompts = []
+        tool_results = []
+        await self.run_agent(
+            [[('get_task_details', {'task_ids': [1, 2], 'context_offset': None}), ('propose_plan', plan14)]],
+            tasks=tasks14,
+            provider_metadata={'model': 'small-model', 'context_window': 32_000, 'theoretical_context_window': 32_000, 'max_input_tokens': None, 'max_output_tokens': 4_096},
+            config={'model': 'small-model'},
+            captured_prompts=prompts,
+            captured_tools=tool_results,
+        )
+        self.assertLessEqual(ameba_service._estimate_tokens(prompts[0]), 16_000)
+        payload = json.loads(prompts[0].split('\n', 1)[1])
+        self.assertEqual([t['id'] for t in payload['tasks']], ids14)
+        self.assertTrue(all(t.get('has_more_details') for t in payload['tasks']))
+        self.assertEqual([t['id'] for t in tool_results[0][1]['tasks']], [1, 2])
+        self.assertTrue(all('Подробности #' in t['full_context'] for t in tool_results[0][1]['tasks']))
+
+    async def test_large_individual_task_chunked_losslessly_and_recovered(self):
+        # Сценарий D: гигантский отчёт Monocle (~180K символов) разбивается на чанки без потери данных.
+        giant_text = '\n'.join(f'Строка {i:04d}: ' + ('подробный текст отчёта Monocle ' * 4) for i in range(1300))
+        self.assertGreater(len(giant_text), 170_000)
+        tasks = [{'id': 1, 'title': 'Гигантская задача', 'completed_work_minutes': 0, 'summary': 'Кратко', 'full_context': giant_text}]
+        plan = proposal_payload([1], [task_item(1, 180)], [work_period(1, '2026-11-23', '2026-11-27', 180)])
+        prompts = []
+        tool_results = []
+        await self.run_agent(
+            [[
+                ('get_task_details', {'task_ids': [1], 'context_offset': 0}),
+                ('propose_plan', plan),
+            ]],
+            tasks=tasks,
+            provider_metadata={'model': 'gemini-pro', 'context_window': 1_000_000, 'theoretical_context_window': 1_000_000, 'max_input_tokens': None, 'max_output_tokens': None},
+            captured_prompts=prompts,
+            captured_tools=tool_results,
+        )
+        # В начальном промпте огромная задача не раздувает сообщение сверх per-task лимита, а инструмент режет на чанки.
+        first_chunk = tool_results[0][1]['tasks'][0]
+        self.assertIn('full_context_chunk', first_chunk)
+        meta1 = first_chunk['full_context_chunk']
+        self.assertTrue(meta1['has_more'])
+        self.assertEqual(meta1['total_chars'], len(giant_text))
+        next_off = meta1['next_offset']
+        self.assertIn(f'context_offset={next_off}', tool_results[0][1]['note'])
+
+        # Проверяем сборку всех оставшихся чанков напрямую через handler на реальном AmebaTools.
+        chunks = [first_chunk['full_context']]
+        handler = ameba_service.AmebaTools({'tasks': tasks, 'now': NOW}, empty_week(), MagicMock())
+        while next_off is not None:
+            out, _ = await handler.call('get_task_details', {'task_ids': [1], 'context_offset': next_off})
+            c = out['tasks'][0]
+            chunks.append(c['full_context'])
+            next_off = c['full_context_chunk']['next_offset']
+        self.assertEqual(''.join(chunks), giant_text)
+
+    async def test_compaction_signals_recovery_without_asking_user(self):
+        # Сценарий F: при событии сжатия контекста второй ход явно инструктируется догрузить детали и прошлый план без ask_user.
+        tasks = [
+            {'id': 1, 'title': 'Лабораторная', 'completed_work_minutes': 0, 'full_context': 'Полное условие'},
+            {'id': 2, 'title': 'Отчёт', 'completed_work_minutes': 0, 'full_context': 'Детали отчёта'},
+        ]
+        prev = {
+            'task_ids': [1, 2],
+            'explanation': 'Старый план.',
+            'schedule': {'version': 3, 'blocked_dates': [], 'periods': [work_period(1, '2026-11-23', '2026-11-24', 60)]},
+        }
+        plan = proposal_payload([1, 2], [task_item(1, 60), task_item(2, 60)], [work_period(1, '2026-11-23', '2026-11-24', 60), work_period(2, '2026-11-25', '2026-11-26', 60)])
+        prompts = []
+        tool_results = []
+        ask_mock = AsyncMock(return_value={'answer': 'Подтвердить'})
+        compacted_first = TurnOutcome(
+            text='', completed=True, status='completed', error_detail=None,
+            usage={'input_tokens': 5000, 'output_tokens': 100}, compacted=True,
+        )
+        await self.run_agent(
+            [[], [('get_task_details', {'task_ids': [1], 'context_offset': None}), ('propose_plan', plan)]],
+            tasks=tasks,
+            previous_plan=prev,
+            ask_mock=ask_mock,
+            turn_outcomes=[compacted_first, None],
+            captured_prompts=prompts,
+            captured_tools=tool_results,
+        )
+        ask_mock.assert_not_called()
+        self.assertEqual(len(prompts), 2)
+        self.assertIn('сжат', prompts[1].lower())
+        self.assertIn('get_task_details', prompts[1])
+        self.assertEqual(tool_results[0][1]['tasks'][0]['previous_periods'][0]['start_date'], '2026-11-23')
+
+    async def test_provider_smaller_effective_limit_respected_and_clamped_on_overflow(self):
+        # Сценарий G: (1) top_provider ограничивает 1M модель до 32K, (2) ошибка contextWindowExceeded переключает в компактный режим и запоминает лимит.
+        ids14 = list(range(1, 15))
+        block = 'Detailed requirements and schedule notes for task planning. ' * 380
+        tasks14 = [
+            {'id': tid, 'title': f'Задача #{tid}', 'priority': 'medium', 'completed_work_minutes': 0, 'full_context': f'Контекст #{tid}: {block}'}
+            for tid in ids14
+        ]
+        plan14 = proposal_payload(ids14, [task_item(tid, 60) for tid in ids14], [work_period(tid, '2026-11-23', '2026-11-28', 60) for tid in ids14])
+
+        # G1: проактивный учёт меньшего эффективного лимита провайдера
+        g1_prompts = []
+        await self.run_agent(
+            [[('propose_plan', plan14)]],
+            tasks=tasks14,
+            provider_metadata={'model': 'gemini-pro', 'context_window': 32_000, 'theoretical_context_window': 1_000_000, 'max_input_tokens': None, 'max_output_tokens': None},
+            config={'model': 'gemini-pro'},
+            captured_prompts=g1_prompts,
+        )
+        g1_payload = json.loads(g1_prompts[0].split('\n', 1)[1])
+        self.assertTrue(all(t.get('has_more_details') for t in g1_payload['tasks']))
+
+        # G2: модель заявляет 1M, первый ход падает с contextWindowExceeded -> сразу переключение на компактный поток и память на следующий запуск
+        overflow = TurnOutcome(
+            text='', completed=False, status='failed', error_detail='Ameba: превышен контекст модели',
+            usage={'input_tokens': 0, 'output_tokens': 0}, error_kind='contextWindowExceeded',
+        )
+        g2_prompts = []
+        res = await self.run_agent(
+            [[('get_task_details', {'task_ids': [1], 'context_offset': None}), ('propose_plan', plan14)]],
+            tasks=tasks14,
+            provider_metadata={'model': 'gemini-proxy', 'context_window': 1_000_000, 'theoretical_context_window': 1_000_000, 'max_input_tokens': None, 'max_output_tokens': None},
+            config={'model': 'gemini-proxy'},
+            turn_outcomes=[overflow, None],
+            captured_prompts=g2_prompts,
+        )
+        self.assertEqual(res['task_ids'], ids14)
+        self.assertEqual(len(g2_prompts), 2)
+        self.assertGreater(len(g2_prompts[0]), len(g2_prompts[1]) * 3)
+        second_payload = json.loads(g2_prompts[1].split('\n', 1)[1])
+        self.assertTrue(all(t.get('has_more_details') for t in second_payload['tasks']))
+
+        # Повторный запуск с тем же кэшем больше не шлёт огромный 80K промпт
+        g2_repeat_prompts = []
+        await self.run_agent(
+            [[('propose_plan', plan14)]],
+            tasks=tasks14,
+            provider_metadata={'model': 'gemini-proxy', 'context_window': 1_000_000, 'theoretical_context_window': 1_000_000, 'max_input_tokens': None, 'max_output_tokens': None},
+            config={'model': 'gemini-proxy'},
+            captured_prompts=g2_repeat_prompts,
+            keep_capability_cache=True,
+        )
+        repeat_payload = json.loads(g2_repeat_prompts[0].split('\n', 1)[1])
+        self.assertLess(len(g2_repeat_prompts[0]), len(g2_prompts[0]) // 2)
+        self.assertTrue(any(t.get('has_more_details') for t in repeat_payload['tasks']))
+        clear_model_capability_cache()
 
 
 class StorageTests(unittest.TestCase):

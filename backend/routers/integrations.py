@@ -447,6 +447,7 @@ class ContextConfig(BaseAgentConfig):
 
 class AmebaConfig(BaseAgentConfig):
     enabled: bool = False
+    context_window: int | None = Field(default=None, ge=4096, le=10_000_000)
     auto_replan: bool = True
     planning_style: Literal['gentle', 'balanced', 'intense'] = 'balanced'
     allow_context_recheck: bool = True

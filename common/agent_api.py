@@ -7,6 +7,8 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 from openai import AsyncOpenAI, APIConnectionError, APIStatusError
 
+from common.codex_harness import cache_provider_models
+
 
 MODEL_FIRST_DATA_TIMEOUT = 180
 MODEL_IDLE_TIMEOUT = 180
@@ -42,11 +44,13 @@ def agent_routes(app, label):
     async def models(body: dict):
         if not body.get('api_key'):
             raise HTTPException(400, f'Сохраните API-ключ {label}')
-        async with AsyncOpenAI(api_key=body['api_key'], base_url=body.get('base_url') or 'https://lenec.tech/v1',
+        endpoint = body.get('base_url') or 'https://lenec.tech/v1'
+        async with AsyncOpenAI(api_key=body['api_key'], base_url=endpoint,
                               http_client=httpx.AsyncClient(timeout=30), max_retries=0) as client:
             available = await client.models.list()
-            result = {model.id async for model in available if model.id}
-        return sorted(result)
+            items = [model async for model in available if getattr(model, 'id', None)]
+        cache_provider_models(endpoint, items)
+        return sorted({model.id for model in items})
 
 
 def response_text(response) -> str:

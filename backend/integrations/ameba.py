@@ -232,7 +232,7 @@ def _collect_task_state(session):
                 'full_context': usage['full_markdown'],
                 'time_estimate': usage.get('time_estimate'),
                 'effort': usage.get('effort'), 'impact': usage.get('impact'),
-                'deadline': normalize_utc(task.deadline), 'priority': task.priority,
+                'deadline': normalize_utc(task.deadline), 'priority': task.priority, 'status': task.status,
                 'completed_work_minutes': task.completed_work_minutes,
                 'subtasks': task_subs,
             })
@@ -312,6 +312,7 @@ def _build_signature(session, state, include_ameba_facts: bool = True, adjustmen
                 key: ameba_cfg.get(key)
                 for key in ('auth_mode', 'model', 'reasoning_effort', 'planning_style', 'allow_context_recheck', 'custom_instructions')
             },
+            **({'context_window': ameba_cfg['context_window']} if ameba_cfg.get('context_window') is not None else {}),
         },
     }, sort_keys=True)
 

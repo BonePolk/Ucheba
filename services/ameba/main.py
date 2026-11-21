@@ -21,12 +21,15 @@ from common.agent_questions import QUESTION_INSTRUCTION, QUESTION_TOOL, ask_user
 from common.codex_harness import (
     CONTAINER_SANDBOX,
     McpToolAdapter,
+    ModelCapabilities,
     append_custom_instructions,
     check_connection,
+    detect_model_capabilities,
     normalize_auth,
     normalize_effort,
     open_codex,
     prepare_codex_root,
+    record_runtime_context_limit,
     run_codex_turn,
     scratch_env,
     serve_mcp,
@@ -130,9 +133,9 @@ GET_TASK_DETAILS_TOOL = {
     'name': 'get_task_details',
     'description': (
         'Получить полные сведения по выбранным задачам из данных Ucheba '
-        '(полный контекст Monocle, описание, заметки владельца, подзадачи, прогресс, сроки, ручные оценки и пины). '
-        'Вызывай, если для оценки задачи не хватает деталей из краткого обзора или часть контекста была сжата/утрачена. '
-        'Для большого списка запрашивай задачи порциями (например, по 5–8 ID).'
+        '(полный контекст Monocle, описание, заметки владельца, подзадачи, прогресс, сроки, периоды прошлого плана, ручные оценки и пины). '
+        'Вызывай, если деталей в первом сообщении не хватает, задача помечена has_more_details или часть контекста была сжата. '
+        'Если ответ разбит на части, передай context_offset из full_context_chunk.next_offset.'
     ),
     'strict': True,
     'parameters': {
@@ -142,8 +145,12 @@ GET_TASK_DETAILS_TOOL = {
                 'type': 'array',
                 'items': {'type': 'integer'},
             },
+            'context_offset': {
+                'type': ['integer', 'null'],
+                'description': 'Смещение в символах для чтения продолжения длинного full_context первой задачи; обычно null.',
+            },
         },
-        'required': ['task_ids'],
+        'required': ['task_ids', 'context_offset'],
         'additionalProperties': False,
     },
 }
@@ -205,10 +212,10 @@ AMEBA_INSTRUCTIONS = (
     'Правила:\n'
     '1. Сама оценивай приоритеты, срочность, объём, усталость, делимость дел (объёмное или бытовое удобно вести постепенно, '
     'неделимую встречу/контрольную держи в один период), а также удачные сочетания с событиями календаря (например, заехать по дороге, если это известно из контекста или памяти).\n'
-    '2. У тебя есть все актуальные ID задач; в первом сообщении дан только краткий обзор каждой задачи. '
-    'Если сведения о задаче неполные, сокращены, забыты или диалог был сжат — вызови get_task_details (для большого числа задач порциями по 5–8 ID) и восстанови детали через инструменты вместо опоры на неполную память. '
-    'Никогда не проси владельца вручную повторять данные задач, которые уже хранятся в Ucheba. '
-    'Вызывай ask_user только когда нужных сведений действительно нет в доступных источниках (get_task_details, read_user_memory), они противоречивы или требуется личное решение владельца.\n'
+    '2. В первом сообщении переданы все актуальные ID задач; объём деталей адаптируется к бюджету контекста модели. '
+    'Если детали задач или сведения предыдущего плана отсутствуют в твоём активном контексте (были сокращены или диалог был сжат), '
+    'восстанови их через доступные инструменты (get_task_details, read_user_memory), вместо того чтобы просить владельца повторять уже сохранённую информацию. '
+    'Вызывай ask_user только когда нужных сведений действительно нет в доступных источниках, они противоречивы или требуется личное решение владельца.\n'
     '3. Отличай подтверждённые факты от догадок: не выдумывай маршруты, локации, дедлайны и привычки. Перед вызовом propose_plan убедись, что учтена каждая актуальная задача.\n'
     '4. Предлагай гибкие периоды (start_date..end_date + estimated_minutes), оставляй спокойные дни (kind="rest") и не заполняй все свободные часы. Постоянный календарь принадлежит владельцу и Straus.\n'
     '5. В remaining_minutes оценивай оставшуюся работу с учётом уже выполненного completed_work_minutes. Если времени до срока не хватает — не занижай оценку и не убирай отдых, а честно укажи причину в deadline_risk.\n'
@@ -226,21 +233,86 @@ AMEBA_INSTRUCTIONS = (
 OVERVIEW_CONTEXT_CHARS = 280
 OVERVIEW_NOTES_CHARS = 240
 OVERVIEW_ESTIMATE_CHARS = 180
-MAX_DETAILS_BATCH = 8
-MAX_DETAILS_CHARS = 48000
+MAX_TOOL_RESPONSE_TOKENS = 64_000
 
 
-def _compact_previous(previous_plan: dict | None, titles_by_id: dict[int, str] | None = None) -> dict | None:
+def _estimate_tokens(text: str | None) -> int:
+    s = str(text or '')
+    if not s:
+        return 0
+    ascii_chars = sum(1 for ch in s if ord(ch) < 128)
+    return max(1, (ascii_chars + 3) // 4 + (len(s) - ascii_chars + 1) // 2)
+
+
+def _estimate_json_tokens(obj) -> int:
+    return _estimate_tokens(json.dumps(obj, ensure_ascii=False, separators=(',', ':'), default=str))
+
+
+def _plan_context_budget(
+    caps: ModelCapabilities,
+    *,
+    overhead_tokens: int,
+    reasoning_effort: str = 'medium',
+) -> dict:
+    effective = caps.effective_limit
+    if effective is None:
+        return {
+            'known': False,
+            'effective_limit': None,
+            'theoretical_limit': caps.theoretical_context_window,
+            'overhead_tokens': overhead_tokens,
+            'reserved_tokens': None,
+            'initial_prompt_tokens': 10_000,
+            'previous_plan_tokens': 3_000,
+            'tool_response_tokens': 12_000,
+            'per_task_inline_tokens': 2_000,
+            'single_task_chunk_tokens': 10_000,
+            'source': caps.source,
+        }
+    effort_bonus = {'low': 4_000, 'medium': 8_000, 'high': 16_000}.get(reasoning_effort, 8_000)
+    base_reserve = max(4_000, min(120_000, int(effective * 0.15) + effort_bonus, int(effective * 0.45)))
+    if caps.max_output_tokens:
+        base_reserve = max(base_reserve, min(caps.max_output_tokens * 2, int(effective * 0.45)))
+    reserved = overhead_tokens + base_reserve
+    usable = max(2_000, effective - reserved)
+    initial_prompt_tokens = max(2_000, min(usable, int(effective * 0.65)))
+    previous_plan_tokens = max(1_000, int(initial_prompt_tokens * 0.2))
+    tool_response_tokens = max(3_000, min(MAX_TOOL_RESPONSE_TOKENS, int(usable * 0.25)))
+    per_task_inline_tokens = max(1_500, min(MAX_TOOL_RESPONSE_TOKENS, int(initial_prompt_tokens * 0.35)))
+    single_task_chunk_tokens = max(2_500, min(MAX_TOOL_RESPONSE_TOKENS - 6_000, int(tool_response_tokens * 0.85)))
+    return {
+        'known': True,
+        'effective_limit': effective,
+        'theoretical_limit': caps.theoretical_context_window,
+        'overhead_tokens': overhead_tokens,
+        'reserved_tokens': reserved,
+        'initial_prompt_tokens': initial_prompt_tokens,
+        'previous_plan_tokens': previous_plan_tokens,
+        'tool_response_tokens': tool_response_tokens,
+        'per_task_inline_tokens': per_task_inline_tokens,
+        'single_task_chunk_tokens': single_task_chunk_tokens,
+        'source': caps.source,
+    }
+
+
+def _serialize_previous_plan(
+    previous_plan: dict | None,
+    titles_by_id: dict[int, str] | None = None,
+    *,
+    max_tokens: int | None = None,
+    pinned_ids: set[int] | None = None,
+) -> tuple[dict | None, dict[int, list[dict]], bool]:
     if not previous_plan or not isinstance(previous_plan, dict):
-        return None
+        return None, {}, False
     sched = previous_plan.get('schedule') or {}
     titles = titles_by_id or {}
     periods = []
-    for p in sched.get('periods', [])[:16]:
+    periods_by_task: dict[int, list[dict]] = {}
+    for p in sched.get('periods', []):
         tid = p.get('task_id')
         goal = p.get('goal')
         include_goal = bool(goal) and not (tid is not None and goal == titles.get(tid))
-        periods.append({
+        compact_p = {
             'kind': p.get('kind', 'work'),
             'start_date': p.get('start_date'),
             'end_date': p.get('end_date'),
@@ -248,11 +320,52 @@ def _compact_previous(previous_plan: dict | None, titles_by_id: dict[int, str] |
             **({'minutes': p['minutes']} if p.get('minutes') else {}),
             **({'goal': goal} if include_goal else {}),
             **({'context_hint': p['context_hint']} if p.get('context_hint') else {}),
-        })
+        }
+        periods.append(compact_p)
+        if tid is not None and compact_p['kind'] == 'work':
+            periods_by_task.setdefault(tid, []).append(compact_p)
     task_ids = previous_plan.get('task_ids', [])
-    if not periods and not task_ids:
-        return None
-    return {'task_ids': task_ids, 'explanation': previous_plan.get('explanation', ''), 'periods': periods}
+    blocked_dates = list(sched.get('blocked_dates') or [])
+    if not periods and not task_ids and not blocked_dates:
+        return None, {}, False
+    full = {
+        'task_ids': task_ids,
+        'explanation': previous_plan.get('explanation', ''),
+        **({'blocked_dates': blocked_dates} if blocked_dates else {}),
+        'periods': periods,
+    }
+    if max_tokens is None or _estimate_json_tokens(full) <= max_tokens:
+        return full, periods_by_task, False
+
+    expl_trimmed, _ = _trim_text(full['explanation'], OVERVIEW_CONTEXT_CHARS)
+    base = {
+        'task_ids': task_ids,
+        'explanation': expl_trimmed,
+        **({'blocked_dates': blocked_dates} if blocked_dates else {}),
+        'periods': [],
+        'truncated': True,
+        'total_periods': len(periods),
+        'note': 'Часть периодов предыдущего плана опущена из-за бюджета контекста; периоды по задаче доступны в get_task_details.',
+    }
+    used = _estimate_json_tokens(base)
+    pins = pinned_ids or set()
+    priority_idxs = [i for i, p in enumerate(periods) if p.get('kind') == 'rest' or p.get('task_id') in pins]
+    priority_set = set(priority_idxs)
+    other_idxs = [i for i in range(len(periods)) if i not in priority_set]
+    kept_idxs: list[int] = []
+    for idx in priority_idxs + other_idxs:
+        tok = _estimate_json_tokens(periods[idx]) + 2
+        if used + tok <= max_tokens:
+            used += tok
+            kept_idxs.append(idx)
+    kept_idxs.sort()
+    base['periods'] = [periods[i] for i in kept_idxs]
+    base['omitted_periods_count'] = len(periods) - len(kept_idxs)
+    return base, periods_by_task, True
+
+
+def _compact_previous(previous_plan: dict | None, titles_by_id: dict[int, str] | None = None) -> dict | None:
+    return _serialize_previous_plan(previous_plan, titles_by_id)[0]
 
 
 def _trim_text(text: str | None, limit: int) -> tuple[str, bool]:
@@ -267,6 +380,7 @@ def _base_task_fields(task: dict, now: datetime, zone: ZoneInfo) -> dict:
         'id': task['id'],
         'title': task['title'],
         'priority': task.get('priority', 'medium'),
+        **({'status': task['status']} if task.get('status') else {}),
         'completed_work_minutes': int(task.get('completed_work_minutes') or 0),
     }
     if task.get('deadline'):
@@ -331,7 +445,15 @@ def _compact_tasks(tasks: list[dict], now: datetime, zone: ZoneInfo) -> list[dic
     return compact
 
 
-def _task_details(task: dict, now: datetime, zone: ZoneInfo, adjustments: dict | None = None) -> dict:
+def _task_details(
+    task: dict,
+    now: datetime,
+    zone: ZoneInfo,
+    adjustments: dict | None = None,
+    *,
+    include_adjustments: bool = True,
+    previous_periods: list[dict] | None = None,
+) -> dict:
     item = _base_task_fields(task, now, zone)
     if task.get('deadline') and 'deadline_local' not in item:
         item['deadline'] = task['deadline']
@@ -356,7 +478,9 @@ def _task_details(task: dict, now: datetime, zone: ZoneInfo, adjustments: dict |
             }
             for s in task['subtasks']
         ]
-    if adjustments:
+    if previous_periods:
+        item['previous_periods'] = previous_periods
+    if include_adjustments and adjustments:
         tid_str = str(task['id'])
         raw_override = (adjustments.get('estimate_overrides') or {}).get(tid_str)
         if raw_override is not None:
@@ -367,6 +491,79 @@ def _task_details(task: dict, now: datetime, zone: ZoneInfo, adjustments: dict |
         if pin:
             item['task_pin'] = pin
     return item
+
+
+def _build_initial_tasks(
+    tasks: list[dict],
+    now: datetime,
+    zone: ZoneInfo,
+    *,
+    budget_tokens: int,
+    per_task_inline_tokens: int,
+    known_limit: bool,
+    force_compact: bool = False,
+) -> tuple[list[dict], list[int]]:
+    overviews = _compact_tasks(tasks, now, zone)
+    if force_compact:
+        return overviews, [ov['id'] for ov in overviews if ov.get('has_more_details')]
+    full_cards = [_task_details(t, now, zone, include_adjustments=False) for t in tasks]
+    ov_tokens = [_estimate_json_tokens(ov) for ov in overviews]
+    full_tokens = [_estimate_json_tokens(card) for card in full_cards]
+    if known_limit and sum(full_tokens) <= budget_tokens and all(tok <= per_task_inline_tokens for tok in full_tokens):
+        return full_cards, []
+    total = sum(ov_tokens)
+    selected = list(overviews)
+    deferred: list[int] = []
+    for idx, (ov, card, ov_tok, f_tok) in enumerate(zip(overviews, full_cards, ov_tokens, full_tokens)):
+        if known_limit and f_tok <= per_task_inline_tokens and total - ov_tok + f_tok <= budget_tokens:
+            selected[idx] = card
+            total = total - ov_tok + f_tok
+        elif ov.get('has_more_details'):
+            deferred.append(ov['id'])
+    return selected, deferred
+
+
+def _chunk_full_context(card: dict, offset: int, token_limit: int) -> dict:
+    full_ctx = str(card.get('full_context') or '')
+    total_len = len(full_ctx)
+    if offset < 0 or (offset >= total_len and total_len > 0):
+        raise ValueError(f'Некорректное смещение context_offset={offset} при длине контекста {total_len}.')
+    if total_len == 0:
+        chunked = dict(card)
+        chunked['full_context_chunk'] = {'offset': 0, 'end_offset': 0, 'total_chars': 0, 'has_more': False, 'next_offset': None}
+        return chunked
+    base = {k: v for k, v in card.items() if k != 'full_context'}
+    avail_tokens = max(400, token_limit - _estimate_json_tokens(base) - 40)
+    lo = min(total_len, offset + min(256, total_len - offset))
+    hi = min(total_len, offset + avail_tokens * 4)
+    if hi <= lo:
+        end = lo
+    else:
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if _estimate_tokens(full_ctx[offset:mid]) <= avail_tokens:
+                lo = mid
+            else:
+                hi = mid - 1
+        end = lo
+        if end < total_len:
+            floor = offset + max(128, (end - offset) * 4 // 5)
+            for sep in ('\n\n', '\n', ' '):
+                pos = full_ctx.rfind(sep, floor, end)
+                if pos > offset:
+                    end = pos + len(sep)
+                    break
+    chunked = dict(base)
+    chunked['full_context'] = full_ctx[offset:end]
+    has_more = end < total_len
+    chunked['full_context_chunk'] = {
+        'offset': offset,
+        'end_offset': end,
+        'total_chars': total_len,
+        'has_more': has_more,
+        'next_offset': end if has_more else None,
+    }
+    return chunked
 
 
 class AmebaTools:
@@ -384,6 +581,59 @@ class AmebaTools:
         self.confirmed_progress: list[dict] = []
         self.validated = None
         self.adapter = None
+        self.capabilities = ModelCapabilities()
+        self.budget = _plan_context_budget(self.capabilities, overhead_tokens=4_000)
+        self.previous_periods_by_task: dict[int, list[dict]] = {}
+        self.previous_plan_truncated = False
+        self.compaction_count = 0
+        self.used_input_tokens = 0
+        self.pending_tool_tokens = 0
+
+    def configure_context(
+        self,
+        capabilities: ModelCapabilities,
+        budget: dict,
+        *,
+        initial_prompt_tokens: int,
+        previous_periods_by_task: dict[int, list[dict]],
+        previous_plan_truncated: bool,
+    ) -> None:
+        self.capabilities = capabilities
+        self.budget = budget
+        self.previous_periods_by_task = previous_periods_by_task
+        self.previous_plan_truncated = previous_plan_truncated
+        self.used_input_tokens = budget['overhead_tokens'] + initial_prompt_tokens
+        self.pending_tool_tokens = 0
+
+    def on_token_usage(self, *, last_usage=None, total_usage=None, context_window: int | None = None) -> None:
+        used = None
+        if isinstance(last_usage, dict):
+            used = last_usage.get('total_tokens') or last_usage.get('input_tokens')
+        if type(used) is int and used > 0:
+            self.used_input_tokens = used
+            self.pending_tool_tokens = 0
+        if type(context_window) is int and context_window >= 4096:
+            cur = self.capabilities.effective_limit
+            if cur is None or context_window < cur:
+                self.capabilities = ModelCapabilities(
+                    model=self.capabilities.model,
+                    context_window=context_window,
+                    theoretical_context_window=self.capabilities.theoretical_context_window or context_window,
+                    max_input_tokens=self.capabilities.max_input_tokens,
+                    max_output_tokens=self.capabilities.max_output_tokens,
+                    source='runtime',
+                )
+                self.budget = _plan_context_budget(
+                    self.capabilities,
+                    overhead_tokens=self.budget['overhead_tokens'],
+                    reasoning_effort=self.budget.get('reasoning_effort', 'medium'),
+                )
+
+    def on_compaction(self) -> None:
+        self.compaction_count += 1
+        self.pending_tool_tokens = 0
+        if self.used_input_tokens > 0:
+            self.used_input_tokens = max(2_000, self.used_input_tokens // 2)
 
     def _finalize(self, proposal, days):
         materialized = planning.materialize_plan(
@@ -435,6 +685,13 @@ class AmebaTools:
                 raw_ids = args.get('task_ids')
                 if not isinstance(raw_ids, list) or not raw_ids or any(isinstance(v, bool) or not isinstance(v, int) for v in raw_ids):
                     raise ValueError('Укажи непустой список целых ID задач в task_ids.')
+                raw_offset = args.get('context_offset')
+                if raw_offset is None:
+                    offset = 0
+                elif isinstance(raw_offset, bool) or not isinstance(raw_offset, int) or raw_offset < 0:
+                    raise ValueError('context_offset должен быть неотрицательным целым числом или null.')
+                else:
+                    offset = raw_offset
                 requested_ids = list(dict.fromkeys(raw_ids))
                 tasks_by_id = {task['id']: task for task in self.tasks}
                 found_ids = [tid for tid in requested_ids if tid in tasks_by_id]
@@ -447,20 +704,44 @@ class AmebaTools:
                         'missing_task_ids': missing_ids[:20],
                         'available_task_ids': self.expected,
                     }, []
+                if self.budget['known'] and self.budget['effective_limit']:
+                    base_reserve = (self.budget['reserved_tokens'] or 4_000) - self.budget['overhead_tokens']
+                    remaining = max(2_000, self.budget['effective_limit'] - (self.used_input_tokens + self.pending_tool_tokens) - base_reserve)
+                    resp_token_budget = max(2_000, min(self.budget['tool_response_tokens'], int(remaining * 0.5)))
+                else:
+                    resp_token_budget = self.budget['tool_response_tokens']
+                include_prev = self.previous_plan_truncated or self.compaction_count > 0
                 details = []
-                total_chars = 0
+                total_tokens = 0
                 deferred_ids = []
+                chunk_note = None
                 for idx, tid in enumerate(found_ids):
-                    if idx >= MAX_DETAILS_BATCH:
-                        deferred_ids = found_ids[idx:]
+                    card = _task_details(
+                        tasks_by_id[tid],
+                        self.now,
+                        self.zone,
+                        self.adjustments,
+                        previous_periods=self.previous_periods_by_task.get(tid) if include_prev else None,
+                    )
+                    card_tokens = _estimate_json_tokens(card)
+                    item_offset = offset if idx == 0 else 0
+                    if item_offset > 0 or (not details and card_tokens > resp_token_budget):
+                        chunk_limit = min(resp_token_budget, self.budget['single_task_chunk_tokens'])
+                        chunked = _chunk_full_context(card, item_offset, chunk_limit)
+                        details.append(chunked)
+                        chunk_meta = chunked['full_context_chunk']
+                        deferred_ids = found_ids[idx + 1:]
+                        if chunk_meta['has_more']:
+                            chunk_note = (
+                                f'Контекст задачи {tid} показан до позиции {chunk_meta["end_offset"]} из {chunk_meta["total_chars"]}; '
+                                f'для продолжения вызови get_task_details с task_ids=[{tid}] и context_offset={chunk_meta["next_offset"]}.'
+                            )
                         break
-                    card = _task_details(tasks_by_id[tid], self.now, self.zone, self.adjustments)
-                    card_chars = len(json.dumps(card, ensure_ascii=False, default=str))
-                    if details and total_chars + card_chars > MAX_DETAILS_CHARS:
+                    if details and total_tokens + card_tokens > resp_token_budget:
                         deferred_ids = found_ids[idx:]
                         break
                     details.append(card)
-                    total_chars += card_chars
+                    total_tokens += card_tokens
                 self.progress.add(f'Загрузила детали задач ({len(details)} шт.)')
                 output = {
                     'tasks': details,
@@ -470,7 +751,13 @@ class AmebaTools:
                     output['available_task_ids'] = self.expected
                 if deferred_ids:
                     output['deferred_task_ids'] = deferred_ids
-                    output['note'] = f'Загружена часть списка; запроси get_task_details для оставшихся ID: {deferred_ids}.'
+                notes = [n for n in (
+                    chunk_note,
+                    f'Загружена часть списка; запроси get_task_details для оставшихся ID: {deferred_ids}.' if deferred_ids else None,
+                ) if n]
+                if notes:
+                    output['note'] = ' '.join(notes)
+                self.pending_tool_tokens += _estimate_json_tokens(output)
                 return output, []
             if name == 'record_progress':
                 tid = int(args['task_id'])
@@ -608,8 +895,7 @@ async def rank(body: dict):
     horizon_days = planning.compute_horizon(tasks, now_local.date(), zone)
     days = planning.calendar_days(planning_week, body['now'], horizon_days=horizon_days, adjustments=adjustments)
 
-    payload = {
-        'tasks': _compact_tasks(tasks, now, zone),
+    fixed_payload = {
         'calendar_days': planning.calendar_overview(days),
         'timezone': tz,
         'current_clock': {
@@ -619,12 +905,18 @@ async def rank(body: dict):
         },
     }
     if visible_memory:
-        payload['user_memory'] = visible_memory
+        fixed_payload['user_memory'] = visible_memory
     feedback_text = (body.get('user_feedback') or '').strip()
     if feedback_text:
-        payload['user_feedback'] = feedback_text
+        fixed_payload['user_feedback'] = feedback_text
+    pinned_ids: set[int] = set()
     if adjustments:
         compact_adj = {k: adjustments[k] for k in ('day_overrides', 'task_pins') if adjustments.get(k)}
+        for raw_tid in (adjustments.get('task_pins') or {}):
+            try:
+                pinned_ids.add(int(raw_tid))
+            except (TypeError, ValueError):
+                pass
         raw_overrides = adjustments.get('estimate_overrides') or {}
         if raw_overrides:
             done_by_id = {str(t['id']): int(t.get('completed_work_minutes') or 0) for t in tasks}
@@ -636,20 +928,9 @@ async def rank(body: dict):
             if eff_overrides:
                 compact_adj['estimate_overrides'] = eff_overrides
         if compact_adj:
-            payload['manual_adjustments'] = compact_adj
-    prev = _compact_previous(body.get('previous_plan'), titles_by_id={t['id']: t['title'] for t in tasks})
-    if prev:
-        payload['previous_plan'] = prev
+            fixed_payload['manual_adjustments'] = compact_adj
     if body.get('checked_contexts'):
-        payload['checked_contexts'] = body['checked_contexts']
-
-    prompt_text = (
-        f'Составь интеллектуальный план на ближайшие дни для всех {len(expected)} задач (ID: {expected}). '
-        'Ниже дан краткий обзор всех задач; если для каких-то задач не хватает деталей, контекста, подзадач или часть контекста сжата, '
-        'вызови get_task_details (для большого списка порциями по 5–8 ID). Не спрашивай владельца о данных, которые уже есть в Ucheba. '
-        'Учитывай calendar_days, user_memory, user_feedback и ограничения; затем вызови propose_plan.\n'
-        + json.dumps(payload, ensure_ascii=False, separators=(',', ':'), default=str)
-    )
+        fixed_payload['checked_contexts'] = body['checked_contexts']
 
     active_tools = [tool for tool in AMEBA_TOOLS if allow_context_recheck or tool['name'] != 'request_context_check']
     instructions = ISSUE_INSTRUCTION + QUESTION_INSTRUCTION + NOTE_INSTRUCTION + AMEBA_INSTRUCTIONS
@@ -660,6 +941,52 @@ async def rank(body: dict):
     if not allow_context_recheck:
         instructions += '\nПерепроверка через Monocle (request_context_check) отключена: планируй по текущему контексту.'
     instructions = append_custom_instructions(instructions, custom_instructions)
+    overhead_tokens = _estimate_tokens(instructions) + _estimate_json_tokens(active_tools) + 1_500
+    fixed_tokens = _estimate_json_tokens(fixed_payload)
+    titles_by_id = {t['id']: t['title'] for t in tasks}
+    ov_floor = sum(_estimate_json_tokens(ov) for ov in _compact_tasks(tasks, now, zone))
+
+    def _build_prompt(caps: ModelCapabilities, *, force_compact: bool = False):
+        budget = _plan_context_budget(caps, overhead_tokens=overhead_tokens, reasoning_effort=reasoning_effort)
+        budget['reasoning_effort'] = reasoning_effort
+        avail_after_ov = max(0, budget['initial_prompt_tokens'] - fixed_tokens - ov_floor - 300)
+        if force_compact:
+            prev_limit = min(2_000, max(500, avail_after_ov // 2))
+        elif budget['known']:
+            prev_limit = min(budget['previous_plan_tokens'], max(1_000, int(avail_after_ov * 0.35)))
+        else:
+            prev_limit = budget['previous_plan_tokens']
+        prev_obj, prev_by_task, prev_truncated = _serialize_previous_plan(
+            body.get('previous_plan'),
+            titles_by_id=titles_by_id,
+            max_tokens=prev_limit,
+            pinned_ids=pinned_ids,
+        )
+        prev_tokens = _estimate_json_tokens(prev_obj) if prev_obj else 0
+        tasks_budget = max(ov_floor, budget['initial_prompt_tokens'] - fixed_tokens - prev_tokens - 300)
+        selected_tasks, deferred_ids = _build_initial_tasks(
+            tasks,
+            now,
+            zone,
+            budget_tokens=tasks_budget,
+            per_task_inline_tokens=budget['per_task_inline_tokens'],
+            known_limit=budget['known'],
+            force_compact=force_compact,
+        )
+        payload = {'tasks': selected_tasks, **fixed_payload}
+        if prev_obj:
+            payload['previous_plan'] = prev_obj
+        if not deferred_ids and not prev_truncated:
+            hint = 'Ниже переданы актуальные сведения по задачам и прошлому плану; вызывай get_task_details только если часть контекста будет сжата или понадобится сверка.'
+        else:
+            hint = 'Ниже переданы задачи; для позиций с has_more_details или при потере части прошлого плана загружай детали через get_task_details, а не спрашивай владельца о данных Ucheba.'
+        text = (
+            f'Составь интеллектуальный план на ближайшие дни для всех {len(expected)} задач (ID: {expected}). '
+            f'{hint} Учитывай calendar_days, user_memory, user_feedback и ограничения; затем вызови propose_plan.\n'
+            + json.dumps(payload, ensure_ascii=False, separators=(',', ':'), default=str)
+        )
+        return text, budget, deferred_ids, prev_by_task, prev_truncated
+
     sandbox = Sandbox.full_access if CONTAINER_SANDBOX else Sandbox.read_only
 
     with Progress('Ameba', body.get('task_id', 0), namespace='ranking') as progress:
@@ -672,6 +999,8 @@ async def rank(body: dict):
         progress.add('Изучает задачи, календарь и привычки владельца')
         tools_handler = AmebaTools(body, planning_week, progress, run_id=run_id)
         adapter = McpToolAdapter(active_tools, tools_handler.call, progress)
+        adapter.on_token_usage = tools_handler.on_token_usage
+        adapter.on_compaction = tools_handler.on_compaction
         tools_handler.adapter = adapter
 
         async with scratch_env(writable=False) as (work_dir, shell_policy), serve_mcp(adapter) as mcp_config, open_codex(
@@ -694,6 +1023,28 @@ async def rank(body: dict):
                 developer_instructions=instructions,
                 config=mcp_config | shell_policy,
             )
+            caps = await detect_model_capabilities(
+                auth_mode=auth_mode,
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                config=config,
+                client=client,
+                thread=thread,
+            )
+            used_force_compact = False
+            prompt_text, budget, _, prev_by_task, prev_truncated = _build_prompt(caps, force_compact=False)
+            tools_handler.configure_context(
+                caps,
+                budget,
+                initial_prompt_tokens=_estimate_tokens(prompt_text),
+                previous_periods_by_task=prev_by_task,
+                previous_plan_truncated=prev_truncated,
+            )
+            logging.getLogger('uvicorn.error').info(
+                'Ameba context budget: model=%s effective=%s initial_budget=%s source=%s',
+                caps.model or '-', budget['effective_limit'], budget['initial_prompt_tokens'], budget['source'],
+            )
             outcome = await run_codex_turn(
                 thread,
                 ExternalMessage(tool_name='task_manager', content=prompt_text),
@@ -703,15 +1054,83 @@ async def rank(body: dict):
                 effort=reasoning_effort,
                 client=client,
             )
+            if outcome.context_window:
+                record_runtime_context_limit(
+                    auth_mode, base_url, caps.model or model, outcome.context_window,
+                    source='runtime', tighten_only=True,
+                )
+
+            if (
+                outcome.status == 'failed'
+                and outcome.error_kind == 'contextWindowExceeded'
+                and tools_handler.validated is None
+                and not (outcome.terminal_result and outcome.terminal_result.get('context_requests'))
+                and not used_force_compact
+            ):
+                rejected_tokens = _estimate_tokens(prompt_text) + overhead_tokens
+                clamped = max(8_000, min((caps.effective_limit // 2) if caps.effective_limit else rejected_tokens, int(rejected_tokens * 0.45)))
+                record_runtime_context_limit(
+                    auth_mode, base_url, caps.model or model, clamped,
+                    source='provider_limit', tighten_only=True,
+                )
+                caps = ModelCapabilities(
+                    model=caps.model,
+                    context_window=clamped,
+                    theoretical_context_window=caps.theoretical_context_window or caps.context_window,
+                    max_input_tokens=min(clamped, caps.max_input_tokens) if caps.max_input_tokens else None,
+                    max_output_tokens=caps.max_output_tokens,
+                    source='provider_limit',
+                )
+                progress.add('Провайдер ограничил объём контекста — повторяет в компактном режиме')
+                tools_handler.attempts = 0
+                adapter.fatal_error = None
+                used_force_compact = True
+                thread = await start_codex_thread(
+                    client,
+                    'Ameba',
+                    cwd=str(work_dir),
+                    sandbox=sandbox,
+                    ephemeral=True,
+                    approval_mode=ApprovalMode.deny_all,
+                    model=model or None,
+                    model_provider=thread_provider,
+                    developer_instructions=instructions,
+                    config=mcp_config | shell_policy,
+                )
+                prompt_text, budget, _, prev_by_task, prev_truncated = _build_prompt(caps, force_compact=True)
+                tools_handler.configure_context(
+                    caps,
+                    budget,
+                    initial_prompt_tokens=_estimate_tokens(prompt_text),
+                    previous_periods_by_task=prev_by_task,
+                    previous_plan_truncated=prev_truncated,
+                )
+                outcome = await run_codex_turn(
+                    thread,
+                    ExternalMessage(tool_name='task_manager', content=prompt_text),
+                    label='Ameba',
+                    progress=progress,
+                    adapter=adapter,
+                    effort=reasoning_effort,
+                    client=client,
+                )
 
             if not (outcome.terminal_result and outcome.terminal_result.get('context_requests')) and tools_handler.validated is None:
                 if outcome.status == 'failed':
                     raise HTTPException(502, outcome.error_detail or 'Ameba не завершила планирование. Предыдущий план сохранён.')
                 progress.add('Запрашивает вызов propose_plan')
+                was_compacted = outcome.compacted or tools_handler.compaction_count > 0
+                followup = (
+                    f'Заверши планирование для всех {len(expected)} задач (ID: {expected}) вызовом инструмента propose_plan. '
+                    + (
+                        'Контекст диалога был сжат — если детали каких-то задач или прошлого плана утрачены, восстанови их через get_task_details и read_user_memory, не спрашивай владельца.'
+                        if was_compacted
+                        else 'Если какие-то задачи выпали из памяти или были сжаты, сначала загрузи их через get_task_details.'
+                    )
+                )
                 outcome = await run_codex_turn(
                     thread,
-                    f'Заверши планирование для всех {len(expected)} задач (ID: {expected}) вызовом инструмента propose_plan. '
-                    'Если какие-то задачи выпали из памяти или были сжаты, сначала загрузи их через get_task_details.',
+                    followup,
                     label='Ameba',
                     progress=progress,
                     adapter=adapter,
