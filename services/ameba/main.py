@@ -31,7 +31,6 @@ from common.codex_harness import (
     serve_mcp,
     start_codex_thread,
 )
-from common.dates import deadline_facts
 from common.http import private_app
 from common.identity import user_id
 from common.progress import NOTE_INSTRUCTION, NOTE_TOOL, Progress, get_progress, get_work_progress
@@ -126,8 +125,9 @@ RECORD_PROGRESS_TOOL = {
     'type': 'function',
     'name': 'record_progress',
     'description': (
-        'Зафиксировать уже выполненное время по задаче с обязательным подтверждением владельца. '
-        'Вызывай только если владелец прямо сообщил о проделанной работе; никогда не вызывай для переноса или планов на будущее.'
+        'Добавить к уже выполненному времени по задаче (инкремент add_minutes) с обязательным подтверждением владельца. '
+        'Вызывай только если владелец прямо сообщил о проделанной работе; если назван общий итог, вычисли разницу с completed_work_minutes или уточни через ask_user. '
+        'Никогда не вызывай для переноса или планов на будущее.'
     ),
     'strict': True,
     'parameters': {
@@ -164,9 +164,10 @@ AMEBA_INSTRUCTIONS = (
     '2. Отличай подтверждённые факты от догадок: не выдумывай маршруты, локации, дедлайны и привычки. При нехватке критичной информации спроси через ask_user.\n'
     '3. Предлагай гибкие периоды (start_date..end_date + estimated_minutes), оставляй спокойные дни (kind="rest") и не заполняй все свободные часы. Постоянный календарь принадлежит владельцу и Straus.\n'
     '4. В remaining_minutes оценивай оставшуюся работу с учётом уже выполненного completed_work_minutes. Если времени до срока не хватает — не занижай оценку и не убирай отдых, а честно укажи причину в deadline_risk.\n'
-    '5. Соблюдай дедлайны (deadline_local), available_from, manual_adjustments (day_overrides, task_pins, estimate_overrides, task_note) и явные временные запреты владельца: '
-    'если владелец явно запретил работу в конкретные даты («пятницу оставь свободной», «завтра ничего не планируй»), перечисли их в blocked_dates и не ставь туда work-периоды; '
-    'если пожелание мягкое («желательно побольше отдыхать»), учитывай как ориентир без жёсткой блокировки.\n'
+    '5. Соблюдай реальные дедлайны (deadline_local, deadline_date_local, deadline_time_local), manual_adjustments (day_overrides, task_pins с mode="shift" для сдвига периода и mode="date" для желаемой даты, estimate_overrides, task_note) и явные временные запреты владельца: '
+    'если дедлайн стоит рано днём (например, в 01:00 или утром), старайся завершить работу заранее либо честно отметь риск точного времени в deadline_risk; для просроченных задач оцени по описанию и контексту, актуален ли досыл, и укажи просрочку в deadline_risk. '
+    'Если владелец явно запретил работу в конкретные даты («пятницу оставь свободной», «завтра ничего не планируй»), перечисли их в blocked_dates и не ставь однодневные или целиком закрытые work-периоды на эти даты (широкий гибкий период вида Пн–Пт допустим, если в нём есть открытые дни); '
+    'мягкие пожелания учитывай как ориентир без жёсткой блокировки.\n'
     '6. В preferences различай: once (только на этот расчёт), task (уточнение к конкретной задаче, укажи task_id), persistent (только устойчивая долгосрочная привычка).\n'
     '7. Изменять подтверждённый прогресс через propose_plan нельзя. Если владелец прямо сообщил о уже выполненной работе — вызови record_progress (Python запросит подтверждение у владельца); '
     'при неоднозначности формулировки или задачи сначала уточни через ask_user. Запросы на перенос или планы на будущее прогресс не меняют.\n'
@@ -208,15 +209,14 @@ def _compact_tasks(tasks: list[dict], now: datetime, zone: ZoneInfo) -> list[dic
         }
         if task.get('deadline'):
             item['deadline'] = task['deadline']
-            item['deadline_facts'] = deadline_facts(task.get('deadline'), now)
             dl_dt = planning.parse_dt(task.get('deadline'), timezone.utc)
             if dl_dt is not None:
                 dl_local = dl_dt.astimezone(zone)
                 item['deadline_local'] = dl_local.isoformat()
                 item['deadline_date_local'] = dl_local.date().isoformat()
                 item['deadline_time_local'] = dl_local.strftime('%H:%M')
-        if task.get('available_from'):
-            item['available_from'] = task['available_from']
+                item['deadline_passed'] = dl_dt <= now
+                item['seconds_until_deadline'] = int((dl_dt - now).total_seconds())
         for field in ('category', 'subject', 'owner_notes', 'task_note', 'time_estimate', 'effort', 'impact'):
             if task.get(field):
                 item[field] = task[field]
@@ -306,14 +306,14 @@ class AmebaTools:
                 if add_mins <= 0 or add_mins > 1440:
                     raise ValueError('Количество минут должно быть от 1 до 1440')
                 task_obj = next(t for t in self.tasks if t['id'] == tid)
+                base_mins = int(task_obj.get('completed_work_minutes') or 0)
                 question = json.dumps({
-                    'question': f'Записать +{add_mins} мин выполненного времени для «{task_obj["title"]}» ({str(args["reason"]).strip()})?',
+                    'question': f'Добавить +{add_mins} мин выполненного времени для «{task_obj["title"]}» (станет {base_mins + add_mins} мин; {str(args["reason"]).strip()})?',
                     'options': ['Подтвердить', 'Отменить'],
                 }, ensure_ascii=False)
                 res = await ask_user(question, self.progress)
                 answer = str((res or {}).get('answer') or '').strip().casefold()
                 if answer in ('подтвердить', 'да', 'ок', 'ok', 'confirm', 'yes'):
-                    base_mins = int(task_obj.get('completed_work_minutes') or 0)
                     task_obj['completed_work_minutes'] = base_mins + add_mins
                     self.confirmed_progress.append({
                         'task_id': tid,

@@ -1,13 +1,14 @@
 """Тесты упрощённой LLM-first Ameba: объективные ограничения, /refresh, прогресс с подтверждением, БД и eval-набор."""
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date as calendar_date, datetime, timedelta, timezone
 import json
 from pathlib import Path
 import sys
 import tempfile
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / 'services/ameba'), str(ROOT / 'backend')]
@@ -87,7 +88,7 @@ class ValidationTests(unittest.TestCase):
             [task_item(42, 150), task_item(43, 220)],
             [
                 work_period(42, '2026-11-23', '2026-11-27', 150, hint='После университета по дороге'),
-                work_period(43, '2026-11-24', '2026-11-26', 220),
+                work_period(43, '2026-11-24', '2026-11-24', 220),
                 rest_period('2026-11-28', '2026-11-29'),
             ],
         )
@@ -96,7 +97,13 @@ class ValidationTests(unittest.TestCase):
         res = planning.materialize_plan(prop, tasks, days, empty_week(events=events), NOW)
         self.assertEqual(res['schedule']['version'], 3)
         self.assertTrue(res['schedule']['fully_scheduled'])
-        self.assertEqual(sum(d['allocated_minutes'] for d in res['schedule']['daily_allocations']), 370)
+        self.assertTrue(res['schedule']['no_objective_conflicts'])
+        self.assertEqual(res['schedule']['feasibility_status'], 'no_objective_conflicts')
+        # Никаких искусственных дневных аллокаций; гибкий и однодневный периоды сохраняются как есть.
+        self.assertEqual(res['schedule']['daily_allocations'], [])
+        by_tid = {p['task_id']: p for p in res['schedule']['periods'] if p['kind'] == 'work'}
+        self.assertEqual((by_tid[42]['start_date'], by_tid[42]['end_date'], by_tid[42]['minutes']), ('2026-11-23', '2026-11-27', 150))
+        self.assertEqual((by_tid[43]['start_date'], by_tid[43]['end_date'], by_tid[43]['minutes']), ('2026-11-24', '2026-11-24', 220))
 
     def test_task_id_integrity(self):
         tasks = [{'id': 1, 'title': 'Первая'}, {'id': 2, 'title': 'Вторая'}]
@@ -123,67 +130,85 @@ class ValidationTests(unittest.TestCase):
         _, bd_issues, _ = planning.validate_proposal(bad_dates, [{'id': 1, 'title': 'Без срока'}], empty_week(), NOW)
         self.assertEqual({i['code'] for i in bd_issues}, {'date_in_past', 'outside_horizon'})
 
-    def test_trusted_constraints_deadlines_and_available_from(self):
-        # Будущий дедлайн из БД и доверенный available_from.
-        tasks = [{
-            'id': 1,
-            'title': 'Контрольная',
-            'deadline': '2026-11-27T11:00:00+00:00',
-            'available_from': '2026-11-26T14:00:00+00:00',
-            'completed_work_minutes': 0,
-        }]
-        early = proposal_payload([1], [task_item(1, 90)], [work_period(1, '2026-11-25', '2026-11-25', 90)])
-        _, early_issues, _ = planning.validate_proposal(early, tasks, empty_week(), NOW)
-        self.assertTrue(any(i['code'] == 'before_available_from' for i in early_issues))
-
+    def test_deadline_source_consistency_and_early_deadline(self):
+        # Реальные поля Task/_collect_task_state (без выдуманных available_from/deadline_type).
+        early_dl_task = [{'id': 1, 'title': 'Сдача проекта', 'deadline': '2026-11-27T01:00:00+00:00', 'completed_work_minutes': 0}]
         after_dl = proposal_payload([1], [task_item(1, 90)], [work_period(1, '2026-11-28', '2026-11-28', 90)])
-        _, dl_issues, _ = planning.validate_proposal(after_dl, tasks, empty_week(), NOW)
+        _, dl_issues, _ = planning.validate_proposal(after_dl, early_dl_task, empty_week(), NOW)
         self.assertTrue(any(i['code'] == 'after_deadline' for i in dl_issues))
 
-        # Явный soft дедлайн допускается; просроченный hard запрещён.
-        soft_tasks = [{'id': 1, 'title': 'Пет-проект', 'deadline': '2026-11-25T18:00:00Z', 'deadline_type': 'soft'}]
-        _, soft_issues, _ = planning.validate_proposal(
-            proposal_payload([1], [task_item(1, 60)], [work_period(1, '2026-11-26', '2026-11-26', 60)]),
-            soft_tasks, empty_week(), NOW,
-        )
-        self.assertEqual(soft_issues, [])
+        # Дедлайн Пт 01:00 + гибкий период Чт–Пт допустим, но не заявляется как гарантированно выполнимый.
+        thu_fri = proposal_payload([1], [task_item(1, 90)], [work_period(1, '2026-11-26', '2026-11-27', 90)])
+        prop_tf, issues_tf, days_tf = planning.validate_proposal(thu_fri, early_dl_task, empty_week(), NOW)
+        self.assertEqual(issues_tf, [])
+        res_tf = planning.materialize_plan(prop_tf, early_dl_task, days_tf, empty_week(), NOW)
+        self.assertIsNone(res_tf['schedule']['feasible'])
+        self.assertTrue(res_tf['schedule']['no_objective_conflicts'])
+        self.assertEqual(res_tf['schedule']['feasibility_status'], 'uncertain')
+        self.assertEqual(res_tf['schedule']['deadline_conflicts'][0]['kind'], 'deadline_timing')
+        self.assertFalse(res_tf['schedule']['deadline_conflicts'][0]['infeasible'])
+        self.assertTrue(res_tf['schedule']['periods'][0]['deadline_risk'])
 
-        hard_overdue = [{'id': 1, 'title': 'Тест', 'deadline': '2026-11-22T18:00:00Z', 'deadline_type': 'hard'}]
-        _, exp_issues, _ = planning.validate_proposal(
+        # Завершение до дня срока не создаёт риска точного времени.
+        wed_thu = proposal_payload([1], [task_item(1, 90)], [work_period(1, '2026-11-25', '2026-11-26', 90)])
+        prop_wt, issues_wt, days_wt = planning.validate_proposal(wed_thu, early_dl_task, empty_week(), NOW)
+        self.assertEqual(issues_wt, [])
+        res_wt = planning.materialize_plan(prop_wt, early_dl_task, days_wt, empty_week(), NOW)
+        self.assertEqual(res_wt['schedule']['feasibility_status'], 'no_objective_conflicts')
+        self.assertEqual(res_wt['schedule']['deadline_conflicts'], [])
+
+        # Просроченная задача не отбрасывается эвристикой в validate_proposal, а отмечается как просроченная в materialize_plan.
+        overdue = [{'id': 1, 'title': 'Тест', 'deadline': '2026-11-22T18:00:00+00:00', 'completed_work_minutes': 0}]
+        prop_ov, ov_issues, days_ov = planning.validate_proposal(
             proposal_payload([1], [task_item(1, 60)], [work_period(1, '2026-11-23', '2026-11-23', 60)]),
-            hard_overdue, empty_week(), NOW,
+            overdue, empty_week(), NOW,
         )
-        self.assertTrue(any(i['code'] == 'deadline_passed' for i in exp_issues))
+        self.assertEqual(ov_issues, [])
+        res_ov = planning.materialize_plan(prop_ov, overdue, days_ov, empty_week(), NOW)
+        self.assertFalse(res_ov['schedule']['no_objective_conflicts'])
+        self.assertEqual(res_ov['schedule']['feasibility_status'], 'conflict')
+
+        compact = ameba_service._compact_tasks(early_dl_task, datetime.fromisoformat(NOW), ZoneInfo('UTC'))[0]
+        self.assertEqual((compact['deadline_date_local'], compact['deadline_time_local'], compact['deadline_passed']), ('2026-11-27', '01:00', False))
+        self.assertNotIn('available_from', compact)
 
     def test_blocked_dates_day_overrides_and_task_pins(self):
-        tasks = [{'id': 1, 'title': 'Лабораторная', 'completed_work_minutes': 0}]
-        hit_blocked = proposal_payload(
-            [1], [task_item(1, 90)], [work_period(1, '2026-11-26', '2026-11-28', 90)],
-            blocked_dates=['2026-11-27'],
+        tasks = [{'id': 1, 'title': 'Переезд', 'completed_work_minutes': 0}]
+        # Гибкий период Пн–Пт со средой-отдыхом (blocked_dates + day_overrides=free) валиден.
+        flex_with_rest = proposal_payload(
+            [1], [task_item(1, 150)],
+            [work_period(1, '2026-11-23', '2026-11-27', 150), rest_period('2026-11-25', '2026-11-25')],
+            blocked_dates=['2026-11-25'],
         )
-        _, b_issues, _ = planning.validate_proposal(hit_blocked, tasks, empty_week(), NOW)
-        self.assertTrue(any(i['code'] == 'blocked_day_violation' for i in b_issues))
-
-        # На blocked_dates разрешён rest-период.
-        ok_rest = proposal_payload(
-            [1], [task_item(1, 90)],
-            [work_period(1, '2026-11-26', '2026-11-26', 90), rest_period('2026-11-27', '2026-11-27')],
-            blocked_dates=['2026-11-27'],
+        _, flex_issues, _ = planning.validate_proposal(
+            flex_with_rest, tasks, empty_week(), NOW, adjustments={'day_overrides': {'2026-11-25': 'free'}},
         )
-        _, r_issues, _ = planning.validate_proposal(ok_rest, tasks, empty_week(), NOW)
-        self.assertEqual(r_issues, [])
+        self.assertEqual(flex_issues, [])
 
-        # task_pins: нарушение и конфликт пина с blocked_dates.
-        pin_adj = {'task_pins': {'1': {'target_date': '2026-11-28', 'not_before': '2026-11-28'}}}
+        # Явная работа только в закрытый день или целиком закрытый период — реальный конфликт.
+        single_blocked = proposal_payload([1], [task_item(1, 60)], [work_period(1, '2026-11-25', '2026-11-25', 60)], blocked_dates=['2026-11-25'])
+        _, sb_issues, _ = planning.validate_proposal(single_blocked, tasks, empty_week(), NOW)
+        self.assertTrue(any(i['code'] == 'blocked_day_violation' for i in sb_issues))
+
+        whole_blocked = proposal_payload(
+            [1], [task_item(1, 90)], [work_period(1, '2026-11-28', '2026-11-29', 90)],
+            blocked_dates=['2026-11-28', '2026-11-29'],
+        )
+        _, wb_issues, _ = planning.validate_proposal(whole_blocked, tasks, empty_week(), NOW)
+        self.assertTrue(any(i['code'] == 'blocked_day_violation' for i in wb_issues))
+
+        # task_pins: нарушение и конфликт явного пина с blocked_dates.
+        pin_adj = {'task_pins': {'1': {'mode': 'date', 'target_date': '2026-11-28', 'not_before': '2026-11-28'}}}
         wrong_pin = proposal_payload([1], [task_item(1, 60)], [work_period(1, '2026-11-24', '2026-11-24', 60)])
         _, pin_issues, _ = planning.validate_proposal(wrong_pin, tasks, empty_week(), NOW, adjustments=pin_adj)
         self.assertTrue({'violates_not_before', 'violates_task_pin'} <= {i['code'] for i in pin_issues})
 
-        conflict_adj = {'task_pins': {'1': {'target_date': '2026-11-27', 'not_before': None}}}
-        prop_c, c_issues, c_days = planning.validate_proposal(ok_rest, tasks, empty_week(), NOW, adjustments=conflict_adj)
+        conflict_adj = {'task_pins': {'1': {'mode': 'date', 'target_date': '2026-11-25', 'not_before': None}}}
+        prop_c, c_issues, c_days = planning.validate_proposal(flex_with_rest, tasks, empty_week(), NOW, adjustments=conflict_adj)
         self.assertEqual(c_issues, [])
         res_c = planning.materialize_plan(prop_c, tasks, c_days, empty_week(), NOW, adjustments=conflict_adj)
         self.assertFalse(res_c['schedule']['feasible'])
+        self.assertFalse(res_c['schedule']['no_objective_conflicts'])
         self.assertTrue(any(c['kind'] == 'constraint' for c in res_c['schedule']['deadline_conflicts']))
 
     def test_short_tasks_no_fake_remaining(self):
@@ -221,21 +246,35 @@ class ValidationTests(unittest.TestCase):
             check_strict(tool['parameters'])
 
     def test_refresh_without_llm(self):
-        tasks = [{'id': 1, 'title': 'Лабораторная', 'completed_work_minutes': 0}]
+        tasks = [{'id': 1, 'title': 'Переезд', 'completed_work_minutes': 0}]
         cand = proposal_payload(
-            [1], [task_item(1, 240)], [work_period(1, '2026-11-23', '2026-11-24', 240)],
-            blocked_dates=['2026-11-27'],
+            [1], [task_item(1, 240)], [work_period(1, '2026-11-23', '2026-11-27', 240)],
+            blocked_dates=['2026-11-29'],
         )
         prop, issues, days = planning.validate_proposal(cand, tasks, empty_week(), NOW)
         self.assertEqual(issues, [])
         res = planning.materialize_plan(prop, tasks, days, empty_week(), NOW)
 
-        refreshed = planning.refresh_schedule(res, [{'id': 1, 'title': 'Лабораторная', 'completed_work_minutes': 60}], empty_week(), NOW)
+        refreshed = planning.refresh_schedule(res, [{'id': 1, 'title': 'Переезд', 'completed_work_minutes': 60}], empty_week(), NOW)
         self.assertEqual(refreshed['timeline'][0]['plan']['work_max_minutes'], 180)
         self.assertEqual(refreshed['schedule']['periods'][0]['minutes'], 180)
 
+        # Явный сдвиг «+1 день» на гибком периоде Пн–Пт реально сдвигает границы в Вт–Сб и не дублируется повторно.
+        shift_plus = {'task_pins': {'1': {'mode': 'shift', 'target_date': '2026-11-24', 'not_before': '2026-11-24'}}}
+        shifted = planning.refresh_schedule(res, tasks, empty_week(), NOW, adjustments=shift_plus)
+        p_shifted = shifted['schedule']['periods'][0]
+        self.assertEqual((p_shifted['start_date'], p_shifted['end_date']), ('2026-11-24', '2026-11-28'))
+        again = planning.refresh_schedule(shifted, tasks, empty_week(), NOW, adjustments=shift_plus)
+        self.assertEqual((again['schedule']['periods'][0]['start_date'], again['schedule']['periods'][0]['end_date']), ('2026-11-24', '2026-11-28'))
+
+        # Сдвиг назад (-1 день) возвращает Пн–Пт; ручной сдвиг сохраняется при последующем перепланировании LLM.
+        back = planning.refresh_schedule(shifted, tasks, empty_week(), NOW, adjustments={'task_pins': {'1': {'mode': 'shift', 'target_date': '2026-11-23', 'not_before': None}}})
+        self.assertEqual((back['schedule']['periods'][0]['start_date'], back['schedule']['periods'][0]['end_date']), ('2026-11-23', '2026-11-27'))
+        _, replan_issues, _ = planning.validate_proposal(cand, tasks, empty_week(), NOW, adjustments=shift_plus)
+        self.assertTrue(any(i['code'] == 'violates_not_before' for i in replan_issues))
+
         with self.assertRaises(ValueError):
-            planning.refresh_schedule(res, tasks, empty_week(), NOW, adjustments={'task_pins': {'1': {'target_date': '2026-11-27'}}})
+            planning.refresh_schedule(res, tasks, empty_week(), NOW, adjustments={'task_pins': {'1': {'mode': 'date', 'target_date': '2026-11-29'}}})
 
 
 class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
@@ -325,14 +364,18 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
     async def test_record_progress_requires_user_confirmation(self):
         self.assertNotIn('progress_updates', planning.PlanProposal.model_fields)
         actions = [[
-            ('record_progress', {'task_id': 1, 'add_minutes': 60, 'reason': 'Сделан час лабораторной'}),
+            ('record_progress', {'task_id': 1, 'add_minutes': 30, 'reason': 'Сделаны первые 30 минут'}),
+            ('record_progress', {'task_id': 1, 'add_minutes': 45, 'reason': 'Сделаны ещё 45 минут'}),
             ('propose_plan', proposal_payload([1], [task_item(1, 120)], [work_period(1, '2026-11-24', '2026-11-24', 120)])),
         ]]
-        confirmed = await self.run_agent(actions, user_feedback='Я сделал час лабораторной', ask_answer='Подтвердить')
-        self.assertEqual(confirmed['confirmed_progress'], [{'task_id': 1, 'add_minutes': 60, 'base_completed_minutes': 0, 'confirmed_by_user': True}])
-        self.assertEqual(confirmed['plans'][1]['completed_work_minutes'], 60)
+        confirmed = await self.run_agent(actions, user_feedback='Я сделал 30 и потом ещё 45 минут', ask_answer='Подтвердить')
+        self.assertEqual(confirmed['confirmed_progress'], [
+            {'task_id': 1, 'add_minutes': 30, 'base_completed_minutes': 0, 'confirmed_by_user': True},
+            {'task_id': 1, 'add_minutes': 45, 'base_completed_minutes': 30, 'confirmed_by_user': True},
+        ])
+        self.assertEqual(confirmed['plans'][1]['completed_work_minutes'], 75)
 
-        cancelled = await self.run_agent(actions, user_feedback='Я сделал час лабораторной', ask_answer='Отменить')
+        cancelled = await self.run_agent(actions, user_feedback='Я сделал 30 и потом ещё 45 минут', ask_answer='Отменить')
         self.assertEqual(cancelled['confirmed_progress'], [])
         self.assertEqual(cancelled['plans'][1]['completed_work_minutes'], 0)
 
@@ -413,12 +456,16 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(issues, [])
         mat = planning.materialize_plan(prop, [{'id': 1, 'title': 'Переезд', 'completed_work_minutes': 0}], days, empty_week(), NOW)
 
-        # Произвольный progress_updates в JSON и неподтверждённый confirmed_progress игнорируются; подтверждённый применяется один раз.
+        # Несколько отдельно подтверждённых инкрементов по одной задаче применяются последовательно; replay/устаревшие отклоняются.
         res1 = mat | {
             'plan_run_id': 'run1',
             'calendar_revision': 'r1',
             'progress_updates': [{'task_id': 1, 'operation': 'set', 'minutes': 999}],
-            'confirmed_progress': [{'task_id': 1, 'add_minutes': 60, 'base_completed_minutes': 0, 'confirmed_by_user': True}],
+            'confirmed_progress': [
+                {'task_id': 1, 'add_minutes': 30, 'base_completed_minutes': 0, 'confirmed_by_user': True},
+                {'task_id': 1, 'add_minutes': 45, 'base_completed_minutes': 30, 'confirmed_by_user': True},
+                {'task_id': 1, 'add_minutes': 20, 'base_completed_minutes': 75, 'confirmed_by_user': False},
+            ],
         }
         calendar.reset_ameba_plan('run1')
         with patch.object(ameba, 'check_feature'), \
@@ -428,23 +475,32 @@ class StorageTests(unittest.TestCase):
              patch.object(ameba, 'request_ranking', AsyncMock(return_value=res1)), \
              patch('agent_memory.read', return_value=[]):
             out = asyncio.run(ameba.rank_all())
-        self.assertEqual(out['progress_updated_count'], 1)
+        self.assertEqual(out['progress_updated_count'], 2)
         self.assertEqual(out['task_notes_saved_count'], 1)
         with Session(self.engine) as session:
-            self.assertEqual(session.get(Task, 1).completed_work_minutes, 60)
+            self.assertEqual(session.get(Task, 1).completed_work_minutes, 75)
             self.assertEqual(session.get(Task, 1).status, 'in_progress')
 
-        calendar.reset_ameba_plan('run_stale')
+        # Повтор (replay) одинаковой записи или устаревшая база вызывает 409 без порчи БД.
+        replay = mat | {
+            'plan_run_id': 'run_replay',
+            'calendar_revision': 'r1',
+            'confirmed_progress': [
+                {'task_id': 1, 'add_minutes': 15, 'base_completed_minutes': 75, 'confirmed_by_user': True},
+                {'task_id': 1, 'add_minutes': 15, 'base_completed_minutes': 75, 'confirmed_by_user': True},
+            ],
+        }
+        calendar.reset_ameba_plan('run_replay')
         with patch.object(ameba, 'check_feature'), \
              patch.object(ameba, 'read_config', return_value={'enabled': True}), \
              patch.object(ameba, 'read_settings', return_value=({'base_url': 'u'}, {})), \
              patch.object(ameba, 'context_status', return_value='ready'), \
-             patch.object(ameba, 'request_ranking', AsyncMock(return_value=res1 | {'plan_run_id': 'run_stale'})), \
+             patch.object(ameba, 'request_ranking', AsyncMock(return_value=replay)), \
              patch('agent_memory.read', return_value=[]):
             with self.assertRaisesRegex(Exception, 'Прогресс задачи изменился'):
                 asyncio.run(ameba.rank_all(force=True))
         with Session(self.engine) as session:
-            self.assertEqual(session.get(Task, 1).completed_work_minutes, 60)
+            self.assertEqual(session.get(Task, 1).completed_work_minutes, 75)
 
     def test_persistent_memory_committed_only_after_db_commit(self):
         self._seed_task(title='Учёба', completed=0)
@@ -560,13 +616,14 @@ def evaluate_plan_properties(scenario: dict, result: dict) -> list[str]:
         failures.append('Нет периода отдыха')
     if scenario.get('expect_no_persistent_memory') and (result.get('persistent_preferences') or []):
         failures.append('Разовое пожелание попало в persistent_preferences')
-    if scenario.get('expect_risk_or_infeasible') and sched.get('feasible') and not sched.get('deadline_conflicts'):
+    if scenario.get('expect_risk_or_infeasible') and sched.get('feasibility_status') == 'no_objective_conflicts' and not sched.get('deadline_conflicts'):
         failures.append('Не отражён риск нехватки времени')
     for p in periods:
         if p.get('kind') != 'work':
             continue
-        if any(p['start_date'] <= d <= p['end_date'] for d in forbidden):
-            failures.append('Работа задевает запрещённый день')
+        start_d, end_d = calendar_date.fromisoformat(p['start_date']), calendar_date.fromisoformat(p['end_date'])
+        if forbidden and all((start_d + timedelta(days=o)).isoformat() in forbidden for o in range((end_d - start_d).days + 1)):
+            failures.append('Работа целиком приходится на запрещённые дни')
         if scenario.get('forbid_unconditional_route_claim'):
             hint = (p.get('context_hint') or '').casefold()
             if 'по дороге' in hint and 'если' not in hint:

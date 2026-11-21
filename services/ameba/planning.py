@@ -160,7 +160,6 @@ def calendar_days(week: dict, now: str, horizon_days: int = 14, adjustments: dic
         days.append({
             'date': day_iso,
             'weekday': WEEKDAYS_SHORT[day.weekday()],
-            'weekday_idx': day.weekday(),
             'mode': overrides.get(day_iso) or 'normal',
             'events': events,
         })
@@ -179,30 +178,13 @@ def calendar_overview(days: list[dict]) -> list[dict]:
     ]
 
 
-def _hhmm_to_min(hhmm: str) -> int:
-    return 1440 if hhmm == '24:00' else int(hhmm[:2]) * 60 + int(hhmm[3:])
-
-
-def _day_busy_minutes(events: list[dict]) -> int:
-    intervals = sorted((_hhmm_to_min(e['start']), _hhmm_to_min(e['end'])) for e in events if e.get('kind') in ('busy', 'task'))
-    merged: list[tuple[int, int]] = []
-    for a, b in intervals:
-        if b <= a:
-            continue
-        if merged and a <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
-        else:
-            merged.append((a, b))
-    return sum(b - a for a, b in merged)
-
-
 def _protected_dates(
-    proposal: PlanProposal,
+    blocked_dates: list[str] | tuple[str, ...],
     days_by_date: dict[str, dict],
     adjustments: dict | None,
-    extra_blocked_dates: list[str] | tuple[str, ...] | None,
+    extra_blocked_dates: list[str] | tuple[str, ...] | None = None,
 ) -> set[str]:
-    protected = {d for d in proposal.blocked_dates if d in days_by_date}
+    protected = {d for d in blocked_dates if d in days_by_date}
     protected.update(d for d in (extra_blocked_dates or ()) if d in days_by_date)
     for d_iso, mode in ((adjustments or {}).get('day_overrides') or {}).items():
         if mode == 'free' and d_iso in days_by_date:
@@ -226,7 +208,7 @@ def validate_proposal(
     adjustments: dict | None = None,
     extra_blocked_dates: list[str] | tuple[str, ...] | None = None,
 ) -> tuple[PlanProposal, list[dict], list[dict]]:
-    """Проверяет целостность ссылок, дат, защищённых дней, доверенных доступности и сроков."""
+    """Проверяет целостность ссылок, дат, закрытых периодов, реальных сроков и ручных переносов."""
     if isinstance(raw_arguments, PlanProposal):
         proposal = raw_arguments
     elif isinstance(raw_arguments, dict):
@@ -289,15 +271,16 @@ def validate_proposal(
     if issues:
         return proposal, issues, days
 
-    protected = _protected_dates(proposal, days_by_date, adjustments, extra_blocked_dates)
+    dl_by_task = {tid: parse_dt(tasks_by_id[tid].get('deadline'), timezone.utc) for tid in expected_ids}
+    protected = _protected_dates(proposal.blocked_dates, days_by_date, adjustments, extra_blocked_dates)
     overrides = (adjustments or {}).get('estimate_overrides') or {}
     task_pins = (adjustments or {}).get('task_pins') or {}
     work_periods: dict[int, list[PlanPeriod]] = {}
 
     for idx, p in enumerate(proposal.periods):
         try:
-            calendar_date.fromisoformat(p.start_date)
-            calendar_date.fromisoformat(p.end_date)
+            start_d = calendar_date.fromisoformat(p.start_date)
+            end_d = calendar_date.fromisoformat(p.end_date)
         except ValueError:
             issues.append({'code': 'invalid_period', 'period_index': idx, 'message': f'Период #{idx}: некорректная дата.'})
             continue
@@ -325,27 +308,16 @@ def validate_proposal(
             continue
         work_periods.setdefault(tid, []).append(p)
 
-        blocked_hit = next((d for d in sorted(protected) if p.start_date <= d <= p.end_date), None)
-        if blocked_hit is not None:
-            issues.append({'code': 'blocked_day_violation', 'period_index': idx, 'task_id': tid, 'date': blocked_hit,
-                           'message': f'Период задачи {tid} ({p.start_date}..{p.end_date}) задевает закрытый день {blocked_hit}.'})
+        # Гибкий период допустим, если в нём остаётся хотя бы один незакрытый день;
+        # целиком закрытый период или явная работа только в закрытый день — реальный конфликт.
+        if all((start_d + timedelta(days=o)).isoformat() in protected for o in range((end_d - start_d).days + 1)):
+            issues.append({'code': 'blocked_day_violation', 'period_index': idx, 'task_id': tid, 'date': p.start_date,
+                           'message': f'Период задачи {tid} ({p.start_date}..{p.end_date}) целиком приходится на закрытые дни.'})
 
-        task = tasks_by_id[tid]
-        av_dt = parse_dt(task.get('available_from'), zone)
-        if av_dt is not None:
-            av_iso = av_dt.astimezone(zone).date().isoformat()
-            if p.start_date < av_iso:
-                issues.append({'code': 'before_available_from', 'period_index': idx, 'task_id': tid,
-                               'message': f'Задача {tid} начинается {p.start_date} до даты открытия {av_iso}.'})
-
-        dl_dt = parse_dt(task.get('deadline'), timezone.utc)
-        dl_type = task.get('deadline_type')
-        if dl_dt is not None:
+        dl_dt = dl_by_task[tid]
+        if dl_dt is not None and dl_dt > now_dt:
             dl_iso = dl_dt.astimezone(zone).date().isoformat()
-            if dl_type == 'hard' and dl_dt <= now_dt:
-                issues.append({'code': 'deadline_passed', 'period_index': idx, 'task_id': tid,
-                               'message': f'Задача {tid}: жёсткий срок ({dl_iso}) уже прошёл.'})
-            elif dl_dt > now_dt and dl_type != 'soft' and p.end_date > dl_iso:
+            if p.end_date > dl_iso:
                 issues.append({'code': 'after_deadline', 'period_index': idx, 'task_id': tid,
                                'message': f'Задача {tid} заканчивается {p.end_date} после срока {dl_iso}.'})
 
@@ -357,15 +329,11 @@ def validate_proposal(
     for tid, item in assessments.items():
         pin = task_pins.get(str(tid)) or {}
         target_date = pin.get('target_date')
-        rem = _effective_rem(item, overrides)
-        if not target_date or target_date not in days_by_date or target_date in protected or rem <= 0:
+        if (pin.get('mode') == 'shift' and pin.get('not_before')) or not target_date or target_date not in days_by_date or target_date in protected or _effective_rem(item, overrides) <= 0:
             continue
-        task = tasks_by_id[tid]
-        av_dt = parse_dt(task.get('available_from'), zone)
-        dl_dt = parse_dt(task.get('deadline'), timezone.utc)
-        av_ok = av_dt is None or target_date >= av_dt.astimezone(zone).date().isoformat()
-        dl_ok = dl_dt is None or task.get('deadline_type') == 'soft' or (dl_dt > now_dt and target_date <= dl_dt.astimezone(zone).date().isoformat())
-        if av_ok and dl_ok and not any(p.start_date <= target_date <= p.end_date for p in work_periods.get(tid, ())):
+        dl_dt = dl_by_task[tid]
+        dl_ok = dl_dt is None or dl_dt <= now_dt or target_date <= dl_dt.astimezone(zone).date().isoformat()
+        if dl_ok and not any(p.start_date <= target_date <= p.end_date for p in work_periods.get(tid, ())):
             issues.append({'code': 'violates_task_pin', 'task_id': tid, 'date': target_date,
                            'message': f'Владелец закрепил задачу {tid} за {target_date}.'})
 
@@ -393,7 +361,8 @@ def materialize_plan(
     task_pins = (adjustments or {}).get('task_pins') or {}
     days_by_date = {d['date']: d for d in days}
     horizon_end = days[-1]['date']
-    protected = _protected_dates(proposal, days_by_date, adjustments, extra_blocked_dates)
+    protected = _protected_dates(proposal.blocked_dates, days_by_date, adjustments, extra_blocked_dates)
+    dl_by_task = {tid: parse_dt(tasks_by_id[tid].get('deadline'), timezone.utc) for tid in proposal.task_ids}
 
     plans: dict[int, dict] = {}
     for tid in proposal.task_ids:
@@ -401,48 +370,26 @@ def materialize_plan(
         confirmed = int(tasks_by_id[tid].get('completed_work_minutes') or 0)
         h_label = format_hours(rem)
         plans[tid] = {
-            'task_id': tid,
-            'remaining_minutes': rem,
-            'work_min_minutes': rem,
-            'work_max_minutes': rem,
-            'min_minutes': rem,
-            'max_minutes': rem,
-            'planned_work_minutes': rem,
-            'completed_work_minutes': confirmed,
-            'hours_label': h_label,
-            'time_estimate': h_label,
+            'task_id': tid, 'remaining_minutes': rem, 'work_min_minutes': rem, 'work_max_minutes': rem,
+            'min_minutes': rem, 'max_minutes': rem, 'planned_work_minutes': rem,
+            'completed_work_minutes': confirmed, 'hours_label': h_label, 'time_estimate': h_label,
         }
 
-    assigned_by_task: dict[int, int] = {tid: 0 for tid in proposal.task_ids}
-    day_tasks_map: dict[str, dict[int, int]] = {d['date']: {} for d in days}
+    assigned_by_task = {tid: 0 for tid in proposal.task_ids}
+    work_end_dates: dict[int, set[str]] = {tid: set() for tid in proposal.task_ids}
     for p in proposal.periods:
-        if p.kind != 'work' or p.task_id is None:
-            continue
-        assigned_by_task[p.task_id] += p.estimated_minutes
-        start = calendar_date.fromisoformat(p.start_date)
-        end = calendar_date.fromisoformat(p.end_date)
-        span = [(start + timedelta(days=i)).isoformat() for i in range((end - start).days + 1)]
-        active_days = [d for d in span if d in day_tasks_map and d not in protected] or [d for d in span if d in day_tasks_map]
-        if active_days:
-            base, rem_mod = divmod(p.estimated_minutes, len(active_days))
-            for idx_d, d_iso in enumerate(active_days):
-                part = base + (1 if idx_d < rem_mod else 0)
-                if part > 0:
-                    day_tasks_map[d_iso][p.task_id] = day_tasks_map[d_iso].get(p.task_id, 0) + part
+        if p.kind == 'work' and p.task_id is not None:
+            assigned_by_task[p.task_id] += p.estimated_minutes
+            work_end_dates[p.task_id].add(p.end_date)
 
-    daily_allocations = []
-    for d in days:
-        d_tasks = [
-            {'task_id': tid, 'title': tasks_by_id[tid]['title'], 'minutes': mins, 'hours_label': format_hours(mins)}
-            for tid, mins in day_tasks_map[d['date']].items()
-        ]
-        daily_allocations.append({
-            'date': d['date'],
-            'mode': d['mode'],
-            'busy_minutes': _day_busy_minutes(d['events']),
-            'allocated_minutes': sum(x['minutes'] for x in d_tasks),
-            'tasks': d_tasks,
-        })
+    timing_risk_by_task: dict[int, str] = {}
+    for tid, dl_dt in dl_by_task.items():
+        if dl_dt is not None and dl_dt > now_dt and plans[tid]['remaining_minutes'] > 0:
+            dl_local = dl_dt.astimezone(zone)
+            if dl_local.hour < 23 and dl_local.date().isoformat() in work_end_dates[tid]:
+                timing_risk_by_task[tid] = (
+                    f'Срок {dl_local.strftime("%d.%m в %H:%M")} — гибкий период до дня срока не гарантирует завершение до точного времени.'
+                )
 
     sorted_periods = sorted(
         proposal.periods,
@@ -450,128 +397,104 @@ def materialize_plan(
     )
     periods_out = []
     for idx, p in enumerate(sorted_periods):
-        if p.kind == 'work' and p.task_id is not None:
+        is_work = p.kind == 'work' and p.task_id is not None
+        goal = p.goal.strip()
+        entry = {
+            'id': f'p-{idx}-{p.start_date}-{p.end_date}-{p.task_id if is_work else "rest"}',
+            'kind': 'work' if is_work else 'rest',
+            'task_id': p.task_id if is_work else None,
+            'title': tasks_by_id[p.task_id]['title'] if is_work else goal,
+            'start_date': p.start_date,
+            'end_date': p.end_date,
+            'goal': goal,
+            'context_hint': (p.context_hint or '').strip() or None,
+            'reason': (p.reason or '').strip() or None,
+            'minutes': p.estimated_minutes if is_work else 0,
+            'hours_label': format_hours(p.estimated_minutes) if is_work else '',
+            'tasks': [],
+        }
+        if is_work:
             tid = p.task_id
-            task = tasks_by_id[tid]
-            dl_dt = parse_dt(task.get('deadline'), timezone.utc)
-            h_label = format_hours(p.estimated_minutes)
+            dl_dt = dl_by_task[tid]
+            dl_iso = dl_dt.astimezone(zone).date().isoformat() if dl_dt else None
+            dl_str = dl_dt.isoformat() if dl_dt else None
             completes = assigned_by_task[tid] >= plans[tid]['remaining_minutes']
-            periods_out.append({
-                'id': f'p-{idx}-{p.start_date}-{p.end_date}-{tid}',
-                'kind': 'work',
-                'task_id': tid,
-                'title': task['title'],
-                'start_date': p.start_date,
-                'end_date': p.end_date,
-                'goal': p.goal.strip(),
-                'context_hint': p.context_hint.strip() if p.context_hint and p.context_hint.strip() else None,
-                'reason': p.reason.strip() if p.reason and p.reason.strip() else None,
-                'minutes': p.estimated_minutes,
-                'hours_label': h_label,
+            entry.update({
                 'completed_work_minutes': plans[tid]['completed_work_minutes'],
                 'completes_task': completes,
-                'deadline': dl_dt.isoformat() if dl_dt else None,
-                'deadline_risk': assessments[tid].deadline_risk,
+                'deadline': dl_str,
+                'deadline_risk': assessments[tid].deadline_risk or (timing_risk_by_task.get(tid) if p.end_date == dl_iso else None),
                 'tasks': [{
-                    'task_id': tid,
-                    'title': task['title'],
-                    'goal': p.goal.strip(),
-                    'minutes': p.estimated_minutes,
-                    'hours_label': h_label,
-                    'completes_task': completes,
-                    'deadline': dl_dt.isoformat() if dl_dt else None,
+                    'task_id': tid, 'title': entry['title'], 'goal': goal, 'minutes': p.estimated_minutes,
+                    'hours_label': entry['hours_label'], 'completes_task': completes, 'deadline': dl_str,
                 }],
             })
-        else:
-            periods_out.append({
-                'id': f'p-{idx}-{p.start_date}-{p.end_date}-rest',
-                'kind': 'rest',
-                'task_id': None,
-                'title': p.goal.strip(),
-                'start_date': p.start_date,
-                'end_date': p.end_date,
-                'goal': p.goal.strip(),
-                'context_hint': p.context_hint.strip() if p.context_hint and p.context_hint.strip() else None,
-                'reason': p.reason.strip() if p.reason and p.reason.strip() else None,
-                'minutes': 0,
-                'hours_label': '',
-                'tasks': [],
-            })
+        periods_out.append(entry)
 
     conflicts = []
     remaining = []
     for tid in proposal.task_ids:
         rem = plans[tid]['remaining_minutes']
         assess = assessments[tid]
-        task = tasks_by_id[tid]
+        title = tasks_by_id[tid]['title']
         unplanned = max(0, rem - assigned_by_task[tid])
         remaining.append({'task_id': tid, 'remaining_work_minutes': unplanned})
-        dl_dt = parse_dt(task.get('deadline'), timezone.utc)
+        dl_dt = dl_by_task[tid]
         dl_iso = dl_dt.astimezone(zone).date().isoformat() if dl_dt else None
-        is_overdue = bool(dl_dt and dl_dt <= now_dt and task.get('deadline_type') != 'soft' and rem > 0)
-        pin_date = (task_pins.get(str(tid)) or {}).get('target_date')
-        if pin_date and pin_date in protected and rem > 0:
+        is_overdue = bool(dl_dt and dl_dt <= now_dt and rem > 0)
+        timing_risk = timing_risk_by_task.get(tid)
+        pin = task_pins.get(str(tid)) or {}
+        pin_date = pin.get('target_date')
+        c_kind = c_reason = None
+        c_infeasible = False
+        if pin.get('mode') != 'shift' and pin_date and pin_date in protected and rem > 0:
+            c_kind, c_infeasible, c_reason = 'constraint', True, f'{title}: закреплено на {pin_date}, но этот день закрыт для работы.'
+        elif assess.deadline_risk or is_overdue or timing_risk or (dl_iso and dl_iso <= horizon_end and unplanned > 0):
+            c_infeasible = is_overdue or bool(dl_iso and dl_iso <= horizon_end and unplanned > 0)
+            c_kind = 'deadline_timing' if (timing_risk and not c_infeasible and not assess.deadline_risk) else 'deadline'
+            default_msg = (
+                f'{title}: срок уже прошёл.' if is_overdue
+                else f'{title}: не хватает времени до срока.' if c_infeasible
+                else f'{title}: {timing_risk}'
+            )
+            c_reason = assess.deadline_risk or default_msg
+        if c_kind:
             conflicts.append({
-                'task_id': tid,
-                'title': task['title'],
-                'kind': 'constraint',
-                'deadline': dl_dt.isoformat() if dl_dt else None,
-                'infeasible': True,
-                'deficit_minutes': unplanned,
-                'deficit_label': format_hours(unplanned) if unplanned else '',
-                'reason': f'{task["title"]}: закреплено на {pin_date}, но этот день закрыт для работы.',
-            })
-        elif assess.deadline_risk or is_overdue or (dl_iso and dl_iso <= horizon_end and task.get('deadline_type') != 'soft' and unplanned > 0):
-            infeasible = is_overdue or (bool(dl_iso and dl_iso <= horizon_end and task.get('deadline_type') != 'soft' and unplanned > 0))
-            default_msg = f'{task["title"]}: срок уже прошёл.' if is_overdue else f'{task["title"]}: не хватает времени до срока.'
-            conflicts.append({
-                'task_id': tid,
-                'title': task['title'],
-                'kind': 'deadline',
-                'deadline': dl_dt.isoformat() if dl_dt else None,
-                'infeasible': infeasible,
-                'deficit_minutes': unplanned,
-                'deficit_label': format_hours(unplanned) if unplanned else '',
-                'reason': assess.deadline_risk or default_msg,
+                'task_id': tid, 'title': title, 'kind': c_kind,
+                'deadline': dl_dt.isoformat() if dl_dt else None, 'infeasible': c_infeasible,
+                'deficit_minutes': unplanned, 'deficit_label': format_hours(unplanned) if unplanned else '',
+                'reason': c_reason,
             })
 
     total_rem = sum(plans[tid]['remaining_minutes'] for tid in proposal.task_ids)
     remaining_minutes = sum(r['remaining_work_minutes'] for r in remaining)
+    has_objective_conflict = any(c['infeasible'] for c in conflicts)
+    feasibility_status, feasible_compat = (
+        ('conflict', False) if has_objective_conflict
+        else ('uncertain', None) if conflicts
+        else ('no_objective_conflicts', True)
+    )
+
     schedule = {
-        'version': 3,
-        'valid': True,
-        'task_ids': list(proposal.task_ids),
-        'generated_date': today_iso,
-        'start_at': now_dt.isoformat(),
-        'timezone': week.get('timezone', 'UTC'),
-        'feasible': not any(c['infeasible'] for c in conflicts),
-        'fully_scheduled': remaining_minutes == 0,
-        'remaining_minutes': remaining_minutes,
-        'min_minutes': total_rem,
-        'max_minutes': total_rem,
-        'hours_label': format_hours(total_rem),
-        'periods': periods_out,
-        'blocked_dates': sorted(protected),
-        'daily_allocations': daily_allocations,
-        'deadline_conflicts': conflicts,
+        'version': 3, 'valid': True, 'task_ids': list(proposal.task_ids), 'generated_date': today_iso,
+        'start_at': now_dt.isoformat(), 'timezone': week.get('timezone', 'UTC'),
+        'feasible': feasible_compat, 'no_objective_conflicts': not has_objective_conflict,
+        'feasibility_status': feasibility_status, 'fully_scheduled': remaining_minutes == 0,
+        'remaining_minutes': remaining_minutes, 'min_minutes': total_rem, 'max_minutes': total_rem,
+        'hours_label': format_hours(total_rem), 'periods': periods_out, 'blocked_dates': sorted(protected),
+        'daily_allocations': [], 'deadline_conflicts': conflicts,
         'deadline_risks': [
             {'task_id': c['task_id'], 'title': c['title'], 'reason': c['reason'], 'infeasible': c['infeasible'], 'deficit_minutes': c['deficit_minutes']}
             for c in conflicts
         ],
         'remaining': remaining,
-        'timeline': [
-            {'task_id': tid, 'hours_label': plans[tid]['hours_label'], 'planned_minutes': assigned_by_task[tid]}
-            for tid in proposal.task_ids
-        ],
+        'timeline': [{'task_id': tid, 'hours_label': plans[tid]['hours_label'], 'planned_minutes': assigned_by_task[tid]} for tid in proposal.task_ids],
         'timeline_error': None,
     }
     reasons = [
         {
-            'task_id': tid,
-            'reason': assessments[tid].reason.strip(),
-            'time_estimate': plans[tid]['time_estimate'],
-            'deadline_risk': assessments[tid].deadline_risk,
-            'plan': plans[tid],
+            'task_id': tid, 'reason': assessments[tid].reason.strip(), 'time_estimate': plans[tid]['time_estimate'],
+            'deadline_risk': assessments[tid].deadline_risk or timing_risk_by_task.get(tid), 'plan': plans[tid],
         }
         for tid in proposal.task_ids
     ]
@@ -604,14 +527,14 @@ def refresh_schedule(
 
     zone = ZoneInfo(week.get('timezone', 'UTC'))
     now_dt = parse_dt(now, timezone.utc)
-    today = now_dt.astimezone(zone).date()
-    today_iso = today.isoformat()
+    today_iso = now_dt.astimezone(zone).date().isoformat()
     tasks_by_id = {task['id']: task for task in tasks}
     active_ids = [task['id'] for task in tasks]
     if not active_ids:
         empty = {
             'version': 3, 'valid': True, 'task_ids': [], 'generated_date': today_iso, 'start_at': now_dt.isoformat(),
-            'timezone': week.get('timezone', 'UTC'), 'feasible': True, 'fully_scheduled': True, 'remaining_minutes': 0,
+            'timezone': week.get('timezone', 'UTC'), 'feasible': True, 'no_objective_conflicts': True,
+            'feasibility_status': 'no_objective_conflicts', 'fully_scheduled': True, 'remaining_minutes': 0,
             'min_minutes': 0, 'max_minutes': 0, 'hours_label': 'выполнено', 'periods': [], 'blocked_dates': [],
             'daily_allocations': [], 'deadline_conflicts': [], 'deadline_risks': [], 'remaining': [], 'timeline': [], 'timeline_error': None,
         }
@@ -636,33 +559,38 @@ def refresh_schedule(
         new_rem[tid] = rem
         old_r = reasons_by_id.get(tid) or {}
         items.append(TaskPlanItem(
-            task_id=tid,
-            remaining_minutes=rem,
+            task_id=tid, remaining_minutes=rem,
             reason=str(old_r.get('reason') or 'По приоритету и срокам')[:200],
             deadline_risk=old_r.get('deadline_risk'),
         ))
 
+    prev_blocked = list(prev_schedule.get('blocked_dates') or [])
+    protected = set(prev_blocked) | {d for d, m in ((adjustments or {}).get('day_overrides') or {}).items() if m == 'free'}
+    prev_periods = prev_schedule.get('periods', [])
     task_shifts: dict[int, int] = {}
     for tid in order:
         pin = task_pins.get(str(tid)) or {}
-        anchor = pin.get('target_date') or pin.get('not_before')
-        first_start = next((p['start_date'] for p in prev_schedule.get('periods', []) if p.get('kind') == 'work' and p.get('task_id') == tid), None)
-        if anchor and first_start and (pin.get('target_date') or first_start < anchor):
-            covers_target = any(
-                p.get('kind') == 'work' and p.get('task_id') == tid and p['start_date'] <= anchor <= p['end_date']
-                for p in prev_schedule.get('periods', [])
-            )
-            if not pin.get('target_date') or not covers_target:
+        target, not_before = pin.get('target_date'), pin.get('not_before')
+        if pin.get('mode') != 'shift' and target and target in protected:
+            raise ValueError(f'Задача {tid} закреплена за закрытым днём {target} — требуется перепланирование Ameba')
+        work_p = [p for p in prev_periods if p.get('kind') == 'work' and p.get('task_id') == tid]
+        if not work_p:
+            continue
+        first_start = work_p[0]['start_date']
+        if pin.get('mode') == 'shift' or (not_before and first_start < not_before):
+            anchor = max(d for d in (target, not_before) if d) if (target or not_before) else None
+            if anchor and anchor != first_start:
                 task_shifts[tid] = (calendar_date.fromisoformat(anchor) - calendar_date.fromisoformat(first_start)).days
+        elif target and not any(p['start_date'] <= target <= p['end_date'] for p in work_p):
+            task_shifts[tid] = (calendar_date.fromisoformat(target) - calendar_date.fromisoformat(first_start)).days
 
     remaining_cap = dict(new_rem)
-    old_assigned: dict[int, int] = {tid: 0 for tid in order}
-    assigned: dict[int, int] = {tid: 0 for tid in order}
+    old_assigned = {tid: 0 for tid in order}
+    assigned = {tid: 0 for tid in order}
     rebuilt: list[PlanPeriod] = []
-    for p in prev_schedule.get('periods', []):
+    for p in prev_periods:
         if p.get('kind') == 'rest':
-            s_d = max(today_iso, p.get('start_date', ''))
-            e_d = p.get('end_date', '')
+            s_d, e_d = max(today_iso, p.get('start_date', '')), p.get('end_date', '')
             if s_d <= e_d:
                 rebuilt.append(PlanPeriod(
                     kind='rest', task_id=None, start_date=s_d, end_date=e_d, estimated_minutes=0,
@@ -682,14 +610,13 @@ def refresh_schedule(
         e_d = (calendar_date.fromisoformat(p['end_date']) + timedelta(days=shift)).isoformat()
         if e_d < today_iso:
             continue
-        s_d = max(today_iso, s_d)
         mins = min(orig_mins, remaining_cap[tid])
         if mins <= 0:
             continue
         remaining_cap[tid] -= mins
         assigned[tid] += mins
         rebuilt.append(PlanPeriod(
-            kind='work', task_id=tid, start_date=s_d, end_date=e_d, estimated_minutes=mins,
+            kind='work', task_id=tid, start_date=max(today_iso, s_d), end_date=e_d, estimated_minutes=mins,
             goal=str(p.get('goal') or tasks_by_id[tid]['title'])[:180],
             context_hint=p.get('context_hint'), reason=p.get('reason'),
         ))
@@ -698,18 +625,11 @@ def refresh_schedule(
         if new_rem[tid] > 0 and assigned[tid] < new_rem[tid] and (old_assigned[tid] >= int(saved_plans[tid].get('remaining_minutes', saved_plans[tid].get('work_max_minutes', 0))) or assigned[tid] == 0):
             raise ValueError('Изменился остаток или периоды задачи — требуется перепланирование Ameba')
 
-    prev_blocked = list(prev_schedule.get('blocked_dates') or [])
     candidate = PlanProposal(
-        task_ids=order,
-        tasks=items,
-        periods=rebuilt,
-        blocked_dates=prev_blocked,
-        preferences=[],
+        task_ids=order, tasks=items, periods=rebuilt, blocked_dates=prev_blocked, preferences=[],
         explanation=str(previous.get('explanation') or 'Актуализированный план на ближайшие дни.')[:400],
     )
-    proposal, issues, days = validate_proposal(
-        candidate, tasks, week, now, adjustments=adjustments, extra_blocked_dates=prev_blocked,
-    )
+    proposal, issues, days = validate_proposal(candidate, tasks, week, now, adjustments=adjustments, extra_blocked_dates=prev_blocked)
     if issues:
         raise ValueError('Сохранённый план больше не соответствует ограничениям: ' + '; '.join(i.get('message', '') for i in issues[:2]))
     return previous | materialize_plan(proposal, tasks, days, week, now, adjustments=adjustments, extra_blocked_dates=prev_blocked)

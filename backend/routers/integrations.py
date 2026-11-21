@@ -615,6 +615,7 @@ class PlanFeedbackInput(BaseModel):
 
 class TaskPinInput(BaseModel):
     task_id: int = Field(gt=0)
+    mode: Literal['shift', 'date'] | None = None
     target_date: str | None = Field(default=None, pattern=r'^\d{4}-\d{2}-\d{2}$')
     not_before: str | None = Field(default=None, pattern=r'^\d{4}-\d{2}-\d{2}$')
     shift_days: int | None = Field(default=None, ge=-14, le=14)

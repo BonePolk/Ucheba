@@ -341,7 +341,8 @@ export default function AgentTimeline({
           if (period.task_id) {
             const reasonOpen = Boolean(openReasons[period.id]);
             const hasRisk = Boolean(period.deadline_risk);
-            const isPinned = Boolean(taskPins[String(period.task_id)]);
+            const taskPin = taskPins[String(period.task_id)];
+            const isPinned = Boolean(taskPin);
             const manualVal = estimateOverrides[String(period.task_id)];
             const completedMins = Number(period.completed_work_minutes ?? taskProgressById[String(period.task_id)] ?? 0);
 
@@ -360,7 +361,7 @@ export default function AgentTimeline({
                   <div className="flex flex-wrap items-center gap-1.5 min-w-0 text-[12px] text-[#929292]">
                     <span>{dateLabel}</span>
                     {isCurrent && <Badge variant="accent">Сейчас</Badge>}
-                    {isPinned && <Badge variant="info">Закреплено</Badge>}
+                    {isPinned && <Badge variant="info">{taskPin.mode === 'shift' ? 'Сдвинуто' : 'Закреплено'}</Badge>}
                     {completedMins > 0 && <Badge variant="outline">Сделано {durationLabel(completedMins)}</Badge>}
                     {manualVal !== undefined && <Badge variant="info">Ост. {manualVal} м</Badge>}
                   </div>

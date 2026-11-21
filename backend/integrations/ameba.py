@@ -174,7 +174,7 @@ def _build_signature(session, state, include_ameba_facts: bool = True) -> str:
     provider_base = read_settings('ai_provider', apply_feature=False)[0].get('base_url')
     allowed_agents = ('Владелец', 'user', 'Ameba') if include_ameba_facts else ('Владелец', 'user')
     return json.dumps({
-        'version': 45,
+        'version': 46,
         'tasks': state,
         'calendar': {
             'revision': calendar.get('revision', ''),
@@ -467,7 +467,7 @@ async def adjust_plan(
             if task_pin.get('clear'):
                 adj['task_pins'].pop(tid, None)
             elif task_pin.get('target_date'):
-                adj['task_pins'][tid] = {'target_date': task_pin['target_date'], 'not_before': task_pin.get('not_before')}
+                adj['task_pins'][tid] = {'mode': task_pin.get('mode') or 'date', 'target_date': task_pin['target_date'], 'not_before': task_pin.get('not_before')}
             elif task_pin.get('shift_days'):
                 existing_pin = adj['task_pins'].get(tid) or {}
                 saved = session.get(TaskRanking, 1)
@@ -477,16 +477,17 @@ async def adjust_plan(
                     (
                         p['start_date']
                         for p in periods
-                        if p.get('task_id') == int(tid) or any(t.get('task_id') == int(tid) for t in p.get('tasks', []))
+                        if p.get('kind', 'work') == 'work'
+                        and (p.get('task_id') == int(tid) or any(t.get('task_id') == int(tid) for t in p.get('tasks', [])))
                     ),
                     None,
                 )
                 today_local = datetime.now(ZoneInfo(read_calendar()['timezone'])).date()
-                base_iso = existing_pin.get('target_date') or cur_date
+                base_iso = cur_date or existing_pin.get('target_date')
                 base_date = datetime.strptime(base_iso, '%Y-%m-%d').date() if base_iso else today_local
                 shift = int(task_pin['shift_days'])
                 target = max(today_local, base_date + timedelta(days=shift))
-                adj['task_pins'][tid] = {'target_date': target.isoformat(), 'not_before': target.isoformat() if shift > 0 else None}
+                adj['task_pins'][tid] = {'mode': 'shift', 'target_date': target.isoformat(), 'not_before': target.isoformat() if shift > 0 else None}
         if estimate_override:
             tid = str(estimate_override['task_id'])
             mins = estimate_override.get('remaining_minutes')
@@ -597,7 +598,8 @@ async def rank_all(force=False, task_id=0):
                 'task_ids': [], 'comparisons': 0, 'uncertain_comparisons': 0,
                 'explanation': 'Нет задач с готовым контекстом.', 'reasons': [],
                 'schedule': {'version': 3, 'valid': True, 'periods': [], 'daily_allocations': [], 'deadline_conflicts': [],
-                             'deadline_risks': [], 'remaining': [], 'feasible': True, 'fully_scheduled': True, 'remaining_minutes': 0,
+                             'deadline_risks': [], 'remaining': [], 'feasible': True, 'no_objective_conflicts': True,
+                             'feasibility_status': 'no_objective_conflicts', 'fully_scheduled': True, 'remaining_minutes': 0,
                              'min_minutes': 0, 'max_minutes': 0, 'hours_label': 'выполнено',
                              'generated_date': datetime.now(ZoneInfo(read_calendar()['timezone'])).date().isoformat(),
                              'start_at': datetime.now(timezone.utc).isoformat(), 'timeline': [], 'timeline_error': None},
@@ -638,22 +640,18 @@ async def rank_all(force=False, task_id=0):
                 if tid in ready_id_set and text:
                     adj['task_notes'][str(tid)] = text
                     task_notes_saved_count += 1
-            seen_progress_ids: set[int] = set()
             for entry in confirmed_progress:
                 if not isinstance(entry, dict) or entry.get('confirmed_by_user') is not True:
                     continue
                 tid = entry.get('task_id')
-                if tid not in ready_id_set or tid in seen_progress_ids:
-                    continue
-                add_mins = int(entry.get('add_minutes') or 0)
-                if add_mins <= 0 or add_mins > 1440:
-                    continue
-                seen_progress_ids.add(tid)
+                try:
+                    add_mins, base_mins = int(entry.get('add_minutes')), int(entry.get('base_completed_minutes'))
+                except (TypeError, ValueError):
+                    raise HTTPException(409, 'Некорректное обновление прогресса задачи. Повторите планирование') from None
+                if tid not in ready_id_set or add_mins <= 0 or add_mins > 1440 or base_mins < 0:
+                    raise HTTPException(409, 'Некорректное обновление прогресса задачи. Повторите планирование')
                 task_row = session.get(Task, tid)
-                if not task_row or task_row.archived or task_row.status == 'done':
-                    continue
-                base_mins = entry.get('base_completed_minutes')
-                if base_mins is not None and task_row.completed_work_minutes != int(base_mins):
+                if not task_row or task_row.archived or task_row.status == 'done' or task_row.completed_work_minutes != base_mins:
                     raise HTTPException(409, 'Прогресс задачи изменился во время расчёта. Повторите планирование')
                 task_row.completed_work_minutes += add_mins
                 if task_row.status == 'todo':
@@ -679,7 +677,7 @@ async def rank_all(force=False, task_id=0):
             session.add(saved)
             for tid in ids:
                 task = session.get(Task, tid)
-                task.ai_details = json.dumps({'version': 45, 'status': 'ranked'})
+                task.ai_details = json.dumps({'version': 46, 'status': 'ranked'})
                 task.ai_scored_at = datetime.now(timezone.utc)
                 session.add(task)
             if result.get('plan_run_id'):
@@ -728,7 +726,7 @@ async def evaluate_task(task_id):
     context = await prepare(task_id)
     original = context['task_snapshot']
     if context['status'] != 'ready':
-        metrics = {'version': 45, 'status': 'needs_context', 'reason': ' '.join(context['questions'])}
+        metrics = {'version': 46, 'status': 'needs_context', 'reason': ' '.join(context['questions'])}
         with Session(get_engine()) as session:
             task = session.get(Task, task_id)
             if not task:
@@ -743,4 +741,4 @@ async def evaluate_task(task_id):
     result = await rank_all(task_id=task_id)
     ids = result['task_ids']
     return result | {'rank': ids.index(task_id) + 1 if task_id in ids else None,
-                     'metrics': {'status': 'ranked', 'version': 45}}
+                     'metrics': {'status': 'ranked', 'version': 46}}

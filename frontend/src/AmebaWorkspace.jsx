@@ -36,11 +36,14 @@ function resolvePlanStatus({ rankingData, liveActive, isRunning, rankError, fail
   if (!rankingData?.has_plan || rankingData?.plan_reset) return { tone: 'idle', pulse: false, badge: 'outline', label: 'Нет плана' };
   const sched = rankingData?.schedule ?? {};
   const conflicts = sched.deadline_conflicts ?? [];
-  if (sched.feasible === false) {
+  if (sched.no_objective_conflicts === false || sched.feasible === false) {
     return { tone: 'warning', pulse: false, badge: 'warning', label: rankingData.needs_refresh ? 'Устарел · конфликт' : 'Есть конфликт' };
   }
-  if (conflicts.length > 0 || sched.fully_scheduled === false) {
-    return { tone: 'warning', pulse: false, badge: 'warning', label: rankingData.needs_refresh ? 'Устарел · риск' : 'Частичный план' };
+  if (conflicts.length > 0) {
+    return { tone: 'warning', pulse: false, badge: 'warning', label: rankingData.needs_refresh ? 'Устарел · риск' : 'Есть риск' };
+  }
+  if (sched.fully_scheduled === false) {
+    return { tone: 'warning', pulse: false, badge: 'warning', label: rankingData.needs_refresh ? 'Устарел · частичный' : 'Частичный план' };
   }
   if (rankingData?.needs_refresh) return { tone: 'warning', pulse: false, badge: 'warning', label: 'Устарел' };
   return { tone: 'success', pulse: false, badge: 'success', label: 'Актуален' };
@@ -285,7 +288,10 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
     }
   }
   const error = ranking.error || rank.error || clearPlan.error || feedback.error || adjustPlan.error;
-  const previewDays = (activeSchedule?.daily_allocations ?? data?.calendar_schedule?.days_summary ?? []).slice(0, 7);
+  const previewDays = (
+    data?.calendar_schedule?.days_summary
+    ?? (activeSchedule?.daily_allocations?.length ? activeSchedule.daily_allocations : [])
+  ).slice(0, 7);
 
   const mainButtonLabel = isRunning
     ? (hasVisiblePlan ? 'Обновляется…' : 'Составляет план…')
@@ -504,7 +510,7 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
                     ? `${conflicts[0].title}: конфликт ограничений${conflicts.length + extraUnfitted.length > 1 ? ` (+ ещё ${conflicts.length + extraUnfitted.length - 1})` : ''}`
                     : hasInfeasibleDeadline
                       ? `${conflicts[0].title}: не укладывается в срок${conflicts.length + extraUnfitted.length > 1 ? ` (+ ещё ${conflicts.length + extraUnfitted.length - 1})` : ''}`
-                      : `${conflicts[0].title}: есть риск не успеть${conflicts.length + extraUnfitted.length > 1 ? ` (+ ещё ${conflicts.length + extraUnfitted.length - 1})` : ''}`
+                      : `${conflicts[0].title}: риск по сроку${conflicts.length + extraUnfitted.length > 1 ? ` (+ ещё ${conflicts.length + extraUnfitted.length - 1})` : ''}`
                   : `Часть задач не поместилась в план (${extraUnfitted.length})`}
               </span>
             </span>

@@ -13,6 +13,7 @@ import { agentRequest, request } from './api';
 import { calendarColors as colors, calendarBlockColor } from './calendarColors';
 import AgentProblemReport from './AgentProblemReport';
 import AgentProgress from './AgentProgress';
+import { formatDateRange } from './AgentTimeline';
 import { useMediaQuery } from '@/lib/utils';
 import { LiveHorizon, SlidePanel } from '@/lib/motion';
 import { Button, IconButton } from '@/components/ui/button';
@@ -152,12 +153,16 @@ export default function Calendar({ features = {} }) {
   const tempEvents = features.ameba !== false && showAmeba ? allEvents.filter((event) => event.source === 'ameba') : [];
   const visibleEvents = [...permanentEvents, ...tempEvents];
 
-  const amebaDailyMap = new Map(
-    (features.ameba !== false && showAmeba && !ranking.data?.plan_reset
-      ? (ranking.data?.schedule?.daily_allocations ?? [])
-      : []
-    ).map((d) => [d.date, d]),
+  const amebaSched = features.ameba !== false && showAmeba && !ranking.data?.plan_reset ? ranking.data?.schedule : null;
+  const amebaBlocked = new Set(amebaSched?.blocked_dates ?? []);
+  const amebaWorkPeriods = (amebaSched?.periods ?? []).filter(
+    (p) => !['rest', 'free', 'recovery', 'light'].includes(p.kind) && (p.task_id || p.tasks?.length),
   );
+  const amebaPeriodsForDay = (day) => amebaWorkPeriods.filter(
+    (p) => p.start_date <= day && day <= p.end_date && !(p.start_date !== p.end_date && amebaBlocked.has(day)),
+  );
+  const periodTitleText = (p) => p.title || (p.tasks ?? []).map((t) => t.title).join(', ');
+  const periodScopeLabel = (p) => (p.start_date === p.end_date ? (p.hours_label || 'В этот день') : formatDateRange(p.start_date, p.end_date));
 
   const taskList = (tasks.data ?? []).filter((task) => task.status !== 'done');
   const config = calendar.data?.config;
@@ -298,7 +303,7 @@ export default function Calendar({ features = {} }) {
   const selectedDayTitle = asDate(selectedDay).toLocaleDateString('ru-RU', { weekday: 'short', day: 'numeric', month: 'long' });
   const selectedDayEvents = permanentEvents.filter((event) => event.date === selectedDay).sort((a, b) => a.start.localeCompare(b.start));
   const selectedDayVisibleEvents = visibleEvents.filter((event) => event.date === selectedDay).sort((a, b) => a.start.localeCompare(b.start));
-  const selectedDayAmeba = amebaDailyMap.get(selectedDay);
+  const selectedDayAmebaPeriods = amebaPeriodsForDay(selectedDay);
 
   const selectedDayContent = (
     <>
@@ -331,19 +336,19 @@ export default function Calendar({ features = {} }) {
             <span className="text-[11px] font-medium uppercase tracking-wider text-[#CFA9F5]">Ameba</span>
             <a href="/ameba" className="text-[11px] text-[#B98CE8] hover:underline">План →</a>
           </div>
-          {selectedDayAmeba?.tasks?.length ? (
-            selectedDayAmeba.tasks.map((t) => (
+          {selectedDayAmebaPeriods.length ? (
+            selectedDayAmebaPeriods.map((p) => (
               <a
-                key={t.task_id}
-                href={`/?task=${t.task_id}`}
+                key={p.id}
+                href={p.task_id ? `/?task=${p.task_id}` : '/ameba'}
                 className="border border-dashed border-[#7F49B4]/60 bg-[#7F49B4]/10 px-2.5 py-1.5 flex items-center justify-between gap-2 text-[12px] hover:bg-[#7F49B4]/20"
               >
-                <span className="truncate text-[#EAEAEA]">{t.title}</span>
-                <span className="text-[11px] text-[#CFA9F5] tabular-nums shrink-0">{t.hours_label}</span>
+                <span className="truncate text-[#EAEAEA]">{periodTitleText(p)}</span>
+                <span className="text-[11px] text-[#CFA9F5] tabular-nums shrink-0">{periodScopeLabel(p)}</span>
               </a>
             ))
           ) : (
-            <div className="text-[12px] text-[#787878]">Нет задач</div>
+            <div className="text-[12px] text-[#787878]">Нет периодов</div>
           )}
         </div>
       )}
@@ -460,7 +465,7 @@ export default function Calendar({ features = {} }) {
                 <div className="grid grid-cols-7 gap-1">
                   {days.map((day) => {
                     const dayItems = visibleEvents.filter((event) => event.date === day && event.kind !== 'work');
-                    const dayAmeba = amebaDailyMap.get(day);
+                    const dayAmeba = amebaPeriodsForDay(day);
                     const isToday = day === calendar.data?.today;
                     const isSelected = day === selectedDay;
                     const inMonth = day.slice(0, 7) === date.slice(0, 7);
@@ -485,7 +490,7 @@ export default function Calendar({ features = {} }) {
                           {kinds.map((kind) => (
                             <span key={kind} className="h-1.5 w-1.5" style={{ background: colors[kind] }} />
                           ))}
-                          {dayAmeba?.allocated_minutes > 0 && (
+                          {dayAmeba.length > 0 && (
                             <span className="h-1.5 w-1.5 bg-[#B98CE8]" />
                           )}
                         </span>
@@ -503,10 +508,10 @@ export default function Calendar({ features = {} }) {
                   </Button>
                 </div>
 
-                {selectedDayAmeba?.allocated_minutes > 0 && (
+                {selectedDayAmebaPeriods.length > 0 && (
                   <a href="/ameba" className="border border-dashed border-[#7F49B4] bg-[#7F49B4]/12 px-2.5 py-1.5 text-[12px] text-[#DFC4F8] flex items-center justify-between gap-2">
-                    <span className="truncate">Ameba · {selectedDayAmeba.tasks?.map((t) => t.title).join(', ')}</span>
-                    <span className="tabular-nums shrink-0">{Math.round((selectedDayAmeba.allocated_minutes / 60) * 10) / 10} ч</span>
+                    <span className="truncate">Ameba · {selectedDayAmebaPeriods.map(periodTitleText).join(', ')}</span>
+                    <span className="text-[11px] shrink-0">План →</span>
                   </a>
                 )}
 
@@ -538,7 +543,7 @@ export default function Calendar({ features = {} }) {
             <div className="flex flex-col gap-2">
               <div className="grid grid-cols-7 gap-1 border border-[#303030] bg-[#111111] p-1">
                 {days.map((day) => {
-                  const hasItems = visibleEvents.some((event) => event.date === day) || (amebaDailyMap.get(day)?.allocated_minutes ?? 0) > 0;
+                  const hasItems = visibleEvents.some((event) => event.date === day) || amebaPeriodsForDay(day).length > 0;
                   const isToday = day === calendar.data?.today;
                   const isSelected = day === selectedDay;
                   return (
@@ -571,8 +576,8 @@ export default function Calendar({ features = {} }) {
 
               {days.map((day) => {
                 const dayEvents = visibleEvents.filter((event) => event.date === day).sort((a, b) => a.start.localeCompare(b.start));
-                const dayAmeba = amebaDailyMap.get(day);
-                const isEmpty = dayEvents.length === 0 && !(dayAmeba?.allocated_minutes > 0);
+                const dayAmeba = amebaPeriodsForDay(day);
+                const isEmpty = dayEvents.length === 0 && dayAmeba.length === 0;
                 if (isEmpty) {
                   return (
                     <section
@@ -619,10 +624,10 @@ export default function Calendar({ features = {} }) {
                     </button>
 
                     <div className="flex-1 min-w-0 flex flex-col gap-1.5">
-                      {dayAmeba?.allocated_minutes > 0 && (
+                      {dayAmeba.length > 0 && (
                         <a href="/ameba" className="border border-dashed border-[#7F49B4] bg-[#7F49B4]/12 px-2 py-1.5 text-[11px] text-[#DFC4F8] flex items-center justify-between gap-2">
-                          <span>Ameba · {dayAmeba.tasks?.map((t) => t.title).join(', ')}</span>
-                          <span className="tabular-nums shrink-0">{Math.round((dayAmeba.allocated_minutes / 60) * 10) / 10} ч</span>
+                          <span className="truncate">Ameba · {dayAmeba.map(periodTitleText).join(', ')}</span>
+                          <span className="shrink-0">План →</span>
                         </a>
                       )}
                       {dayEvents.map((event) => {
@@ -659,7 +664,7 @@ export default function Calendar({ features = {} }) {
                 <div className="calendar-week-header">
                   <div />
                   {days.map((day) => {
-                    const dayAmeba = amebaDailyMap.get(day);
+                    const dayAmeba = amebaPeriodsForDay(day);
                     return (
                       <div
                         key={day}
@@ -667,9 +672,9 @@ export default function Calendar({ features = {} }) {
                         className={`cursor-pointer select-none ${day === calendar.data?.today ? 'calendar-today' : ''} ${selectedDay === day ? 'underline decoration-[#7F49B4] underline-offset-4' : ''}`}
                       >
                         <div>{asDate(day).toLocaleDateString('ru-RU', { weekday: 'short', day: 'numeric', month: 'short' })}</div>
-                        {dayAmeba?.allocated_minutes > 0 && (
+                        {dayAmeba.length > 0 && (
                           <div className="mt-0.5 text-[10px] border border-dashed border-[#7F49B4]/70 bg-[#7F49B4]/12 text-[#DFC4F8] px-1 truncate tabular-nums">
-                            {Math.round((dayAmeba.allocated_minutes / 60) * 10) / 10}ч
+                            Ameba · {dayAmeba.length}
                           </div>
                         )}
                       </div>
@@ -730,20 +735,20 @@ export default function Calendar({ features = {} }) {
             <div className="calendar-month">
               {days.map((day) => {
                 const items = visibleEvents.filter((event) => event.date === day && event.kind !== 'work');
-                const dayAmeba = amebaDailyMap.get(day);
+                const dayAmeba = amebaPeriodsForDay(day);
                 return (
                   <div key={day} className={`calendar-month-day ${day === calendar.data?.today ? 'calendar-today' : ''}`}>
                     <div className="flex items-center justify-between gap-1">
                       <button type="button" className="calendar-date" onClick={() => create(day)}>
                         {asDate(day).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short', weekday: 'short' })}
                       </button>
-                      {dayAmeba?.allocated_minutes > 0 && (
+                      {dayAmeba.length > 0 && (
                         <button
                           type="button"
                           onClick={() => { setSelectedDay(day); setDayPanelOpen(true); }}
                           className="text-[10px] px-1 border border-dashed border-[#7F49B4] text-[#DFC4F8] shrink-0 cursor-pointer"
                         >
-                          {Math.round((dayAmeba.allocated_minutes / 60) * 10) / 10}ч
+                          Ameba · {dayAmeba.length}
                         </button>
                       )}
                     </div>
