@@ -180,17 +180,22 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
       if (typeof feedbackText === 'string' && feedbackText.trim()) {
         setWishText('');
       }
-      if (res?.consumed_feedback) {
+      if (res?.consumed_feedback || res?.memory_warning) {
         setWishResult({
           memorySaved: Number(res.memory_saved_count || 0),
           progressUpdated: Number(res.progress_updated_count || 0),
+          memoryWarning: res.memory_warning || '',
         });
       }
       await refresh();
     },
     onError: async () => {
       queryClient.setQueryData(['ameba-live-plan'], null);
-      await queryClient.invalidateQueries({ queryKey: ['agent-queue'] });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['tasks'] }),
+        queryClient.invalidateQueries({ queryKey: ['ameba-ranking'] }),
+        queryClient.invalidateQueries({ queryKey: ['agent-queue'] }),
+      ]);
     },
     onSettled: () => queryClient.invalidateQueries({ queryKey: ['agent-queue'] }),
   });
@@ -431,7 +436,7 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
 
       {wishResult && (
         <Notice
-          tone="success"
+          tone={wishResult.memoryWarning ? 'warning' : 'success'}
           onClose={() => setWishResult(null)}
           action={wishResult.memorySaved > 0 ? (
             <Button size="xs" variant="outline" asChild>
@@ -439,13 +444,15 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
             </Button>
           ) : undefined}
         >
-          {wishResult.memorySaved > 0 && wishResult.progressUpdated > 0
-            ? 'План обновлён; устойчивое предпочтение сохранено в память и учтено выполненное время.'
-            : wishResult.memorySaved > 0
-              ? 'План обновлён; устойчивое предпочтение сохранено в память.'
-              : wishResult.progressUpdated > 0
-                ? 'План обновлён с учётом выполненного времени.'
-                : 'План обновлён с учётом пожелания.'}
+          {wishResult.memoryWarning
+            ? wishResult.memoryWarning
+            : wishResult.memorySaved > 0 && wishResult.progressUpdated > 0
+              ? 'План обновлён; устойчивое предпочтение сохранено в память и учтено выполненное время.'
+              : wishResult.memorySaved > 0
+                ? 'План обновлён; устойчивое предпочтение сохранено в память.'
+                : wishResult.progressUpdated > 0
+                  ? 'План обновлён с учётом выполненного времени.'
+                  : 'План обновлён с учётом пожелания.'}
         </Notice>
       )}
 

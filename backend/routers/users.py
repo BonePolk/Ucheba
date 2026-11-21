@@ -273,3 +273,26 @@ async def monocle_tasks_internal(request: Request):
         return read_tasks(**allowed)
     finally:
         current_user_id.reset(token)
+
+
+@router.post('/ameba/progress/internal')
+async def ameba_progress_internal(request: Request):
+    from common.rpc import require_service
+    from common.identity import current_user_id
+    from integrations.ameba import apply_confirmed_progress
+    token = current_user_id.set(require_service(request, 'ameba'))
+    try:
+        check_feature('ameba')
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(422, 'Некорректные параметры обновления прогресса')
+        return apply_confirmed_progress(
+            task_id=body.get('task_id'),
+            add_minutes=body.get('add_minutes'),
+            base_completed_minutes=body.get('base_completed_minutes'),
+            confirmed_by_user=body.get('confirmed_by_user') is True,
+            confirmation_id=body.get('confirmation_id'),
+            run_id=body.get('run_id'),
+        )
+    finally:
+        current_user_id.reset(token)

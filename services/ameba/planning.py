@@ -192,9 +192,23 @@ def _protected_dates(
     return protected
 
 
-def _effective_rem(item: TaskPlanItem, overrides: dict) -> int:
-    manual = overrides.get(str(item.task_id))
-    return max(0, int(manual)) if manual is not None else int(item.remaining_minutes)
+def resolve_estimate_override(raw, completed_work_minutes: int = 0) -> int | None:
+    if raw is None or isinstance(raw, bool):
+        return None
+    cur_done = max(0, int(completed_work_minutes or 0))
+    if isinstance(raw, dict):
+        rem = raw.get('remaining_minutes')
+        if rem is None or isinstance(rem, bool):
+            return None
+        base = raw.get('baseline_completed_minutes')
+        delta = max(0, cur_done - max(0, int(base))) if base is not None and not isinstance(base, bool) else 0
+        return max(0, max(0, int(rem)) - delta)
+    return max(0, max(0, int(raw)) - cur_done)
+
+
+def _effective_rem(item: TaskPlanItem, overrides: dict, completed_work_minutes: int = 0) -> int:
+    resolved = resolve_estimate_override(overrides.get(str(item.task_id)), completed_work_minutes)
+    return resolved if resolved is not None else int(item.remaining_minutes)
 
 
 # --- Минимальная проверка объективных ограничений ---
@@ -329,7 +343,8 @@ def validate_proposal(
     for tid, item in assessments.items():
         pin = task_pins.get(str(tid)) or {}
         target_date = pin.get('target_date')
-        if (pin.get('mode') == 'shift' and pin.get('not_before')) or not target_date or target_date not in days_by_date or target_date in protected or _effective_rem(item, overrides) <= 0:
+        confirmed_done = int(tasks_by_id[tid].get('completed_work_minutes') or 0)
+        if (pin.get('mode') == 'shift' and pin.get('not_before')) or not target_date or target_date not in days_by_date or target_date in protected or _effective_rem(item, overrides, confirmed_done) <= 0:
             continue
         dl_dt = dl_by_task[tid]
         dl_ok = dl_dt is None or dl_dt <= now_dt or target_date <= dl_dt.astimezone(zone).date().isoformat()
@@ -366,8 +381,8 @@ def materialize_plan(
 
     plans: dict[int, dict] = {}
     for tid in proposal.task_ids:
-        rem = _effective_rem(assessments[tid], overrides)
         confirmed = int(tasks_by_id[tid].get('completed_work_minutes') or 0)
+        rem = _effective_rem(assessments[tid], overrides, confirmed)
         h_label = format_hours(rem)
         plans[tid] = {
             'task_id': tid, 'remaining_minutes': rem, 'work_min_minutes': rem, 'work_max_minutes': rem,
@@ -419,11 +434,12 @@ def materialize_plan(
             dl_iso = dl_dt.astimezone(zone).date().isoformat() if dl_dt else None
             dl_str = dl_dt.isoformat() if dl_dt else None
             completes = assigned_by_task[tid] >= plans[tid]['remaining_minutes']
+            assess_risk = (assessments[tid].deadline_risk or '').strip() or None if plans[tid]['remaining_minutes'] > 0 else None
             entry.update({
                 'completed_work_minutes': plans[tid]['completed_work_minutes'],
                 'completes_task': completes,
                 'deadline': dl_str,
-                'deadline_risk': assessments[tid].deadline_risk or (timing_risk_by_task.get(tid) if p.end_date == dl_iso else None),
+                'deadline_risk': assess_risk or (timing_risk_by_task.get(tid) if p.end_date == dl_iso else None),
                 'tasks': [{
                     'task_id': tid, 'title': entry['title'], 'goal': goal, 'minutes': p.estimated_minutes,
                     'hours_label': entry['hours_label'], 'completes_task': completes, 'deadline': dl_str,
@@ -436,6 +452,7 @@ def materialize_plan(
     for tid in proposal.task_ids:
         rem = plans[tid]['remaining_minutes']
         assess = assessments[tid]
+        assess_risk = (assess.deadline_risk or '').strip() or None if rem > 0 else None
         title = tasks_by_id[tid]['title']
         unplanned = max(0, rem - assigned_by_task[tid])
         remaining.append({'task_id': tid, 'remaining_work_minutes': unplanned})
@@ -449,15 +466,15 @@ def materialize_plan(
         c_infeasible = False
         if pin.get('mode') != 'shift' and pin_date and pin_date in protected and rem > 0:
             c_kind, c_infeasible, c_reason = 'constraint', True, f'{title}: закреплено на {pin_date}, но этот день закрыт для работы.'
-        elif assess.deadline_risk or is_overdue or timing_risk or (dl_iso and dl_iso <= horizon_end and unplanned > 0):
+        elif assess_risk or is_overdue or timing_risk or (dl_iso and dl_iso <= horizon_end and unplanned > 0):
             c_infeasible = is_overdue or bool(dl_iso and dl_iso <= horizon_end and unplanned > 0)
-            c_kind = 'deadline_timing' if (timing_risk and not c_infeasible and not assess.deadline_risk) else 'deadline'
+            c_kind = 'deadline_timing' if (timing_risk and not c_infeasible and not assess_risk) else 'deadline'
             default_msg = (
                 f'{title}: срок уже прошёл.' if is_overdue
                 else f'{title}: не хватает времени до срока.' if c_infeasible
                 else f'{title}: {timing_risk}'
             )
-            c_reason = assess.deadline_risk or default_msg
+            c_reason = assess_risk or default_msg
         if c_kind:
             conflicts.append({
                 'task_id': tid, 'title': title, 'kind': c_kind,
@@ -494,7 +511,8 @@ def materialize_plan(
     reasons = [
         {
             'task_id': tid, 'reason': assessments[tid].reason.strip(), 'time_estimate': plans[tid]['time_estimate'],
-            'deadline_risk': assessments[tid].deadline_risk or timing_risk_by_task.get(tid), 'plan': plans[tid],
+            'deadline_risk': ((assessments[tid].deadline_risk or '').strip() or None if plans[tid]['remaining_minutes'] > 0 else None) or timing_risk_by_task.get(tid),
+            'plan': plans[tid],
         }
         for tid in proposal.task_ids
     ]
@@ -554,14 +572,16 @@ def refresh_schedule(
     for tid in order:
         old_p = saved_plans[tid]
         prev_rem = int(old_p.get('remaining_minutes', old_p.get('work_max_minutes', old_p.get('planned_work_minutes', 0))))
-        delta_done = max(0, int(tasks_by_id[tid].get('completed_work_minutes') or 0) - int(old_p.get('completed_work_minutes') or 0))
-        rem = max(0, int(overrides[str(tid)])) if str(tid) in overrides else max(0, prev_rem - delta_done)
+        cur_done = max(0, int(tasks_by_id[tid].get('completed_work_minutes') or 0))
+        delta_done = max(0, cur_done - int(old_p.get('completed_work_minutes') or 0))
+        override_rem = resolve_estimate_override(overrides.get(str(tid)), cur_done)
+        rem = override_rem if override_rem is not None else max(0, prev_rem - delta_done)
         new_rem[tid] = rem
         old_r = reasons_by_id.get(tid) or {}
         items.append(TaskPlanItem(
             task_id=tid, remaining_minutes=rem,
             reason=str(old_r.get('reason') or 'По приоритету и срокам')[:200],
-            deadline_risk=old_r.get('deadline_risk'),
+            deadline_risk=old_r.get('deadline_risk') if rem > 0 else None,
         ))
 
     prev_blocked = list(prev_schedule.get('blocked_dates') or [])
