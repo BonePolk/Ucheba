@@ -69,6 +69,7 @@ export default function AgentTimeline({
   taskPins = {},
   estimateOverrides = {},
   taskRemainingById = {},
+  taskProgressById = {},
   onRefresh,
 }) {
   const reduced = useReducedMotion();
@@ -342,6 +343,7 @@ export default function AgentTimeline({
             const hasRisk = Boolean(period.deadline_risk);
             const isPinned = Boolean(taskPins[String(period.task_id)]);
             const manualVal = estimateOverrides[String(period.task_id)];
+            const completedMins = Number(period.completed_work_minutes ?? taskProgressById[String(period.task_id)] ?? 0);
 
             return (
               <motion.article
@@ -359,6 +361,7 @@ export default function AgentTimeline({
                     <span>{dateLabel}</span>
                     {isCurrent && <Badge variant="accent">Сейчас</Badge>}
                     {isPinned && <Badge variant="info">Закреплено</Badge>}
+                    {completedMins > 0 && <Badge variant="outline">Сделано {durationLabel(completedMins)}</Badge>}
                     {manualVal !== undefined && <Badge variant="info">Ост. {manualVal} м</Badge>}
                   </div>
                   <div className="flex items-center gap-1.5 shrink-0">
@@ -382,6 +385,10 @@ export default function AgentTimeline({
 
                 {period.context_hint && (
                   <p className="text-[12px] text-[#B98CE8] leading-snug m-0 break-words">{period.context_hint}</p>
+                )}
+
+                {period.deadline_risk && (
+                  <p className="text-[11px] text-[#D4A24C] leading-snug m-0 break-words">{period.deadline_risk}</p>
                 )}
 
                 {period.reason && (

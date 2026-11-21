@@ -48,14 +48,20 @@ function resolvePlanStatus({ rankingData, liveActive, isRunning, rankError, fail
 
 export function AmebaSummaryBar({ ranking, queue, rank, livePlan, onRefresh }) {
   const data = ranking?.data;
-  const liveActive = Boolean(livePlan?.data?.running || (data?.has_plan && livePlan?.data?.started_at && livePlan.data.started_at > (data?.generated_at ?? '')));
-  const activeSchedule = (liveActive ? livePlan?.data?.schedule : null) ?? (data?.plan_reset ? null : data?.schedule);
+  const liveRunning = Boolean(livePlan?.data?.running);
+  const liveHasNewPlan = Boolean(
+    livePlan?.data?.schedule
+    && livePlan?.data?.status === 'completed'
+    && livePlan?.data?.started_at
+    && livePlan.data.started_at > (data?.generated_at ?? ''),
+  );
+  const activeSchedule = (liveHasNewPlan ? livePlan?.data?.schedule : null) ?? (data?.plan_reset ? null : data?.schedule);
   const periods = activeSchedule?.periods ?? [];
   const conflicts = activeSchedule?.deadline_conflicts ?? [];
   const isRunning = Boolean(queue?.data?.ameba_running || rank?.isPending);
   const status = resolvePlanStatus({
     rankingData: data,
-    liveActive,
+    liveActive: liveRunning,
     isRunning,
     rankError: rank?.error,
     failedRun: false,
@@ -67,7 +73,7 @@ export function AmebaSummaryBar({ ranking, queue, rank, livePlan, onRefresh }) {
 
   return (
     <div className="relative overflow-hidden border border-[#303030] bg-[#111111] px-3 py-2 flex flex-wrap items-center justify-between gap-2">
-      <LiveHorizon active={isRunning || liveActive} tone={horizonTone} />
+      <LiveHorizon active={isRunning || liveRunning} tone={horizonTone} />
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 min-w-0 text-[12px]">
         <div className="flex items-center gap-2 shrink-0">
           <StatusIndicator tone={status.tone} pulse={status.pulse} />
@@ -180,7 +186,7 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
       await refresh();
     },
     onError: async () => {
-      queryClient.setQueryData(['ameba-live-plan'], (prev) => (prev ? { ...prev, running: false } : prev));
+      queryClient.setQueryData(['ameba-live-plan'], null);
       await queryClient.invalidateQueries({ queryKey: ['agent-queue'] });
     },
     onSettled: () => queryClient.invalidateQueries({ queryKey: ['agent-queue'] }),
@@ -224,8 +230,14 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
   });
 
   const data = ranking.data;
-  const liveActive = Boolean(livePlan.data?.running || (data?.has_plan && livePlan.data?.started_at && livePlan.data.started_at > (data?.generated_at ?? '')));
-  const activeSchedule = (liveActive ? livePlan.data?.schedule : null) ?? (data?.plan_reset ? null : data?.schedule);
+  const liveRunning = Boolean(livePlan.data?.running);
+  const liveHasNewPlan = Boolean(
+    livePlan.data?.schedule
+    && livePlan.data?.status === 'completed'
+    && livePlan.data?.started_at
+    && livePlan.data.started_at > (data?.generated_at ?? ''),
+  );
+  const activeSchedule = (liveHasNewPlan ? livePlan.data?.schedule : null) ?? (data?.plan_reset ? null : data?.schedule);
   const hasVisiblePlan = Boolean(activeSchedule?.periods?.length);
   const manual = data?.manual_adjustments ?? {};
   const hasManualAdjustments = Boolean(
@@ -237,30 +249,39 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
   const isRunning = Boolean(queue.data?.ameba_running || rank.isPending);
   const status = resolvePlanStatus({
     rankingData: data,
-    liveActive,
+    liveActive: liveRunning,
     isRunning,
     rankError: rank.error,
     failedRun: ranking.error,
   });
 
   const conflicts = activeSchedule?.deadline_conflicts ?? [];
+  const hasConstraintConflict = conflicts.some((c) => c.kind === 'constraint');
+  const hasInfeasibleDeadline = conflicts.some((c) => c.infeasible && c.kind !== 'constraint');
   const unfitted = (activeSchedule?.remaining ?? []).filter((r) => r.remaining_work_minutes > 0);
   const conflictIds = new Set(conflicts.map((c) => c.task_id));
   const extraUnfitted = unfitted.filter((u) => !conflictIds.has(u.task_id));
   const hasRisks = conflicts.length > 0 || extraUnfitted.length > 0;
-  const timelineTasks = (liveActive ? livePlan.data?.timeline : null) ?? data?.timeline ?? [];
+  const timelineTasks = (liveHasNewPlan ? livePlan.data?.timeline : null) ?? data?.timeline ?? [];
   const titleMap = new Map(timelineTasks.map((item) => [item.id ?? item.task_id, item.title]));
   const taskRemainingMap = {};
+  const taskProgressMap = {};
   for (const item of timelineTasks) {
     const tid = item.id ?? item.task_id;
     const rem = item.plan?.work_max_minutes ?? item.plan?.max_minutes ?? item.plan?.planned_work_minutes;
     if (tid != null && rem != null) taskRemainingMap[String(tid)] = Number(rem);
+    const doneMins = item.plan?.completed_work_minutes;
+    if (tid != null && doneMins != null) taskProgressMap[String(tid)] = Number(doneMins);
   }
   for (const item of data?.reasons ?? []) {
     const tid = item.task_id;
     const rem = item.plan?.work_max_minutes ?? item.plan?.max_minutes ?? item.plan?.planned_work_minutes;
     if (tid != null && rem != null && taskRemainingMap[String(tid)] === undefined) {
       taskRemainingMap[String(tid)] = Number(rem);
+    }
+    const doneMins = item.plan?.completed_work_minutes;
+    if (tid != null && doneMins != null && taskProgressMap[String(tid)] === undefined) {
+      taskProgressMap[String(tid)] = Number(doneMins);
     }
   }
   const error = ranking.error || rank.error || clearPlan.error || feedback.error || adjustPlan.error;
@@ -340,7 +361,7 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
         />
       ) : (
         <div className="relative overflow-hidden flex flex-wrap items-center justify-between gap-2 border border-[#303030] bg-[#111111] px-3 py-2">
-          <LiveHorizon active={isRunning || liveActive} tone={status.badge === 'warning' ? 'warning' : status.badge === 'danger' ? 'danger' : 'accent'} />
+          <LiveHorizon active={isRunning || liveRunning} tone={status.badge === 'warning' ? 'warning' : status.badge === 'danger' ? 'danger' : 'accent'} />
           <div className="flex items-center gap-2">
             <StatusIndicator tone={status.tone} pulse={status.pulse} />
             <span className="text-[13px] font-semibold text-[#EAEAEA]">Ameba · План</span>
@@ -412,11 +433,13 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
             </Button>
           ) : undefined}
         >
-          {wishResult.memorySaved > 0
-            ? 'План обновлён; устойчивое предпочтение сохранено в память.'
-            : wishResult.progressUpdated > 0
-              ? 'План обновлён с учётом выполненного времени.'
-              : 'План обновлён с учётом пожелания.'}
+          {wishResult.memorySaved > 0 && wishResult.progressUpdated > 0
+            ? 'План обновлён; устойчивое предпочтение сохранено в память и учтено выполненное время.'
+            : wishResult.memorySaved > 0
+              ? 'План обновлён; устойчивое предпочтение сохранено в память.'
+              : wishResult.progressUpdated > 0
+                ? 'План обновлён с учётом выполненного времени.'
+                : 'План обновлён с учётом пожелания.'}
         </Notice>
       )}
 
@@ -477,7 +500,11 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
               <AlertTriangle className="h-3.5 w-3.5 text-[#D4A24C] shrink-0" aria-hidden="true" />
               <span className="truncate">
                 {conflicts.length > 0
-                  ? `${conflicts[0].title}: есть риск не успеть${conflicts.length + extraUnfitted.length > 1 ? ` (+ ещё ${conflicts.length + extraUnfitted.length - 1})` : ''}`
+                  ? hasConstraintConflict
+                    ? `${conflicts[0].title}: конфликт ограничений${conflicts.length + extraUnfitted.length > 1 ? ` (+ ещё ${conflicts.length + extraUnfitted.length - 1})` : ''}`
+                    : hasInfeasibleDeadline
+                      ? `${conflicts[0].title}: не укладывается в срок${conflicts.length + extraUnfitted.length > 1 ? ` (+ ещё ${conflicts.length + extraUnfitted.length - 1})` : ''}`
+                      : `${conflicts[0].title}: есть риск не успеть${conflicts.length + extraUnfitted.length > 1 ? ` (+ ещё ${conflicts.length + extraUnfitted.length - 1})` : ''}`
                   : `Часть задач не поместилась в план (${extraUnfitted.length})`}
               </span>
             </span>
@@ -488,9 +515,14 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
             <div className="pt-1 border-t border-[#4A391D]/60 flex flex-col gap-2 text-[12px]">
               {conflicts.map((c) => (
                 <div key={c.task_id} className="flex flex-col gap-0.5">
-                  <a href={`/?task=${c.task_id}`} className="font-medium text-[#EAEAEA] hover:underline w-fit">
-                    {c.title || titleMap.get(c.task_id) || `Задача #${c.task_id}`}
-                  </a>
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                    <a href={`/?task=${c.task_id}`} className="font-medium text-[#EAEAEA] hover:underline w-fit">
+                      {c.title || titleMap.get(c.task_id) || `Задача #${c.task_id}`}
+                    </a>
+                    {c.infeasible && c.deficit_label && (
+                      <span className="text-[11px] text-[#D4A24C] tabular-nums">· не хватает {c.deficit_label}</span>
+                    )}
+                  </div>
                   <span className="text-[#DCDCDC]">{c.reason}</span>
                 </div>
               ))}
@@ -513,14 +545,15 @@ export default function AmebaWorkspace({ features = {}, embedded = false }) {
         <AgentTimeline
           schedule={activeSchedule}
           calendarOnly={!activeSchedule}
-          finished={!isRunning && !livePlan.data?.running}
-          updating={isRunning || Boolean(livePlan.data?.running)}
+          finished={!isRunning && !liveRunning}
+          updating={isRunning || liveRunning}
           busy={feedback.isPending || adjustPlan.isPending || isRunning}
           onFeedback={(payload) => feedback.mutate(payload)}
           onAdjust={(payload) => adjustPlan.mutate(payload)}
           taskPins={manual.task_pins ?? {}}
           estimateOverrides={manual.estimate_overrides ?? {}}
           taskRemainingById={taskRemainingMap}
+          taskProgressById={taskProgressMap}
           onRefresh={() => rank.mutate()}
         />
       )}

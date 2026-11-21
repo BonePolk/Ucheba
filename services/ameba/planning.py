@@ -4,11 +4,13 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import date as calendar_date, datetime, timedelta, timezone
 import json
+import re
 from typing import Literal
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
 
+from common.ameba_guards import norm_text, task_matches_text, verify_progress_update
 from common.calendar import occurs
 from common.schedule import week_parity
 
@@ -57,6 +59,9 @@ class TaskAssessment(BaseModel):
     )
     depends_on: list[int] = Field(description='ID задач из списка, которые нужно выполнить раньше этой; [] если нет.')
     effort: Literal['low', 'medium', 'high'] = Field(description='Уровень требуемого внимания и нагрузки.')
+    load_type: Literal['cognitive', 'practical', 'mixed'] = Field(
+        description='Тип нагрузки: cognitive — интеллектуальная/учёба/код; practical — физическая/бытовая/поручения; mixed — смешанная.',
+    )
     reason: str = Field(min_length=1, max_length=200, description='Краткая причина места задачи в приоритетах.')
     impact: str = Field(min_length=1, max_length=180, description='Конкретная польза или результат выполнения.')
     deadline_risk: str | None = Field(
@@ -91,6 +96,12 @@ class PreferenceItem(BaseModel):
     scope: Literal['once', 'task', 'persistent'] = Field(
         description='once — только текущий расчёт; task — контекст конкретной задачи; persistent — устойчивая привычка.',
     )
+    strength: Literal['soft', 'hard'] = Field(
+        description='soft — мягкое пожелание; hard — прямой запрет или обязательное ограничение владельца.',
+    )
+    blocked_dates: list[str] = Field(
+        description='Даты YYYY-MM-DD, явно закрытые для работы при strength=hard и scope in (once, task); иначе [].',
+    )
     task_id: int | None = Field(description='ID задачи для scope=task; иначе null.')
     key: str | None = Field(max_length=100, description='Короткий латинский ключ для persistent (вида ameba.<тема>) либо null.')
 
@@ -104,6 +115,10 @@ class ProgressUpdate(BaseModel):
     minutes: int = Field(
         ge=0, le=10000,
         description='Минуты для операции add (>0) или итоговое значение для set (>=0) только по явному сообщению владельца в user_feedback.',
+    )
+    evidence_quote: str = Field(
+        min_length=1, max_length=240,
+        description='Дословная цитата из user_feedback или ответа в ask_user, подтверждающая уже выполненное время.',
     )
 
 
@@ -281,15 +296,31 @@ def round_step(minutes: float, step: int = 5) -> int:
     return max(0, int(round(minutes / step) * step))
 
 
+def _target_minutes(rem_min: int, rem_max: int) -> int:
+    """Вычисляет целевой объём планирования, не превышающий реальный остаток rem_max."""
+    if rem_max <= 0:
+        return 0
+    low = max(0, min(rem_min, rem_max))
+    weighted = 0.35 * low + 0.65 * rem_max
+    if rem_max < 10:
+        return min(rem_max, max(max(1, low), int(round(weighted))))
+    return min(rem_max, max(low, max(1, round_step(weighted, 5))))
+
+
 def format_hours(min_minutes: int, max_minutes: int | None = None) -> str:
     low = max(0, int(min_minutes))
     high = max(low, int(max_minutes if max_minutes is not None else low))
     if high == 0:
         return 'выполнено'
     if high < 60:
+        if high < 10:
+            if low == high or high - low < 2:
+                return f'{high} мин'
+            return f'{max(1, low)}–{high} мин'
         if low == high or high - low < 10:
             return f'≈ {max(10, round_step(high, 5))} мин'
-        return f'{max(5, round_step(low, 5))}–{round_step(high, 5)} мин'
+        low_label = max(1, low) if low < 5 else round_step(low, 5)
+        return f'{low_label}–{round_step(high, 5)} мин'
 
     def fmt(hours: float) -> str:
         rounded = round(hours * 2) / 2
@@ -412,6 +443,7 @@ def available_for_task_on_day(
     available_from: datetime | None,
     deadline: datetime | None,
     policy: str = 'soft',
+    enforce_deadline: bool | None = None,
 ) -> tuple[int, int, int]:
     """Возвращает (start_min, end_min, free_minutes) на дату с учётом открытия и жёсткого дедлайна."""
     start = int(day_info['start_bound'])
@@ -421,7 +453,8 @@ def available_for_task_on_day(
             return start, start, 0
         if day_date == available_from.date():
             start = max(start, available_from.hour * 60 + available_from.minute)
-    if policy != 'soft' and deadline is not None:
+    should_enforce = (policy != 'soft') if enforce_deadline is None else enforce_deadline
+    if should_enforce and deadline is not None:
         if day_date > deadline.date():
             return start, start, 0
         if day_date == deadline.date():
@@ -530,9 +563,14 @@ def analyze_days(
             work_segs = _subtract_intervals([(max(a, start_bound), b) for a, b in merged_work if b > start_bound], merged_busy + merged_meal)
             physical_free = min(physical_free, sum(b - a for a, b in work_segs))
 
+        base_windows = merged_work if merged_work else [(0, 1440)]
+        clipped_windows = [(max(a, start_bound), b) for a, b in base_windows if b > max(a, start_bound)]
+        free_segs = _subtract_intervals(clipped_windows, merged_busy + effective_sleep + merged_meal)
+
         day_mode = manual_day_overrides.get(day_iso) or 'normal'
         if all_day_unavailable or day_mode == 'free' or (offset == 0 and (now_min >= 22 * 60 or physical_free < 25)):
             max_work = 0
+            heavy_limit = 0
         else:
             # Осторожный личный буфер: 120 мин для полного дня, масштабируется для остатка сегодняшнего дня.
             rest_reserve = 90 if offset == 0 and start_bound >= 12 * 60 else 120
@@ -550,6 +588,20 @@ def analyze_days(
             max_work = round_step(max_work, 5)
             if 0 < max_work < 20:
                 max_work = 0
+            if max_work == 0:
+                heavy_limit = 0
+            elif day_mode == 'focused' or busy_minutes < 180:
+                heavy_limit = max_work
+            elif busy_minutes < 360:
+                heavy_limit = min(max_work, max(60, round_step(max_work * 0.7, 5)))
+            else:
+                heavy_limit = min(max_work, 60 if busy_minutes >= 450 else 90)
+
+        free_windows = (
+            []
+            if max_work == 0
+            else [f'{a // 60:02d}:{a % 60:02d}-{b // 60:02d}:{b % 60:02d}' for a, b in free_segs if b - a >= 15]
+        )
 
         days_info.append({
             'offset': offset,
@@ -561,6 +613,8 @@ def analyze_days(
             'busy_minutes': busy_minutes,
             'physical_free_minutes': physical_free,
             'max_work_minutes': max_work,
+            'heavy_work_limit_minutes': heavy_limit,
+            'free_windows': free_windows,
             'all_day_unavailable': all_day_unavailable,
             'merged_busy': merged_busy,
             'merged_work': merged_work,
@@ -593,7 +647,10 @@ def calendar_overview(days: list[dict]) -> list[dict]:
             'busy_minutes': d['busy_minutes'],
             'physical_free_minutes': d['physical_free_minutes'],
             'max_work_minutes': d['max_work_minutes'],
+            'heavy_work_limit_minutes': d['heavy_work_limit_minutes'],
         }
+        if d.get('free_windows'):
+            item['free_windows'] = d['free_windows']
         if d['day_mode'] != 'normal':
             item['mode'] = d['day_mode']
         if d['merged_work']:
@@ -631,8 +688,306 @@ def _task_budget(
         rem_min = min(rem_min, val) if val else 0
         rem_max = val
         if rem_max > 0 and rem_min == rem_max:
-            rem_min = max(5, round(rem_max * 0.85))
+            rem_min = min(rem_max, max(1, round(rem_max * 0.85)))
     return confirmed, rem_min, rem_max
+
+
+_HARD_EXPIRY_CUES = (
+    'после срока недоступн',
+    'после дедлайна недоступн',
+    'после срока не принима',
+    'после дедлайна не принима',
+    'работа недоступна',
+    'сдача недоступна',
+    'доступ закрыва',
+    'доступ закроет',
+    'форма закроет',
+    'тест закроет',
+    'закрывается после',
+    'автоматически закро',
+    'сгорает',
+    'жесткий дедлайн',
+    'строгий дедлайн',
+    'строго до',
+    'нельзя сдать позже',
+    'позже не принима',
+    'hard deadline',
+    'strict deadline',
+)
+_HARD_EXPIRY_RE = re.compile(
+    r'\b(?:после|по)\s+(?:срока|дедлайна|истечени\w*)\b[^.!?\n]{0,40}\b(?:недоступн|не\s+принима|закры|нельзя)\b'
+)
+_SOFT_DEADLINE_CUES = (
+    'мягкий дедлайн',
+    'мягкий срок',
+    'ориентировочный срок',
+    'ориентировочный дедлайн',
+    'можно сдать позже',
+    'можно позже',
+    'не жесткий',
+    'не строгий',
+    'soft deadline',
+)
+_SOFT_NEGATION_CUES = ('не мягкий', 'не мягк', 'нельзя позже', 'нельзя сдать позже', 'не ориентировоч')
+
+_SOFTENER_RE = re.compile(
+    r'\b(?:'
+    r'желательно|по\s+возможности|было\s+бы\s+хорошо|лучше|хотелось\s+бы|'
+    r'постарайся|если\s+получится|полегче|поменьше|побольше\s+отдыхать|'
+    r'щадящ\w*|preferably|ideally|try\s+to|lighter'
+    r')\b'
+)
+_ABSOLUTE_BLOCK_RE = re.compile(
+    r'\b(?:'
+    r'освободи|освободить|оставь\s+свободн\w*|оставить\s+свободн\w*|'
+    r'сделай\s+свободн\w*|полностью\s+свободн\w*|ничего\s+не\s+планируй|'
+    r'не\s+планируй\s+ничего|ничего\s+не\s+ставь|не\s+ставь\s+ничего|'
+    r'вообще\s+ничего|без\s+работы|без\s+задач|не\s+работаю|'
+    r'день\s+отдыха|полный\s+отдых|выходной|занят\s+весь\s+день|занята\s+весь\s+день|'
+    r'недоступен|недоступна|не\s+могу\s+работать|'
+    r'no\s+work|leave\b[^.!?\n]{0,20}\bfree|keep\b[^.!?\n]{0,20}\bfree|'
+    r"don'?t\s+schedule\s+anything|nothing\s+on"
+    r')\b'
+)
+_NEGATED_BLOCK_RE = re.compile(r'\bне\s+(?:освобождай|оставляй\s+свободн\w*|делай\s+свободн\w*)\b')
+_TASK_DAY_FORBID_RE = re.compile(r"\b(?:не\s+ставь|не\s+планируй|убери|не\s+назначай|don'?t\s+put|don'?t\s+schedule)\b")
+_CLAUSE_VERB_RE = re.compile(
+    r'\b(?:'
+    r'освобод\w*|остав\w*|сдела\w*|не\s+план\w*|не\s+став\w*|перенес\w*|сдвин\w*|'
+    r'растян\w*|добав\w*|потрат\w*|выполн\w*|заним\w*|поработ\w*|убер\w*|'
+    r'желательн\w*|лучше|постарай\w*|попробу\w*|хочу|нужно|надо|планирую|'
+    r'уже\s+сделал\w*|перевез\w*|позанимал\w*'
+    r')\b'
+)
+_WEEKDAY_PATTERNS = (
+    (0, re.compile(r'\b(?:понедельник\w*|пн|monday)\b')),
+    (1, re.compile(r'\b(?:вторник\w*|вт|tuesday)\b')),
+    (2, re.compile(r'\b(?:сред[ауеы]|ср|wednesday)\b')),
+    (3, re.compile(r'\b(?:четверг\w*|чт|thursday)\b')),
+    (4, re.compile(r'\b(?:пятниц[ауеы]|пт|friday)\b')),
+    (5, re.compile(r'\b(?:суббот[ауеы]|сб|saturday)\b')),
+    (6, re.compile(r'\b(?:воскресен[ьейя]|вс|sunday)\b')),
+)
+_ROUTE_ASSERT_RE = re.compile(
+    r'\b(?:по\s+дороге|по\s+пути|по\s+маршруту|рядом\s+с|недалеко\s+от|поблизости\s+от|заехать\s+по|зайти\s+по|on\s+the\s+way|along\s+the\s+route|nearby)\b'
+)
+_CONDITIONAL_CUE_RE = re.compile(
+    r'\b(?:если|при\s+условии|возможно|может\s+быть|если\s+удобно|если\s+окажется|предположительно|if\b|maybe|assuming)\b'
+)
+_ROUTE_FACT_RE = re.compile(
+    r'\b(?:по\s+дороге|по\s+пути|по\s+маршруту|маршрут\w*|рядом|недалеко|поблизости|заехать|зайти|on\s+the\s+way|along\s+the\s+route|nearby)\b'
+)
+
+
+def _trusted_task_text(task: dict) -> str:
+    return norm_text(' '.join(
+        str(task.get(field) or '')
+        for field in ('title', 'description', 'owner_notes', 'task_note', 'full_context')
+    ))
+
+
+def _has_hard_expiry_cue(task: dict) -> bool:
+    text = _trusted_task_text(task)
+    if not text:
+        return False
+    return any(cue in text for cue in _HARD_EXPIRY_CUES) or bool(_HARD_EXPIRY_RE.search(text))
+
+
+def _has_explicit_soft_deadline_cue(task: dict) -> bool:
+    text = _trusted_task_text(task)
+    if not text or any(neg in text for neg in _SOFT_NEGATION_CUES):
+        return False
+    return any(cue in text for cue in _SOFT_DEADLINE_CUES)
+
+
+def effective_deadline_policy(task: dict, proposed_policy: str, now_dt: datetime) -> tuple[str, bool, bool]:
+    """Определяет (effective_policy, enforce_deadline, is_overdue) из доверенных данных задачи."""
+    dl_dt = parse_dt(task.get('deadline'), timezone.utc)
+    if dl_dt is None:
+        return 'soft', False, False
+    is_overdue = dl_dt <= now_dt
+    if _has_hard_expiry_cue(task) or proposed_policy == 'expires':
+        return 'expires', True, is_overdue
+    if _has_explicit_soft_deadline_cue(task) and proposed_policy == 'soft':
+        return 'soft', False, is_overdue
+    return 'finish_before', not is_overdue, is_overdue
+
+
+def _split_feedback_clauses(text_norm: str) -> list[str]:
+    if not text_norm:
+        return []
+    clauses: list[str] = []
+    for seg in re.split(r'[.;!?\n]+|\s+[—-]\s+|\s+(?:но|а)\s+', text_norm):
+        seg = seg.strip()
+        if not seg:
+            continue
+        if ',' not in seg:
+            clauses.append(seg)
+            continue
+        pieces = [p.strip() for p in seg.split(',') if p.strip()]
+        merged: list[str] = []
+        for piece in pieces:
+            if not merged:
+                merged.append(piece)
+            elif _CLAUSE_VERB_RE.search(merged[-1]) and _CLAUSE_VERB_RE.search(piece):
+                merged.append(piece)
+            else:
+                merged[-1] = f'{merged[-1]}, {piece}'
+        clauses.extend(merged)
+    return clauses
+
+
+def _resolve_dates_in_clause(clause_norm: str, days: list[dict]) -> list[str]:
+    if not days:
+        return []
+    today_date = calendar_date.fromisoformat(days[0]['date'])
+    days_by_iso = {d['date']: d for d in days}
+    found: list[str] = []
+    is_next_week = bool(re.search(r'\bследующ\w*|\bnext\s+week\b', clause_norm))
+
+    def add_iso(d_iso: str) -> None:
+        if d_iso in days_by_iso and d_iso not in found:
+            found.append(d_iso)
+
+    for m in re.finditer(r'\b(\d{4}-\d{2}-\d{2})\b', clause_norm):
+        add_iso(m.group(1))
+    for m in re.finditer(r'\b(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?\b', clause_norm):
+        day_num, mon_num, yr_raw = int(m.group(1)), int(m.group(2)), m.group(3)
+        years = [int(yr_raw)] if yr_raw else [today_date.year, today_date.year + 1]
+        for yr in years:
+            try:
+                cand = calendar_date(yr, mon_num, day_num)
+            except ValueError:
+                continue
+            if not yr_raw and cand < today_date - timedelta(days=30):
+                continue
+            if cand.isoformat() in days_by_iso:
+                add_iso(cand.isoformat())
+                break
+
+    if re.search(r'\b(?:сегодня|today)\b', clause_norm):
+        add_iso(today_date.isoformat())
+    if re.search(r'\b(?:послезавтра|day\s+after\s+tomorrow)\b', clause_norm):
+        add_iso((today_date + timedelta(days=2)).isoformat())
+    if re.search(r'\b(?:завтра|tomorrow)\b', clause_norm):
+        add_iso((today_date + timedelta(days=1)).isoformat())
+    if re.search(r'\b(?:выходн(?:ые|ым|ыми|ых)|weekend)\b', clause_norm):
+        days_until_mon = (7 - today_date.weekday()) % 7 or 7
+        next_mon = (today_date + timedelta(days=days_until_mon)).isoformat()
+        for d in days:
+            if d['weekday'] not in (5, 6):
+                continue
+            if is_next_week:
+                if next_mon <= d['date'] < (today_date + timedelta(days=days_until_mon + 7)).isoformat():
+                    add_iso(d['date'])
+            elif d['date'] < next_mon:
+                add_iso(d['date'])
+
+    for wd, pattern in _WEEKDAY_PATTERNS:
+        if not pattern.search(clause_norm):
+            continue
+        matches = [d for d in days if d['weekday'] == wd]
+        if not matches:
+            continue
+        if is_next_week:
+            later = [d for d in matches if d['offset'] >= 7]
+            chosen = later[0] if later else matches[-1]
+        else:
+            chosen = matches[0]
+        add_iso(chosen['date'])
+
+    return found
+
+
+def extract_explicit_blocked_days(
+    user_feedback: str,
+    days: list[dict],
+    tasks: list[dict] | None = None,
+) -> list[dict]:
+    """Извлекает из user_feedback явные жёсткие временные запреты (blocked_day / blocked_task_day)."""
+    text_norm = norm_text(user_feedback)
+    if not text_norm or not days:
+        return []
+
+    constraints: list[dict] = []
+    seen: set[tuple[str, str, int | None]] = set()
+    for clause in _split_feedback_clauses(text_norm):
+        if _NEGATED_BLOCK_RE.search(clause):
+            continue
+        dates = _resolve_dates_in_clause(clause, days)
+        if not dates:
+            continue
+        has_softener = bool(_SOFTENER_RE.search(clause))
+        has_abs = bool(_ABSOLUTE_BLOCK_RE.search(clause))
+        has_task_forbid = bool(_TASK_DAY_FORBID_RE.search(clause))
+
+        if has_abs and not has_softener:
+            for d_iso in dates:
+                key = ('blocked_day', d_iso, None)
+                if key not in seen:
+                    seen.add(key)
+                    constraints.append({
+                        'kind': 'blocked_day',
+                        'date': d_iso,
+                        'scope': 'once',
+                        'strength': 'hard',
+                        'task_id': None,
+                    })
+            continue
+
+        if has_task_forbid and not has_softener and tasks:
+            scored = [(task_matches_text(t, clause), t['id']) for t in tasks]
+            scored.sort(reverse=True)
+            if scored and scored[0][0] > 0 and (len(scored) == 1 or scored[0][0] > scored[1][0]):
+                tid = scored[0][1]
+                for d_iso in dates:
+                    key = ('blocked_task_day', d_iso, tid)
+                    if key not in seen:
+                        seen.add(key)
+                        constraints.append({
+                            'kind': 'blocked_task_day',
+                            'date': d_iso,
+                            'scope': 'task',
+                            'strength': 'hard',
+                            'task_id': tid,
+                        })
+    return constraints
+
+
+def _soft_only_dates(user_feedback: str, days: list[dict], hard_dates: set[str]) -> set[str]:
+    text_norm = norm_text(user_feedback)
+    if not text_norm or not days:
+        return set()
+    soft_dates: set[str] = set()
+    for clause in _split_feedback_clauses(text_norm):
+        if _SOFTENER_RE.search(clause) and not _ABSOLUTE_BLOCK_RE.search(clause):
+            for d_iso in _resolve_dates_in_clause(clause, days):
+                if d_iso not in hard_dates:
+                    soft_dates.add(d_iso)
+    return soft_dates
+
+
+def _has_verified_route_fact(
+    task: dict,
+    days_by_date: dict[str, dict],
+    period_dates: list[str],
+    user_feedback: str,
+    user_answers: list[dict] | None,
+    user_memory: list[dict] | None,
+) -> bool:
+    parts = [_trusted_task_text(task), norm_text(user_feedback)]
+    for ans in (user_answers or []):
+        if isinstance(ans, dict):
+            parts.append(norm_text(ans.get('answer') or ''))
+    for fact in (user_memory or []):
+        if isinstance(fact, dict):
+            parts.append(norm_text(fact.get('text') or ''))
+    for d_iso in period_dates:
+        d_info = days_by_date.get(d_iso) or {}
+        for c in d_info.get('commitments', []):
+            parts.append(norm_text(f"{c.get('title', '')} {c.get('summary', '')}"))
+    corpus = ' '.join(p for p in parts if p)
+    return bool(_ROUTE_FACT_RE.search(corpus))
 
 
 def _check_dependencies(assessments: dict[int, TaskAssessment], expected: set[int]) -> list[dict]:
@@ -679,6 +1034,11 @@ def validate_proposal(
     planning_style: str = 'balanced',
     adjustments: dict | None = None,
     has_feedback: bool = False,
+    user_feedback: str = '',
+    user_answers: list[dict] | None = None,
+    user_memory: list[dict] | None = None,
+    extra_blocked_dates: list[str] | None = None,
+    verify_context_hints: bool = True,
 ) -> tuple[PlanProposal | None, list[dict], list[dict], dict[int, dict]]:
     """Проверяет предложение модели по инвариантам. Возвращает (proposal, issues, days, budgets)."""
     if isinstance(raw_arguments, PlanProposal):
@@ -730,13 +1090,8 @@ def validate_proposal(
     if missing_assess:
         issues.append({'code': 'missing_task', 'task_ids': missing_assess, 'message': f'Нет оценки для задач: {missing_assess}.'})
 
-    # Проверка progress_updates и preferences.
+    # Проверка progress_updates и preferences (подтверждённый прогресс меняется только по явному сообщению).
     progress_override: dict[int, int] = {}
-    if proposal.progress_updates and not has_feedback:
-        issues.append({
-            'code': 'progress_update_without_feedback',
-            'message': 'progress_updates разрешены только при явном сообщении владельца в user_feedback.',
-        })
     seen_progress_tasks: set[int] = set()
     for upd in proposal.progress_updates:
         if upd.task_id not in expected_set:
@@ -746,6 +1101,19 @@ def validate_proposal(
             issues.append({'code': 'duplicate_progress_update', 'task_id': upd.task_id, 'message': f'progress_updates: задача {upd.task_id} указана дважды.'})
             continue
         seen_progress_tasks.add(upd.task_id)
+        assess_item = assessments.get(upd.task_id)
+        ok_progress, err_code, err_msg = verify_progress_update(
+            upd.model_dump(),
+            tasks_by_id[upd.task_id],
+            user_feedback=user_feedback,
+            user_answers=user_answers,
+            all_tasks=tasks,
+            total_minutes_min=assess_item.total_minutes_min if assess_item else None,
+            total_minutes_max=assess_item.total_minutes_max if assess_item else None,
+        )
+        if not ok_progress:
+            issues.append({'code': err_code, 'task_id': upd.task_id, 'message': err_msg})
+            continue
         current_done = int(tasks_by_id[upd.task_id].get('completed_work_minutes') or 0)
         try:
             progress_override[upd.task_id] = apply_progress(current_done, upd)
@@ -757,6 +1125,17 @@ def validate_proposal(
             issues.append({'code': 'invalid_preference', 'task_id': pref.task_id, 'message': 'Для scope=task укажи существующий task_id.'})
         if pref.scope == 'persistent' and pref.task_id is not None:
             issues.append({'code': 'invalid_preference', 'message': 'Для scope=persistent поле task_id должно быть null.'})
+        if pref.scope == 'persistent' and pref.blocked_dates:
+            issues.append({'code': 'invalid_preference', 'message': 'Устойчивые привычки (scope=persistent) не должны задавать blocked_dates.'})
+        for d_iso in pref.blocked_dates:
+            if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', d_iso):
+                issues.append({'code': 'invalid_preference', 'message': f'Некорректная дата в blocked_dates: {d_iso}.'})
+                break
+            try:
+                calendar_date.fromisoformat(d_iso)
+            except ValueError:
+                issues.append({'code': 'invalid_preference', 'message': f'Несуществующая дата в blocked_dates: {d_iso}.'})
+                break
 
     if issues:
         return proposal, issues, days, {}
@@ -765,6 +1144,30 @@ def validate_proposal(
     if issues:
         return proposal, issues, days, {}
 
+    # Временные жёсткие ограничения из текста владельца, /refresh и классификации hard preferences.
+    hard_blocked_dates: set[str] = set()
+    hard_task_blocked: dict[int, set[str]] = {}
+    for item in extract_explicit_blocked_days(user_feedback, days, tasks=tasks):
+        if item['kind'] == 'blocked_day':
+            hard_blocked_dates.add(item['date'])
+        elif item['kind'] == 'blocked_task_day' and item['task_id'] is not None:
+            hard_task_blocked.setdefault(item['task_id'], set()).add(item['date'])
+    for d_iso in (extra_blocked_dates or ()):
+        if d_iso in days_by_date:
+            hard_blocked_dates.add(d_iso)
+    if user_feedback.strip():
+        soft_dates = _soft_only_dates(user_feedback, days, hard_blocked_dates)
+        for pref in proposal.preferences:
+            if pref.strength != 'hard' or not pref.blocked_dates:
+                continue
+            for d_iso in pref.blocked_dates:
+                if d_iso not in days_by_date or d_iso in soft_dates:
+                    continue
+                if pref.scope == 'once':
+                    hard_blocked_dates.add(d_iso)
+                elif pref.scope == 'task' and pref.task_id in expected_set:
+                    hard_task_blocked.setdefault(pref.task_id, set()).add(d_iso)
+
     overrides = (adjustments or {}).get('estimate_overrides') or {}
     task_pins = (adjustments or {}).get('task_pins') or {}
     budgets: dict[int, dict] = {}
@@ -772,35 +1175,54 @@ def validate_proposal(
     for tid, item in assessments.items():
         task = tasks_by_id[tid]
         confirmed, rem_min, rem_max = _task_budget(item, task, overrides, progress_override)
+        eff_policy, enforce_dl, is_overdue = effective_deadline_policy(task, item.deadline_policy, now_dt)
         dl_dt = parse_dt(task.get('deadline'), timezone.utc)
         dl_local = dl_dt.astimezone(zone) if dl_dt else None
-        av_dt = parse_dt(item.available_from, zone)
+        trusted_av_dt = parse_dt(task.get('available_from'), zone)
+        model_av_dt = parse_dt(item.available_from, zone)
+        if trusted_av_dt is not None and model_av_dt is not None:
+            av_dt = max(trusted_av_dt, model_av_dt)
+        else:
+            av_dt = trusted_av_dt or model_av_dt
         av_local = av_dt.astimezone(zone) if av_dt else None
         budgets[tid] = {
             'confirmed': confirmed,
             'rem_min': rem_min,
             'rem_max': rem_max,
-            'target': 0 if rem_max == 0 else max(10, round_step(0.35 * rem_min + 0.65 * rem_max, 5)),
+            'target': _target_minutes(rem_min, rem_max),
+            'effective_policy': eff_policy,
+            'is_overdue': is_overdue,
+            'load_type': item.load_type,
+            'constraint_conflict': None,
+            'blocked_dates': sorted(hard_blocked_dates),
         }
         meta[tid] = {
             'deadline': dl_dt,
             'deadline_local': dl_local,
             'available_local': av_local,
-            'policy': item.deadline_policy,
+            'policy': eff_policy,
+            'enforce_deadline': enforce_dl,
+            'is_overdue': is_overdue,
             'depends_on': list(item.depends_on),
         }
 
-    # Распространение раннего available_from и жёсткого deadline по зависимостям.
+    # Распространение раннего available_from и жёсткого deadline по зависимостям (подготовку можно делать заранее).
     changed = True
     while changed:
         changed = False
         for tid, info in meta.items():
             for dep_id in info['depends_on']:
                 dep = meta[dep_id]
-                if info['policy'] != 'soft' and info['deadline'] is not None:
+                if info['enforce_deadline'] and info['deadline'] is not None:
                     if dep['deadline'] is None or dep['deadline'] > info['deadline']:
                         dep['deadline'] = info['deadline']
                         dep['deadline_local'] = info['deadline_local']
+                        dep['enforce_deadline'] = True
+                        if dep['policy'] == 'soft':
+                            dep['policy'] = info['policy']
+                        changed = True
+                    elif not dep['enforce_deadline'] and dep['deadline'] == info['deadline']:
+                        dep['enforce_deadline'] = True
                         if dep['policy'] == 'soft':
                             dep['policy'] = info['policy']
                         changed = True
@@ -872,12 +1294,58 @@ def validate_proposal(
             task_dates.setdefault(tid, set()).add(item.date)
             task_total[tid] = task_total.get(tid, 0) + item.minutes
 
-    # Конфликт работы и отмеченных дней отдыха.
+    # Конфликт работы, отмеченных дней отдыха и явных запретов владельца; проверка context_hint.
+    for period_idx, period in enumerate(proposal.periods):
+        if period.kind != 'work' or period.task_id is None or period.task_id not in expected_set:
+            continue
+        if verify_context_hints and period.context_hint and period.context_hint.strip():
+            hint_norm = norm_text(period.context_hint)
+            if _ROUTE_ASSERT_RE.search(hint_norm) and not _CONDITIONAL_CUE_RE.search(hint_norm):
+                p_dates = [a.date for a in period.allocations if a.date in days_by_date]
+                if not _has_verified_route_fact(
+                    tasks_by_id[period.task_id],
+                    days_by_date,
+                    p_dates,
+                    user_feedback,
+                    user_answers,
+                    user_memory,
+                ):
+                    issues.append({
+                        'code': 'unverified_context_hint',
+                        'period_index': period_idx,
+                        'task_id': period.task_id,
+                        'message': (
+                            f'Период #{period_idx} утверждает удобный маршрут или близость («{period.context_hint.strip()}»), '
+                            'но этого факта нет в задаче, памяти или календаре. Используй условную формулировку («если по дороге…») либо убери домысел.'
+                        ),
+                    })
+
     for (tid, date_iso), _mins in task_day_minutes.items():
         if date_iso in rest_dates:
             issues.append({'code': 'rest_day_conflict', 'task_id': tid, 'date': date_iso, 'period_indices': day_period_indices.get(date_iso, []), 'message': f'День {date_iso} помечен как отдых, но на него назначена задача {tid}.'})
+        if date_iso in hard_blocked_dates:
+            issues.append({
+                'code': 'blocked_by_user_constraint',
+                'task_id': tid,
+                'date': date_iso,
+                'period_indices': day_period_indices.get(date_iso, []),
+                'message': f'День {date_iso} закрыт для работы по ограничению владельца, но туда назначена задача {tid}.',
+            })
+        elif date_iso in hard_task_blocked.get(tid, set()):
+            issues.append({
+                'code': 'blocked_by_user_constraint',
+                'task_id': tid,
+                'date': date_iso,
+                'period_indices': day_period_indices.get(date_iso, []),
+                'message': f'Задача {tid} запрещена к планированию на {date_iso} по ограничению владельца.',
+            })
 
-    # Проверка дневной ёмкости.
+    # Проверка дневной ёмкости и контекстной нагрузки.
+    daily_high_effort: dict[str, list[tuple[int, int]]] = {}
+    for (tid, date_iso), mins in task_day_minutes.items():
+        if assessments[tid].effort == 'high':
+            daily_high_effort.setdefault(date_iso, []).append((tid, mins))
+
     for date_iso, total_mins in daily_load.items():
         day_info = days_by_date[date_iso]
         cap = day_info['max_work_minutes']
@@ -933,13 +1401,14 @@ def validate_proposal(
         av_local = info['available_local']
         dl_local = info['deadline_local']
         av_iso = av_local.date().isoformat() if av_local is not None else None
-        dl_iso = dl_local.date().isoformat() if (info['policy'] != 'soft' and dl_local is not None) else None
+        dl_iso = dl_local.date().isoformat() if (info['enforce_deadline'] and dl_local is not None) else None
 
-        if info['policy'] != 'soft' and info['deadline'] is not None and info['deadline'] <= now_dt and assigned > 0 and info['policy'] == 'expires':
+        if info['policy'] == 'expires' and info['is_overdue'] and assigned > 0:
+            overdue_iso = dl_local.date().isoformat() if dl_local is not None else ''
             issues.append({
                 'code': 'deadline_passed',
                 'task_id': tid,
-                'message': f'Задача {tid}: жёсткий срок ({dl_iso}) уже прошёл.',
+                'message': f'Задача {tid}: жёсткий срок ({overdue_iso}) уже прошёл — работа после него недоступна.',
             })
 
         for d_iso in dates:
@@ -964,7 +1433,12 @@ def validate_proposal(
             day_info = days_by_date[d_iso]
             day_obj = calendar_date.fromisoformat(d_iso)
             w_start, w_end, w_avail = available_for_task_on_day(
-                day_info, day_obj, av_local, dl_local, policy=info['policy'],
+                day_info,
+                day_obj,
+                av_local,
+                dl_local,
+                policy=info['policy'],
+                enforce_deadline=info['enforce_deadline'],
             )
             day_task_windows.setdefault(d_iso, []).append((w_start, w_end, tid, mins))
             has_day_deadline = dl_iso == d_iso
@@ -991,11 +1465,14 @@ def validate_proposal(
                         'message': f'Задача {tid} открывается {av_iso} в {av_local.strftime("%H:%M")}; после открытия доступно только {w_avail} мин.',
                     })
 
-        if info['policy'] != 'soft' and dl_iso is not None and dl_iso <= horizon_end and assigned < budget['rem_min'] and not (item.deadline_risk and item.deadline_risk.strip()):
+        needs_risk_overdue = info['is_overdue'] and info['policy'] != 'soft' and assigned > 0
+        needs_risk_shortfall = info['enforce_deadline'] and dl_iso is not None and dl_iso <= horizon_end and assigned < budget['rem_min']
+        if (needs_risk_overdue or needs_risk_shortfall) and not (item.deadline_risk and item.deadline_risk.strip()):
+            risk_date = dl_local.date().isoformat() if dl_local else ''
             issues.append({
                 'code': 'missing_deadline_risk',
                 'task_id': tid,
-                'message': f'Задача {tid}: к сроку {dl_iso} запланировано {assigned} из {budget["rem_min"]} мин — укажи причину риска в deadline_risk.',
+                'message': f'Задача {tid}: к сроку {risk_date} запланировано {assigned} из {budget["rem_min"]} мин или срок уже прошёл — укажи причину риска в deadline_risk.',
             })
 
         for dep_id in info['depends_on']:
@@ -1025,15 +1502,77 @@ def validate_proposal(
             })
         target_date = pin.get('target_date')
         if target_date and target_date in days_by_date and days_by_date[target_date]['max_work_minutes'] > 0 and budget['rem_max'] > 0:
-            dl_ok = info['policy'] == 'soft' or dl_local is None or target_date <= dl_local.date().isoformat()
-            av_ok = av_local is None or target_date >= av_local.date().isoformat()
-            if dl_ok and av_ok and target_date not in dates:
+            if target_date in hard_blocked_dates or target_date in hard_task_blocked.get(tid, set()):
+                budget['constraint_conflict'] = (
+                    f'{tasks_by_id[tid]["title"]}: закреплено на {target_date}, но этот день закрыт ограничением владельца.'
+                )
+            else:
+                dl_ok = True
+                if info['enforce_deadline'] and dl_local is not None:
+                    _, _, pin_avail = available_for_task_on_day(
+                        days_by_date[target_date],
+                        calendar_date.fromisoformat(target_date),
+                        av_local,
+                        dl_local,
+                        policy=info['policy'],
+                        enforce_deadline=True,
+                    )
+                    dl_ok = pin_avail > 0
+                av_ok = av_local is None or target_date >= av_local.date().isoformat()
+                if dl_ok and av_ok and target_date not in dates:
+                    issues.append({
+                        'code': 'violates_task_pin',
+                        'task_id': tid,
+                        'date': target_date,
+                        'message': f'Владелец закрепил задачу {tid} за {target_date}. Включи её в этот день либо при невозможности опиши конфликт в deadline_risk.',
+                    })
+
+    # Проверка контекстного перегруза высокой когнитивной/тяжёлой нагрузкой в плотные дни при наличии более свободных дней.
+    for date_iso, entries in daily_high_effort.items():
+        day_info = days_by_date[date_iso]
+        heavy_cap = day_info['heavy_work_limit_minutes']
+        heavy_total = sum(m for _, m in entries)
+        if day_info['busy_minutes'] < 360 or day_info['day_mode'] == 'focused' or heavy_total <= heavy_cap:
+            continue
+        for tid, _mins in entries:
+            if (task_pins.get(str(tid)) or {}).get('target_date') == date_iso:
+                continue
+            info = meta[tid]
+            has_free_alt = False
+            for alt in days:
+                alt_iso = alt['date']
+                if alt_iso == date_iso or alt['busy_minutes'] >= 360 or alt['max_work_minutes'] < 90:
+                    continue
+                if alt_iso in rest_dates or alt_iso in hard_blocked_dates or alt_iso in hard_task_blocked.get(tid, set()):
+                    continue
+                if alt['max_work_minutes'] - daily_load.get(alt_iso, 0) < 30:
+                    continue
+                _, _, alt_avail = available_for_task_on_day(
+                    alt,
+                    calendar_date.fromisoformat(alt_iso),
+                    info['available_local'],
+                    info['deadline_local'],
+                    policy=info['policy'],
+                    enforce_deadline=info['enforce_deadline'],
+                )
+                if alt_avail >= 30:
+                    has_free_alt = True
+                    break
+            if has_free_alt:
                 issues.append({
-                    'code': 'violates_task_pin',
+                    'code': 'heavy_day_overload',
                     'task_id': tid,
-                    'date': target_date,
-                    'message': f'Владелец закрепил задачу {tid} за {target_date}. Включи её в этот день либо при невозможности опиши конфликт в deadline_risk.',
+                    'date': date_iso,
+                    'excess_minutes': heavy_total - heavy_cap,
+                    'available_minutes': heavy_cap,
+                    'period_indices': day_period_indices.get(date_iso, []),
+                    'message': (
+                        f'День {date_iso} уже плотно занят ({day_info["busy_minutes"]} мин); '
+                        f'для задач с effort=high допустимо до {heavy_cap} мин (назначено {heavy_total} мин), '
+                        'а на более свободных днях есть доступное окно.'
+                    ),
                 })
+                break
 
     # Проверка конкуренции нескольких задач за общие временные окна одного дня.
     seen_window_conflicts: set[tuple[str, int, int]] = set()
@@ -1070,7 +1609,7 @@ def validate_proposal(
                     })
 
     # Не принимаем пустой план, если есть доступное время и активные незавершённые задачи.
-    total_capacity = sum(d['max_work_minutes'] for d in days)
+    total_capacity = sum(d['max_work_minutes'] for d in days if d['date'] not in hard_blocked_dates)
     total_needed = sum(b['rem_min'] for b in budgets.values())
     if sum(daily_load.values()) == 0 and total_needed > 0 and total_capacity >= 60:
         issues.append({
@@ -1098,9 +1637,13 @@ def materialize_plan(
     today_iso = now_dt.astimezone(zone).date().isoformat()
 
     plans: dict[int, dict] = {}
+    blocked_dates: list[str] = []
     for tid in proposal.task_ids:
         item = assessments[tid]
         b = budgets[tid]
+        if not blocked_dates and b.get('blocked_dates'):
+            blocked_dates = list(b['blocked_dates'])
+        eff_policy = b.get('effective_policy') or effective_deadline_policy(tasks_by_id[tid], item.deadline_policy, now_dt)[0]
         hours_label = format_hours(b['rem_min'], b['rem_max'])
         wait_suffix = f'; ожидание: {format_hours(item.wait_minutes, item.wait_minutes)}' if item.wait_minutes else ''
         plans[tid] = {
@@ -1115,10 +1658,11 @@ def materialize_plan(
             'completed_work_minutes': b['confirmed'],
             'wait_minutes': item.wait_minutes,
             'splittable': item.splittable,
-            'deadline_policy': item.deadline_policy,
+            'deadline_policy': eff_policy,
             'available_from': item.available_from.isoformat() if item.available_from else None,
             'depends_on': list(item.depends_on),
             'effort': item.effort,
+            'load_type': b.get('load_type') or item.load_type,
             'impact': item.impact,
             'hours_label': hours_label,
             'time_estimate': f'{hours_label}{wait_suffix}',
@@ -1172,6 +1716,7 @@ def materialize_plan(
             mins = sum(a.minutes for a in p.allocations)
             h_label = format_hours(mins, mins)
             dl_dt = parse_dt(task.get('deadline'), timezone.utc)
+            eff_policy = plans[tid]['deadline_policy']
             completes = assigned_by_task[tid] >= budgets[tid]['rem_min']
             alloc_list = [{'date': a.date, 'minutes': a.minutes} for a in sorted(p.allocations, key=lambda x: x.date)]
             periods_out.append({
@@ -1186,10 +1731,11 @@ def materialize_plan(
                 'reason': p.reason.strip() if p.reason and p.reason.strip() else None,
                 'minutes': mins,
                 'hours_label': h_label,
+                'completed_work_minutes': budgets[tid]['confirmed'],
                 'allocations': alloc_list,
                 'completes_task': completes,
                 'deadline': dl_dt.isoformat() if dl_dt else None,
-                'deadline_policy': assess.deadline_policy,
+                'deadline_policy': eff_policy,
                 'deadline_risk': assess.deadline_risk,
                 'tasks': [{
                     'task_id': tid,
@@ -1199,7 +1745,7 @@ def materialize_plan(
                     'hours_label': h_label,
                     'completes_task': completes,
                     'deadline': dl_dt.isoformat() if dl_dt else None,
-                    'deadline_policy': assess.deadline_policy,
+                    'deadline_policy': eff_policy,
                 }],
             })
         else:
@@ -1223,27 +1769,50 @@ def materialize_plan(
                 'tasks': [],
             })
 
-    # Риски сроков и незапланированные остатки.
+    # Риски сроков, конфликты ограничений и незапланированные остатки.
     conflicts = []
     remaining = []
     for tid in proposal.task_ids:
         b = budgets[tid]
         assess = assessments[tid]
         task = tasks_by_id[tid]
+        eff_policy = plans[tid]['deadline_policy']
+        is_overdue = bool(b.get('is_overdue'))
+        constraint_conflict = b.get('constraint_conflict')
         unplanned = max(0, b['target'] - assigned_by_task[tid])
         remaining.append({'task_id': tid, 'remaining_work_minutes': unplanned})
         deficit = max(0, b['rem_min'] - assigned_by_task[tid])
-        if assess.deadline_risk or (assess.deadline_policy != 'soft' and deficit > 0):
+        if constraint_conflict:
             dl_dt = parse_dt(task.get('deadline'), timezone.utc)
             conflicts.append({
                 'task_id': tid,
                 'title': task['title'],
-                'policy': assess.deadline_policy,
+                'kind': 'constraint',
+                'policy': eff_policy,
                 'deadline': dl_dt.isoformat() if dl_dt else None,
-                'infeasible': assess.deadline_policy != 'soft' and deficit > 0,
+                'infeasible': True,
                 'deficit_minutes': deficit,
                 'deficit_label': format_hours(deficit) if deficit else '',
-                'reason': assess.deadline_risk or f"{task['title']}: недостаточно времени до срока.",
+                'reason': constraint_conflict,
+            })
+        elif assess.deadline_risk or (eff_policy != 'soft' and (deficit > 0 or (is_overdue and b['rem_max'] > 0))):
+            dl_dt = parse_dt(task.get('deadline'), timezone.utc)
+            infeasible = eff_policy != 'soft' and (deficit > 0 or (eff_policy == 'expires' and is_overdue and b['rem_max'] > 0))
+            default_reason = (
+                f"{task['title']}: срок уже прошёл."
+                if is_overdue
+                else f"{task['title']}: недостаточно времени до срока."
+            )
+            conflicts.append({
+                'task_id': tid,
+                'title': task['title'],
+                'kind': 'deadline',
+                'policy': eff_policy,
+                'deadline': dl_dt.isoformat() if dl_dt else None,
+                'infeasible': infeasible,
+                'deficit_minutes': deficit,
+                'deficit_label': format_hours(deficit) if deficit else '',
+                'reason': assess.deadline_risk or default_reason,
             })
 
     total_low = sum(plans[tid]['work_min_minutes'] for tid in proposal.task_ids)
@@ -1280,6 +1849,7 @@ def materialize_plan(
         'hours_label': format_hours(total_low, total_high),
         'wait_minutes': total_wait,
         'periods': periods_out,
+        'blocked_dates': blocked_dates,
         'daily_allocations': daily_allocations,
         'deadline_conflicts': conflicts,
         'deadline_risks': deadline_risks,
@@ -1333,6 +1903,7 @@ def materialize_plan(
                 'task_id': u.task_id,
                 'operation': u.operation,
                 'minutes': u.minutes,
+                'evidence_quote': u.evidence_quote,
                 'base_completed_minutes': int(tasks_by_id[u.task_id].get('completed_work_minutes') or 0),
                 'completed_work_minutes': budgets[u.task_id]['confirmed'],
             }
@@ -1433,6 +2004,8 @@ def refresh_schedule(
         old_reason = reasons_by_id.get(tid) or {}
         raw_effort = old_p.get('effort') or old_reason.get('effort', 'medium')
         effort = _EFFORT_FROM_RU.get(raw_effort, raw_effort if raw_effort in ('low', 'medium', 'high') else 'medium')
+        raw_load = old_p.get('load_type')
+        load_type = raw_load if raw_load in ('cognitive', 'practical', 'mixed') else 'mixed'
         av_raw = old_p.get('available_from')
         av_dt = parse_dt(av_raw, zone) if av_raw else None
         assess = TaskAssessment(
@@ -1445,13 +2018,14 @@ def refresh_schedule(
             available_from=av_dt,
             depends_on=[int(d) for d in old_p.get('depends_on', []) if int(d) in tasks_by_id],
             effort=effort,
+            load_type=load_type,
             reason=str(old_reason.get('reason') or 'По приоритету и срокам')[:200],
             impact=str(old_reason.get('impact') or tasks_by_id[tid]['title'])[:180],
             deadline_risk=old_reason.get('deadline_risk'),
         )
         assessments.append(assess)
         confirmed, rem_min, rem_max = _task_budget(assess, tasks_by_id[tid], overrides)
-        target = 0 if rem_max == 0 else max(10, round_step(0.35 * rem_min + 0.65 * rem_max, 5))
+        target = _target_minutes(rem_min, rem_max)
         budgets[tid] = {'confirmed': confirmed, 'rem_min': rem_min, 'rem_max': rem_max, 'target': target}
 
     # Определяем сдвиг для задач с task_pins (очевидный одиночный перенос на новую дату).
@@ -1551,6 +2125,8 @@ def refresh_schedule(
         planning_style=planning_style,
         adjustments=adjustments,
         has_feedback=False,
+        extra_blocked_dates=prev_schedule.get('blocked_dates') or [],
+        verify_context_hints=False,
     )
     if issues:
         summary = '; '.join(i.get('message', i.get('code', 'ошибка')) for i in issues[:2])

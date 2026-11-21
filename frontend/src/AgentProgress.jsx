@@ -180,11 +180,13 @@ export function useAgentProgressStream(taskId = 0, providers = []) {
           const entries = JSON.parse(event.data);
           const amebaEntry = entries.find((item) => item.provider === 'ameba')?.run;
           if (amebaEntry) {
+            const failedOrStopped = amebaEntry.status === 'failed' || amebaEntry.status === 'interrupted';
             client.setQueryData(['ameba-live-plan'], {
               running: amebaEntry.status === 'running',
+              status: amebaEntry.status,
               started_at: amebaEntry.started_at,
-              schedule: amebaEntry.schedule ?? null,
-              timeline: amebaEntry.timeline ?? [],
+              schedule: failedOrStopped ? null : (amebaEntry.schedule ?? null),
+              timeline: failedOrStopped ? [] : (amebaEntry.timeline ?? []),
             });
             if (amebaEntry.status !== 'running' && lastAmebaStatus === 'running' && lastInvalidatedAmebaRun !== amebaEntry.id) {
               lastInvalidatedAmebaRun = amebaEntry.id;

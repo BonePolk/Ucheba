@@ -39,6 +39,7 @@ def assess(
     available_from=None,
     depends_on=None,
     effort='medium',
+    load_type='mixed',
     reason='По приоритету и срокам',
     impact='Выполненная задача',
     deadline_risk=None,
@@ -53,6 +54,7 @@ def assess(
         'available_from': available_from,
         'depends_on': depends_on or [],
         'effort': effort,
+        'load_type': load_type,
         'reason': reason,
         'impact': impact,
         'deadline_risk': deadline_risk,
@@ -102,14 +104,19 @@ class ValidationAndScenarios(unittest.TestCase):
         for d in ('2026-11-23', '2026-11-25', '2026-11-27'):
             events.append({'id': f'uni-{d}', 'kind': 'busy', 'title': 'Университет', 'date': d, 'start': '09:00', 'end': '15:00'})
         tasks = [
-            {'id': 42, 'title': 'Переезд', 'completed_work_minutes': 0},
+            {
+                'id': 42,
+                'title': 'Переезд',
+                'completed_work_minutes': 0,
+                'owner_notes': 'Удобно заезжать с вещами по дороге после университета',
+            },
             {'id': 43, 'title': 'Лабораторная', 'completed_work_minutes': 0},
         ]
         cand = proposal_payload(
             [42, 43],
             [
-                assess(42, 150, 180, splittable=True, effort='medium', reason='Можно перевозить постепенно'),
-                assess(43, 210, 240, splittable=True, effort='high', reason='Требуется спокойный день'),
+                assess(42, 150, 180, splittable=True, effort='medium', load_type='practical', reason='Можно перевозить постепенно'),
+                assess(43, 210, 240, splittable=True, effort='high', load_type='cognitive', reason='Требуется спокойный день'),
             ],
             [
                 work_period(
@@ -385,6 +392,437 @@ class ValidationAndScenarios(unittest.TestCase):
             self.assertTrue(tool['strict'])
             check_strict(tool['parameters'])
 
+    def test_hard_deadline_cannot_be_downgraded_to_soft(self):
+        # 1. Будущий дедлайн из БД: модель называет его soft и ставит работу после срока -> отказ.
+        tasks = [{'id': 1, 'title': 'Отчёт', 'deadline': '2026-11-25T18:00:00Z', 'completed_work_minutes': 0}]
+        downgraded = proposal_payload(
+            [1],
+            [assess(1, 120, 120, policy='soft')],
+            [work_period(1, '2026-11-26', '2026-11-26', [('2026-11-26', 120)])],
+        )
+        _, issues, _, _ = planning.validate_proposal(downgraded, tasks, empty_week(), NOW)
+        self.assertTrue(any(i['code'] == 'after_deadline' for i in issues))
+
+        # 2. Просроченная задача с недоступностью после срока: soft не спасает -> deadline_passed.
+        expired_tasks = [{
+            'id': 1,
+            'title': 'Тест в СДО',
+            'deadline': '2026-11-22T18:00:00Z',
+            'owner_notes': 'После дедлайна работа недоступна, форма закроется',
+            'completed_work_minutes': 0,
+        }]
+        expired_prop = proposal_payload(
+            [1],
+            [assess(1, 60, 60, policy='soft')],
+            [work_period(1, '2026-11-23', '2026-11-23', [('2026-11-23', 60)])],
+        )
+        _, exp_issues, _, _ = planning.validate_proposal(expired_prop, expired_tasks, empty_week(), NOW)
+        self.assertTrue(any(i['code'] == 'deadline_passed' for i in exp_issues))
+
+        # 3. Явно подтверждённый мягкий срок в контексте задачи -> soft допускается.
+        soft_tasks = [{
+            'id': 1,
+            'title': 'Пет-проект',
+            'deadline': '2026-11-25T18:00:00Z',
+            'owner_notes': 'Мягкий дедлайн, можно сдать позже без штрафа',
+            'completed_work_minutes': 0,
+        }]
+        soft_prop = proposal_payload(
+            [1],
+            [assess(1, 120, 120, policy='soft')],
+            [work_period(1, '2026-11-26', '2026-11-26', [('2026-11-26', 120)])],
+        )
+        _, soft_issues, _, _ = planning.validate_proposal(soft_prop, soft_tasks, empty_week(), NOW)
+        self.assertEqual(soft_issues, [])
+
+        # 4. Часовой пояс Europe/Moscow (UTC+3): 22:00Z -> 01:00 следующего дня (ночной сон 00:00..07:00).
+        msk_tasks = [{'id': 1, 'title': 'Дедлайн ночью', 'deadline': '2026-11-24T22:00:00Z', 'completed_work_minutes': 0}]
+        msk_late = proposal_payload(
+            [1],
+            [assess(1, 60, 60, policy='soft')],
+            [work_period(1, '2026-11-25', '2026-11-25', [('2026-11-25', 60)])],
+        )
+        _, msk_issues, _, _ = planning.validate_proposal(msk_late, msk_tasks, empty_week(tz='Europe/Moscow'), NOW)
+        self.assertTrue(any(i['code'] == 'deadline_day_over_capacity' for i in msk_issues))
+
+        # 5. Отдельная подготовка заранее (до available_from основной задачи) допускается, но не после её дедлайна.
+        prep_tasks = [
+            {'id': 1, 'title': 'Подготовка к контрольной', 'completed_work_minutes': 0},
+            {
+                'id': 2,
+                'title': 'Контрольная',
+                'deadline': '2026-11-27T11:00:00+00:00',
+                'available_from': '2026-11-26T14:00:00+00:00',
+                'completed_work_minutes': 0,
+            },
+        ]
+        prep_ok = proposal_payload(
+            [1, 2],
+            [
+                assess(1, 120, 120, policy='soft'),
+                assess(2, 90, 90, splittable=False, policy='expires', depends_on=[1], available_from=None),
+            ],
+            [
+                work_period(1, '2026-11-24', '2026-11-24', [('2026-11-24', 120)]),
+                work_period(2, '2026-11-26', '2026-11-26', [('2026-11-26', 90)]),
+            ],
+        )
+        _, prep_issues, _, _ = planning.validate_proposal(prep_ok, prep_tasks, empty_week(), NOW)
+        self.assertEqual(prep_issues, [])
+
+        # Модель не может обойти доверенный task['available_from'], передав available_from=None.
+        early_main = proposal_payload(
+            [1, 2],
+            [
+                assess(1, 60, 60, policy='soft'),
+                assess(2, 90, 90, splittable=False, policy='expires', depends_on=[1], available_from=None),
+            ],
+            [
+                work_period(1, '2026-11-24', '2026-11-24', [('2026-11-24', 60)]),
+                work_period(2, '2026-11-25', '2026-11-25', [('2026-11-25', 90)]),
+            ],
+        )
+        _, early_issues, _, _ = planning.validate_proposal(early_main, prep_tasks, empty_week(), NOW)
+        self.assertTrue(any(i['code'] == 'before_available_from' for i in early_issues))
+
+    def test_progress_updates_blocked_on_schedule_requests_and_future_intent(self):
+        tasks = [{'id': 17, 'title': 'Лабораторная', 'completed_work_minutes': 0}]
+        bad_cases = [
+            ('Освободи пятницу', 'set', 120, 'Освободи пятницу'),
+            ('Перенеси лабораторную на субботу', 'add', 60, 'Перенеси лабораторную на субботу'),
+            ('Завтра буду делать лабораторную два часа', 'add', 120, 'Завтра буду делать лабораторную два часа'),
+            ('Освободи пятницу', 'add', 120, 'Я сделал два часа лабораторной'),
+        ]
+        for feedback_text, op, mins, quote in bad_cases:
+            cand = proposal_payload(
+                [17],
+                [assess(17, 240, 240)],
+                [work_period(17, '2026-11-28', '2026-11-28', [('2026-11-28', 120)])],
+                progress_updates=[{'task_id': 17, 'operation': op, 'minutes': mins, 'evidence_quote': quote}],
+            )
+            _, issues, _, _ = planning.validate_proposal(
+                cand, tasks, empty_week(), NOW, has_feedback=True, user_feedback=feedback_text,
+            )
+            self.assertTrue(
+                any(i['code'] in ('unverified_progress_update', 'invalid_progress_set') for i in issues),
+                msg=f'Expected rejection for {feedback_text!r}, got {issues}',
+            )
+
+    def test_progress_updates_explicit_add_set_and_ambiguous_fraction(self):
+        tasks = [{'id': 1, 'title': 'Лабораторная', 'completed_work_minutes': 60}]
+        # 1. Явная добавка 2 часов принимается.
+        add_ok = proposal_payload(
+            [1],
+            [assess(1, 300, 300)],
+            [work_period(1, '2026-11-24', '2026-11-24', [('2026-11-24', 120)])],
+            progress_updates=[{'task_id': 1, 'operation': 'add', 'minutes': 120, 'evidence_quote': 'Я сделал два часа лабораторной'}],
+        )
+        _, issues, _, budgets = planning.validate_proposal(
+            add_ok, tasks, empty_week(), NOW, user_feedback='Я сделал два часа лабораторной',
+        )
+        self.assertEqual(issues, [])
+        self.assertEqual(budgets[1]['confirmed'], 180)
+
+        # 2. operation='set' без слов «всего/итого» отклоняется при наличии прогресса.
+        bad_set = proposal_payload(
+            [1],
+            [assess(1, 300, 300)],
+            [work_period(1, '2026-11-24', '2026-11-24', [('2026-11-24', 180)])],
+            progress_updates=[{'task_id': 1, 'operation': 'set', 'minutes': 120, 'evidence_quote': 'Я сделал два часа лабораторной'}],
+        )
+        _, set_issues, _, _ = planning.validate_proposal(
+            bad_set, tasks, empty_week(), NOW, user_feedback='Я сделал два часа лабораторной',
+        )
+        self.assertTrue(any(i['code'] == 'invalid_progress_set' for i in set_issues))
+
+        # 3. Явный итог «всего сделал 3 часа» разрешает set.
+        good_set = proposal_payload(
+            [1],
+            [assess(1, 300, 300)],
+            [work_period(1, '2026-11-24', '2026-11-24', [('2026-11-24', 120)])],
+            progress_updates=[{'task_id': 1, 'operation': 'set', 'minutes': 180, 'evidence_quote': 'Всего сделал 3 часа лабораторной'}],
+        )
+        _, ok_set_issues, _, set_budgets = planning.validate_proposal(
+            good_set, tasks, empty_week(), NOW, user_feedback='Всего сделал 3 часа лабораторной',
+        )
+        self.assertEqual(ok_set_issues, [])
+        self.assertEqual(set_budgets[1]['confirmed'], 180)
+
+        # 4. «Примерно половину» при широкой/неизвестной оценке отклоняется как неоднозначное.
+        amb_tasks = [{'id': 1, 'title': 'Лабораторная', 'completed_work_minutes': 0, 'time_estimate': 'недостаточно данных'}]
+        amb_prop = proposal_payload(
+            [1],
+            [assess(1, 60, 300)],
+            [work_period(1, '2026-11-24', '2026-11-24', [('2026-11-24', 90)])],
+            progress_updates=[{'task_id': 1, 'operation': 'add', 'minutes': 90, 'evidence_quote': 'Я сделал примерно половину лабораторной'}],
+        )
+        _, amb_issues, _, _ = planning.validate_proposal(
+            amb_prop, amb_tasks, empty_week(), NOW, user_feedback='Я сделал примерно половину лабораторной',
+        )
+        self.assertTrue(any(i['code'] == 'ambiguous_progress_update' for i in amb_issues))
+
+        # 5. Две лабораторные («Лабораторная 1» и «Лабораторная 2») + «сделал 2 часа лабораторной» -> неоднозначность.
+        two_labs = [
+            {'id': 1, 'title': 'Лабораторная 1', 'completed_work_minutes': 0},
+            {'id': 2, 'title': 'Лабораторная 2', 'completed_work_minutes': 0},
+        ]
+        amb_two = proposal_payload(
+            [1, 2],
+            [assess(1, 180, 180), assess(2, 180, 180)],
+            [
+                work_period(1, '2026-11-24', '2026-11-24', [('2026-11-24', 60)]),
+                work_period(2, '2026-11-25', '2026-11-25', [('2026-11-25', 180)]),
+            ],
+            progress_updates=[{'task_id': 2, 'operation': 'add', 'minutes': 120, 'evidence_quote': 'Я сделал 2 часа лабораторной'}],
+        )
+        _, two_issues, _, _ = planning.validate_proposal(
+            amb_two, two_labs, empty_week(), NOW, user_feedback='Я сделал 2 часа лабораторной',
+        )
+        self.assertTrue(any(i['code'] == 'ambiguous_progress_update' for i in two_issues))
+
+        # Уточнение через ask_user снимает неоднозначность.
+        _, ans_issues, _, ans_budgets = planning.validate_proposal(
+            amb_two | {
+                'periods': [
+                    work_period(1, '2026-11-24', '2026-11-24', [('2026-11-24', 180)]),
+                    work_period(2, '2026-11-25', '2026-11-25', [('2026-11-25', 60)]),
+                ],
+                'progress_updates': [{'task_id': 2, 'operation': 'add', 'minutes': 120, 'evidence_quote': 'По лабораторной 2 сделал 2 часа'}],
+            },
+            two_labs,
+            empty_week(),
+            NOW,
+            user_feedback='Я сделал 2 часа лабораторной',
+            user_answers=[{'question': 'По какой лабораторной вы работали?', 'answer': 'По лабораторной 2 сделал 2 часа'}],
+        )
+        self.assertEqual(ans_issues, [])
+        self.assertEqual(ans_budgets[2]['confirmed'], 120)
+
+    def test_short_tasks_no_fake_remaining(self):
+        self.assertEqual(planning.format_hours(1, 1), '1 мин')
+        self.assertEqual(planning.format_hours(5, 5), '5 мин')
+        self.assertEqual(planning.format_hours(9, 9), '9 мин')
+        self.assertEqual(planning.format_hours(2, 7), '2–7 мин')
+
+        cases = [
+            (1, 1, 0, 1),
+            (5, 5, 0, 5),
+            (9, 9, 0, 9),
+            (10, 10, 0, 10),
+            (25, 25, 20, 5),
+            (2, 7, 0, 5),
+        ]
+        for t_min, t_max, done, alloc in cases:
+            tasks = [{'id': 1, 'title': 'Короткое дело', 'completed_work_minutes': done}]
+            cand = proposal_payload(
+                [1],
+                [assess(1, t_min, t_max, effort='low', load_type='practical')],
+                [work_period(1, '2026-11-23', '2026-11-23', [('2026-11-23', alloc)])],
+            )
+            prop, issues, days, budgets = planning.validate_proposal(cand, tasks, empty_week(), NOW)
+            self.assertEqual(issues, [], msg=f'Unexpected issues for {(t_min, t_max, done, alloc)}: {issues}')
+            self.assertLessEqual(budgets[1]['target'], budgets[1]['rem_max'])
+            res = planning.materialize_plan(prop, tasks, days, budgets, empty_week(), NOW)
+            self.assertEqual(res['schedule']['remaining'][0]['remaining_work_minutes'], 0)
+            self.assertTrue(res['schedule']['fully_scheduled'])
+
+        # Нулевой остаток: задача уже выполнена, работа не требуется и не создаётся фиктивный остаток.
+        done_tasks = [{'id': 1, 'title': 'Уже готово', 'completed_work_minutes': 60}]
+        done_cand = proposal_payload([1], [assess(1, 60, 60)], [])
+        prop0, issues0, days0, budgets0 = planning.validate_proposal(done_cand, done_tasks, empty_week(), NOW)
+        self.assertEqual(issues0, [])
+        self.assertEqual(budgets0[1]['target'], 0)
+        res0 = planning.materialize_plan(prop0, done_tasks, days0, budgets0, empty_week(), NOW)
+        self.assertEqual(res0['schedule']['remaining_minutes'], 0)
+        self.assertTrue(res0['schedule']['fully_scheduled'])
+
+    def test_temporary_user_constraints_hard_vs_soft_and_conflict(self):
+        tasks = [
+            {'id': 1, 'title': 'Лабораторная', 'completed_work_minutes': 0},
+            {'id': 2, 'title': 'Переезд', 'completed_work_minutes': 0},
+        ]
+        # 1. Прямой запрет пятницы не даёт разместить туда работу (даже без blocked_dates от модели).
+        bad = proposal_payload(
+            [1, 2],
+            [assess(1, 90, 90), assess(2, 60, 60)],
+            [
+                work_period(1, '2026-11-27', '2026-11-27', [('2026-11-27', 90)]),
+                work_period(2, '2026-11-24', '2026-11-24', [('2026-11-24', 60)]),
+            ],
+        )
+        _, issues, _, _ = planning.validate_proposal(bad, tasks, empty_week(), NOW, user_feedback='Пятницу оставь свободной')
+        self.assertTrue(any(i['code'] == 'blocked_by_user_constraint' for i in issues))
+
+        # 2. Мягкое пожелание «желательно побольше отдыхать» не блокирует пятницу жёстко.
+        days = planning.analyze_days(empty_week(), NOW)
+        self.assertEqual(planning.extract_explicit_blocked_days('В пятницу желательно побольше отдыхать', days, tasks=tasks), [])
+        soft_plan = proposal_payload(
+            [1, 2],
+            [assess(1, 60, 60), assess(2, 60, 60)],
+            [
+                work_period(1, '2026-11-27', '2026-11-27', [('2026-11-27', 60)]),
+                work_period(2, '2026-11-24', '2026-11-24', [('2026-11-24', 60)]),
+            ],
+            preferences=[{
+                'text': 'В пятницу желательно побольше отдыхать',
+                'scope': 'once',
+                'strength': 'hard',
+                'blocked_dates': ['2026-11-27'],
+                'task_id': None,
+                'key': None,
+            }],
+        )
+        _, soft_issues, _, _ = planning.validate_proposal(
+            soft_plan, tasks, empty_week(), NOW, user_feedback='В пятницу желательно побольше отдыхать',
+        )
+        self.assertEqual(soft_issues, [])
+
+        # 3. Ограничение scope='task' блокирует только целевую задачу на указанную дату.
+        task_block = proposal_payload(
+            [1, 2],
+            [assess(1, 60, 60), assess(2, 60, 60)],
+            [
+                work_period(1, '2026-11-24', '2026-11-24', [('2026-11-24', 60)]),
+                work_period(2, '2026-11-27', '2026-11-27', [('2026-11-27', 60)]),
+            ],
+        )
+        _, tb_issues, _, _ = planning.validate_proposal(
+            task_block, tasks, empty_week(), NOW, user_feedback='Лабораторную не ставь на пятницу',
+        )
+        self.assertEqual(tb_issues, [])
+
+        # 4. Конфликт закрепления на пятницу и запрета пятницы: запрет не нарушается, противоречие отражается явно.
+        conflict_adjustments = {'task_pins': {'1': {'target_date': '2026-11-27', 'not_before': None}}}
+        conflict_plan = proposal_payload(
+            [1, 2],
+            [assess(1, 90, 90), assess(2, 60, 60)],
+            [
+                work_period(1, '2026-11-26', '2026-11-26', [('2026-11-26', 90)]),
+                work_period(2, '2026-11-24', '2026-11-24', [('2026-11-24', 60)]),
+            ],
+            preferences=[{
+                'text': 'Пятницу оставить свободной',
+                'scope': 'once',
+                'strength': 'hard',
+                'blocked_dates': ['2026-11-27'],
+                'task_id': None,
+                'key': None,
+            }],
+        )
+        prop_c, c_issues, c_days, c_budgets = planning.validate_proposal(
+            conflict_plan, tasks, empty_week(), NOW,
+            adjustments=conflict_adjustments,
+            user_feedback='Пятницу оставь свободной',
+        )
+        self.assertEqual(c_issues, [])
+        res_c = planning.materialize_plan(prop_c, tasks, c_days, c_budgets, empty_week(), NOW)
+        self.assertFalse(res_c['schedule']['feasible'])
+        self.assertEqual(res_c['schedule']['blocked_dates'], ['2026-11-27'])
+        self.assertTrue(any(c.get('kind') == 'constraint' for c in res_c['schedule']['deadline_conflicts']))
+        with self.assertRaises(ValueError):
+            planning.refresh_schedule(
+                res_c,
+                tasks,
+                empty_week(),
+                NOW,
+                adjustments={'task_pins': {'1': {'target_date': '2026-11-27', 'shift_days': 1}}},
+            )
+
+    def test_contextual_workload_and_unverified_route_rejected(self):
+        events = [
+            {'id': 'uni-mon', 'kind': 'busy', 'title': 'Университет', 'date': '2026-11-23', 'start': '09:00', 'end': '15:00'},
+        ]
+        tasks = [
+            {'id': 1, 'title': 'Посылка из ПВЗ', 'completed_work_minutes': 0},
+            {'id': 2, 'title': 'Сложная лабораторная', 'completed_work_minutes': 0},
+        ]
+        # 1. Безусловный неподтверждённый маршрут в context_hint отклоняется.
+        unverified = proposal_payload(
+            [1, 2],
+            [
+                assess(1, 45, 45, effort='medium', load_type='practical'),
+                assess(2, 120, 120, effort='high', load_type='cognitive'),
+            ],
+            [
+                work_period(1, '2026-11-23', '2026-11-23', [('2026-11-23', 45)], hint='После университета по дороге домой забрать посылку'),
+                work_period(2, '2026-11-24', '2026-11-24', [('2026-11-24', 120)]),
+            ],
+        )
+        _, unv_issues, _, _ = planning.validate_proposal(unverified, tasks, empty_week(events=events), NOW)
+        self.assertTrue(any(i['code'] == 'unverified_context_hint' for i in unv_issues))
+
+        # 2. Условная формулировка или факт из памяти принимается.
+        conditional = proposal_payload(
+            [1, 2],
+            unverified['tasks'],
+            [
+                work_period(1, '2026-11-23', '2026-11-23', [('2026-11-23', 45)], hint='Если по дороге после университета, можно зайти в ПВЗ'),
+                work_period(2, '2026-11-24', '2026-11-24', [('2026-11-24', 120)]),
+            ],
+        )
+        _, cond_issues, _, _ = planning.validate_proposal(conditional, tasks, empty_week(events=events), NOW)
+        self.assertEqual(cond_issues, [])
+
+        _, mem_issues, _, _ = planning.validate_proposal(
+            unverified,
+            tasks,
+            empty_week(events=events),
+            NOW,
+            user_memory=[{'key': 'user.pvz', 'agent': 'Владелец', 'text': 'Пункт выдачи ПВЗ находится по дороге из университета'}],
+        )
+        self.assertEqual(mem_issues, [])
+
+        # 3. Тяжёлая задача (effort='high', 120 мин) в плотный учебный день отклоняется при свободных днях.
+        heavy_dense = proposal_payload(
+            [1, 2],
+            [
+                assess(1, 45, 45, effort='medium', load_type='practical'),
+                assess(2, 120, 120, effort='high', load_type='cognitive'),
+            ],
+            [
+                work_period(1, '2026-11-24', '2026-11-24', [('2026-11-24', 45)]),
+                work_period(2, '2026-11-23', '2026-11-23', [('2026-11-23', 120)]),
+            ],
+        )
+        _, heavy_issues, _, _ = planning.validate_proposal(heavy_dense, tasks, empty_week(events=events), NOW)
+        self.assertTrue(any(i['code'] == 'heavy_day_overload' for i in heavy_issues))
+
+        # 4. Практическая задача не может обойти общий лимит времени плотного дня.
+        over_practical = proposal_payload(
+            [1, 2],
+            [
+                assess(1, 240, 240, effort='low', load_type='practical'),
+                assess(2, 120, 120, effort='high', load_type='cognitive'),
+            ],
+            [
+                work_period(1, '2026-11-23', '2026-11-23', [('2026-11-23', 240)]),
+                work_period(2, '2026-11-24', '2026-11-24', [('2026-11-24', 120)]),
+            ],
+        )
+        _, prac_issues, _, _ = planning.validate_proposal(over_practical, tasks, empty_week(events=events), NOW)
+        self.assertTrue(any(i['code'] == 'over_capacity' for i in prac_issues))
+
+    def test_eval_scenario_property_checker(self):
+        move_scenario = next(s for s in EVAL_SCENARIOS if s['name'] == 'move_and_university')
+        events = move_scenario['events']
+        tasks = move_scenario['tasks']
+        good = proposal_payload(
+            [42, 43],
+            [
+                assess(42, 150, 180, splittable=True, effort='medium', load_type='practical'),
+                assess(43, 210, 240, splittable=True, effort='high', load_type='cognitive'),
+            ],
+            [
+                work_period(42, '2026-11-23', '2026-11-27', [('2026-11-23', 45), ('2026-11-25', 60), ('2026-11-27', 45)], hint='По дороге после университета'),
+                work_period(43, '2026-11-24', '2026-11-26', [('2026-11-24', 120), ('2026-11-26', 100)]),
+                rest_period('2026-11-28', '2026-11-29'),
+            ],
+        )
+        prop, issues, days, budgets = planning.validate_proposal(good, tasks, empty_week(events=events), NOW)
+        self.assertEqual(issues, [])
+        res = planning.materialize_plan(prop, tasks, days, budgets, empty_week(events=events), NOW)
+        self.assertEqual(evaluate_plan_properties(move_scenario, res), [])
+
 
 class AgentLoop(unittest.IsolatedAsyncioTestCase):
     async def run_agent(self, actions, *, user_feedback='', memory_items=None, memory_mock=None, tasks=None, weekly_schedule=None):
@@ -463,7 +901,14 @@ class AgentLoop(unittest.IsolatedAsyncioTestCase):
                 work_period(1, '2026-11-24', '2026-11-25', [('2026-11-24', 90), ('2026-11-25', 90)]),
                 rest_period('2026-11-27', '2026-11-27', goal='Пятница свободна по пожеланию'),
             ],
-            preferences=[{'text': 'Эту пятницу оставить свободной', 'scope': 'once', 'task_id': None, 'key': None}],
+            preferences=[{
+                'text': 'Эту пятницу оставить свободной',
+                'scope': 'once',
+                'strength': 'hard',
+                'blocked_dates': ['2026-11-27'],
+                'task_id': None,
+                'key': None,
+            }],
         )
         res = await self.run_agent(
             [[('propose_plan', cand)]],
@@ -482,8 +927,8 @@ class AgentLoop(unittest.IsolatedAsyncioTestCase):
             [assess(1, 120, 120)],
             [work_period(1, '2026-11-28', '2026-11-28', [('2026-11-28', 120)])],
             preferences=[
-                {'text': 'Учусь по утрам', 'scope': 'persistent', 'task_id': None, 'key': 'user.1'},  # дубль факта владельца
-                {'text': 'Обычно сложную работу предпочитаю делать в свободные дни', 'scope': 'persistent', 'task_id': None, 'key': 'hard_on_free_days'},
+                {'text': 'Учусь по утрам', 'scope': 'persistent', 'strength': 'soft', 'blocked_dates': [], 'task_id': None, 'key': 'user.1'},  # дубль факта владельца
+                {'text': 'Обычно сложную работу предпочитаю делать в свободные дни', 'scope': 'persistent', 'strength': 'soft', 'blocked_dates': [], 'task_id': None, 'key': 'hard_on_free_days'},
             ],
         )
         res = await self.run_agent(
@@ -689,11 +1134,16 @@ class Storage(unittest.TestCase):
             [1],
             [assess(1, 180, 180)],
             [work_period(1, '2026-11-23', '2026-11-25', [('2026-11-23', 60), ('2026-11-25', 60)])],
-            preferences=[{'text': 'Удобно перевозить после университета', 'scope': 'task', 'task_id': 1, 'key': None}],
-            progress_updates=[{'task_id': 1, 'operation': 'add', 'minutes': 60}],
+            preferences=[{'text': 'Удобно перевозить после университета', 'scope': 'task', 'strength': 'soft', 'blocked_dates': [], 'task_id': 1, 'key': None}],
+            progress_updates=[{'task_id': 1, 'operation': 'add', 'minutes': 60, 'evidence_quote': 'уже перевёз треть'}],
         )
         prop, issues, days, budgets = planning.validate_proposal(
-            cand, [{'id': 1, 'title': 'Переезд', 'completed_work_minutes': 0}], empty_week(), NOW, has_feedback=True,
+            cand,
+            [{'id': 1, 'title': 'Переезд', 'completed_work_minutes': 0}],
+            empty_week(),
+            NOW,
+            has_feedback=True,
+            user_feedback='уже перевёз треть, остальное после пар',
         )
         self.assertEqual(issues, [])
         materialized = planning.materialize_plan(prop, [{'id': 1, 'title': 'Переезд', 'completed_work_minutes': 0}], days, budgets, empty_week(), NOW)
@@ -731,10 +1181,15 @@ class Storage(unittest.TestCase):
             [1],
             [assess(1, 300, 300)],
             [work_period(1, '2026-11-23', '2026-11-24', [('2026-11-23', 90), ('2026-11-24', 60)])],
-            progress_updates=[{'task_id': 1, 'operation': 'add', 'minutes': 30}],
+            progress_updates=[{'task_id': 1, 'operation': 'add', 'minutes': 30, 'evidence_quote': 'позанимался ещё 30 минут'}],
         )
         prop, issues, days, budgets = planning.validate_proposal(
-            cand, [{'id': 1, 'title': 'Лабораторная', 'completed_work_minutes': 120}], empty_week(), NOW, has_feedback=True,
+            cand,
+            [{'id': 1, 'title': 'Лабораторная', 'completed_work_minutes': 120}],
+            empty_week(),
+            NOW,
+            has_feedback=True,
+            user_feedback='позанимался ещё 30 минут',
         )
         self.assertEqual(issues, [])
         materialized = planning.materialize_plan(prop, [{'id': 1, 'title': 'Лабораторная', 'completed_work_minutes': 120}], days, budgets, empty_week(), NOW)
@@ -778,7 +1233,7 @@ class Storage(unittest.TestCase):
             [1],
             [assess(1, 120, 120)],
             [work_period(1, '2026-11-23', '2026-11-23', [('2026-11-23', 120)])],
-            preferences=[{'text': 'Сложные задачи делаю с утра', 'scope': 'persistent', 'task_id': None, 'key': 'ameba.morning'}],
+            preferences=[{'text': 'Сложные задачи делаю с утра', 'scope': 'persistent', 'strength': 'soft', 'blocked_dates': [], 'task_id': None, 'key': 'ameba.morning'}],
         )
         prop, issues, days, budgets = planning.validate_proposal(
             cand, [{'id': 1, 'title': 'Учёба', 'completed_work_minutes': 0}], empty_week(), NOW, has_feedback=True,
@@ -938,6 +1393,49 @@ class Storage(unittest.TestCase):
             self.assertTrue(ameba.plan_expired({'schedule': {'version': 3, 'generated_date': yesterday}}))
             self.assertFalse(ameba.plan_expired({'schedule': {'version': 3, 'generated_date': today_local}}))
 
+    def test_backend_rejects_unverified_progress_and_preserves_previous_plan(self):
+        task = Task(id=1, title='Лабораторная', status='in_progress', completed_work_minutes=60)
+        previous = {'task_ids': [1], 'schedule': {'version': 3, 'start_at': NOW, 'periods': [{'id': 'old', 'kind': 'work', 'task_id': 1}]}}
+        old_plan = {'run_id': 'old_run', 'schedule': previous['schedule'], 'revision': 'r1'}
+        with Session(self.engine) as session:
+            session.add(task)
+            session.add(TaskContext(task_id=1, subject='', status='ready', task_snapshot=monocle_context.snapshot(task),
+                                    usage=json.dumps({'context_policy': 5, 'full_markdown': 'ok'})))
+            session.add(TaskRanking(snapshot='old_snap', result=json.dumps(previous)))
+            session.add(IntegrationSetting(name='ameba_plan', config=json.dumps(old_plan)))
+            session.commit()
+
+        cand = proposal_payload(
+            [1],
+            [assess(1, 180, 180)],
+            [work_period(1, '2026-11-28', '2026-11-28', [('2026-11-28', 120)])],
+        )
+        prop, issues, days, budgets = planning.validate_proposal(
+            cand, [{'id': 1, 'title': 'Лабораторная', 'completed_work_minutes': 60}], empty_week(), NOW,
+        )
+        self.assertEqual(issues, [])
+        materialized = planning.materialize_plan(
+            prop, [{'id': 1, 'title': 'Лабораторная', 'completed_work_minutes': 60}], days, budgets, empty_week(), NOW,
+        )
+        tampered = materialized | {
+            'plan_run_id': 'bad_progress_run',
+            'calendar_revision': 'r1',
+            'progress_updates': [{'task_id': 1, 'operation': 'set', 'minutes': 120, 'evidence_quote': 'Перенеси лабораторную на субботу'}],
+        }
+        with patch.object(ameba, 'check_feature'), \
+             patch.object(ameba, 'read_config', return_value={'enabled': True}), \
+             patch.object(ameba, 'read_settings', return_value=({'base_url': 'u'}, {})), \
+             patch.object(ameba, 'context_status', return_value='ready'), \
+             patch.object(ameba, 'request_ranking', AsyncMock(return_value=tampered)), \
+             patch('agent_memory.read', return_value=[]):
+            ameba.save_plan_feedback('Перенеси лабораторную на субботу')
+            with self.assertRaisesRegex(Exception, 'неподтверждённое изменение прогресса'):
+                asyncio.run(ameba.rank_all(force=True))
+        with Session(self.engine) as session:
+            self.assertEqual(session.get(Task, 1).completed_work_minutes, 60)
+            self.assertEqual(json.loads(session.get(TaskRanking, 1).result), previous)
+        self.assertEqual(calendar.read_ameba_plan()['run_id'], 'old_run')
+
     def test_migration_preserves_existing_task(self):
         with Session(self.engine) as session:
             session.add(Task(title='Сохранить'))
@@ -949,6 +1447,129 @@ class Storage(unittest.TestCase):
         with Session(self.engine) as session:
             task = session.get(Task, 1)
             self.assertEqual((task.title, task.completed_work_minutes), ('Сохранить', 0))
+
+
+EVAL_SCENARIOS = [
+    {
+        'name': 'move_and_university',
+        'description': 'Университет Пн/Ср/Пт, переезд по дороге, лабораторная с дедлайном, отдых на выходных.',
+        'events': [
+            {'id': f'uni-{d}', 'kind': 'busy', 'title': 'Университет', 'date': d, 'start': '09:00', 'end': '15:00'}
+            for d in ('2026-11-23', '2026-11-25', '2026-11-27')
+        ],
+        'tasks': [
+            {
+                'id': 42,
+                'title': 'Переезд',
+                'completed_work_minutes': 0,
+                'owner_notes': 'Удобно заезжать в новую квартиру по дороге после университета',
+            },
+            {
+                'id': 43,
+                'title': 'Лабораторная',
+                'deadline': '2026-11-27T20:00:00Z',
+                'completed_work_minutes': 0,
+            },
+        ],
+        'user_feedback': '',
+        'forbidden_dates': (),
+        'prefer_days_for_task': {42: ('2026-11-23', '2026-11-25', '2026-11-27')},
+        'prefer_free_days_for_task': {43: ('2026-11-24', '2026-11-26')},
+        'require_rest': True,
+        'expected_completed': {42: 0, 43: 0},
+    },
+    {
+        'name': 'blocked_friday_and_reschedule',
+        'description': 'Явный запрет пятницы и перенос без изменения подтверждённого прогресса.',
+        'events': [],
+        'tasks': [{'id': 1, 'title': 'Лабораторная', 'completed_work_minutes': 60}],
+        'user_feedback': 'Пятницу оставь свободной, лабораторную перенеси на субботу',
+        'forbidden_dates': ('2026-11-27',),
+        'prefer_days_for_task': {},
+        'prefer_free_days_for_task': {},
+        'require_rest': False,
+        'expected_completed': {1: 60},
+    },
+    {
+        'name': 'prep_before_open_window',
+        'description': 'Контрольная с узким окном и отдельная подготовка заранее.',
+        'events': [],
+        'tasks': [
+            {'id': 1, 'title': 'Подготовка к контрольной', 'completed_work_minutes': 0},
+            {
+                'id': 2,
+                'title': 'Контрольная',
+                'deadline': '2026-11-27T11:00:00+00:00',
+                'available_from': '2026-11-26T14:00:00+00:00',
+                'completed_work_minutes': 0,
+            },
+        ],
+        'user_feedback': '',
+        'forbidden_dates': (),
+        'prefer_days_for_task': {},
+        'prefer_free_days_for_task': {},
+        'require_rest': False,
+        'expected_completed': {1: 0, 2: 0},
+    },
+    {
+        'name': 'short_five_minute_task',
+        'description': 'Короткая задача на 5 минут без фиктивного незапланированного остатка.',
+        'events': [],
+        'tasks': [{'id': 1, 'title': 'Отправить справку', 'completed_work_minutes': 0, 'owner_notes': 'Займёт ровно 5 минут'}],
+        'user_feedback': '',
+        'forbidden_dates': (),
+        'prefer_days_for_task': {},
+        'prefer_free_days_for_task': {},
+        'require_rest': False,
+        'expected_completed': {1: 0},
+        'require_fully_scheduled': True,
+    },
+]
+
+
+def evaluate_plan_properties(scenario: dict, result: dict) -> list[str]:
+    """Оценивает ключевые свойства готового плана Ameba для сценария без жёсткой привязки к одному JSON."""
+    failures: list[str] = []
+    sched = (result or {}).get('schedule') or {}
+    if not sched.get('valid'):
+        failures.append('План не отмечен как valid=True')
+    periods = sched.get('periods') or []
+    forbidden = set(scenario.get('forbidden_dates') or ())
+    task_allocs: dict[int, list[tuple[str, int]]] = {}
+    has_rest = False
+    for p in periods:
+        if p.get('kind') == 'rest':
+            has_rest = True
+            continue
+        tid = p.get('task_id')
+        for alloc in p.get('allocations') or []:
+            d_iso = alloc.get('date')
+            mins = int(alloc.get('minutes') or 0)
+            if d_iso in forbidden and mins > 0:
+                failures.append(f'Нарушен запрет на дату {d_iso}')
+            if tid is not None:
+                task_allocs.setdefault(tid, []).append((d_iso, mins))
+    if scenario.get('require_rest') and not has_rest:
+        failures.append('В плане отсутствует период отдыха')
+    if scenario.get('require_fully_scheduled') and not sched.get('fully_scheduled'):
+        failures.append('Ожидалось полное размещение короткой задачи без остатка')
+    for tid, expected_done in (scenario.get('expected_completed') or {}).items():
+        plan_item = (result.get('plans') or {}).get(tid) or (result.get('plans') or {}).get(str(tid)) or {}
+        if int(plan_item.get('completed_work_minutes', expected_done)) != expected_done:
+            failures.append(f'Самовольно изменён подтверждённый прогресс задачи {tid}')
+    for tid, preferred_days in (scenario.get('prefer_days_for_task') or {}).items():
+        allocs = task_allocs.get(tid) or []
+        pref_mins = sum(m for d, m in allocs if d in preferred_days)
+        total_mins = sum(m for _, m in allocs)
+        if total_mins == 0 or pref_mins * 2 < total_mins:
+            failures.append(f'Задача {tid} недостаточно размещена в удобные контекстные дни {preferred_days}')
+    for tid, free_days in (scenario.get('prefer_free_days_for_task') or {}).items():
+        allocs = task_allocs.get(tid) or []
+        free_mins = sum(m for d, m in allocs if d in free_days)
+        total_mins = sum(m for _, m in allocs)
+        if total_mins == 0 or free_mins * 2 < total_mins:
+            failures.append(f'Сложная задача {tid} недостаточно размещена в свободные дни {free_days}')
+    return failures
 
 
 if __name__ == '__main__':

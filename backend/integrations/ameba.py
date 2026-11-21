@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from sqlmodel import Session, select
 
 from common.accounts import check_feature
+from common.ameba_guards import verify_progress_update
 from common.calendar import planning_week as read_week, read_ameba_plan, read_config as read_calendar, save_ameba_plan, view_events
 from common.database import get_engine
 from common.dates import normalize_utc
@@ -299,7 +300,7 @@ def _build_signature(session, state, include_ameba_facts: bool = True) -> str:
     provider_base = read_settings('ai_provider', apply_feature=False)[0].get('base_url')
     allowed_agents = ('Владелец', 'user', 'Ameba') if include_ameba_facts else ('Владелец', 'user')
     return json.dumps({
-        'version': 43,
+        'version': 44,
         'tasks': state,
         'calendar': {
             'revision': calendar.get('revision', ''),
@@ -758,6 +759,8 @@ async def rank_all(force=False, task_id=0):
         task_preferences = result.pop('task_preferences', []) or []
         persistent_preferences = result.pop('persistent_preferences', []) or []
         progress_updates = result.pop('progress_updates', []) or []
+        confirmed_user_answers = result.pop('confirmed_user_answers', []) or []
+        plans_map = result.get('plans') or {}
         result.pop('memory_saved_count', None)
         result['task_ids'] = ids
         result.update(generated_at=datetime.now(timezone.utc).isoformat(), ranked_count=len(ids), pending_count=len(waiting), total_count=len(ready) + len(waiting))
@@ -765,6 +768,7 @@ async def rank_all(force=False, task_id=0):
         task_notes_saved_count = 0
         progress_updated_count = 0
         final_signature = signature
+        ready_by_id = {t['id']: t for t in ready}
         with Session(get_engine()) as session:
             if (
                 task_state(session)[0] != signature
@@ -796,6 +800,18 @@ async def rank_all(force=False, task_id=0):
                 base_mins = upd.get('base_completed_minutes')
                 if base_mins is not None and task_row.completed_work_minutes != int(base_mins):
                     raise HTTPException(409, 'Прогресс задачи изменился во время расчёта. Повторите планирование')
+                plan_info = plans_map.get(tid) or plans_map.get(str(tid)) or {}
+                ok_progress, _, _ = verify_progress_update(
+                    upd,
+                    ready_by_id[tid],
+                    user_feedback=adj['text'],
+                    user_answers=confirmed_user_answers,
+                    all_tasks=ready,
+                    total_minutes_min=plan_info.get('total_minutes_min'),
+                    total_minutes_max=plan_info.get('total_minutes_max'),
+                )
+                if not ok_progress:
+                    raise HTTPException(502, 'Ameba предложила неподтверждённое изменение прогресса. Предыдущий результат сохранён.')
                 try:
                     new_mins = apply_progress(task_row.completed_work_minutes, upd)
                 except ValueError as exc:
@@ -825,7 +841,7 @@ async def rank_all(force=False, task_id=0):
             session.add(saved)
             for tid in ids:
                 task = session.get(Task, tid)
-                task.ai_details = json.dumps({'version': 43, 'status': 'ranked'})
+                task.ai_details = json.dumps({'version': 44, 'status': 'ranked'})
                 task.ai_scored_at = datetime.now(timezone.utc)
                 session.add(task)
             if result.get('plan_run_id'):
@@ -874,7 +890,7 @@ async def evaluate_task(task_id):
     context = await prepare(task_id)
     original = context['task_snapshot']
     if context['status'] != 'ready':
-        metrics = {'version': 43, 'status': 'needs_context', 'reason': ' '.join(context['questions'])}
+        metrics = {'version': 44, 'status': 'needs_context', 'reason': ' '.join(context['questions'])}
         with Session(get_engine()) as session:
             task = session.get(Task, task_id)
             if not task:
@@ -889,4 +905,4 @@ async def evaluate_task(task_id):
     result = await rank_all(task_id=task_id)
     ids = result['task_ids']
     return result | {'rank': ids.index(task_id) + 1 if task_id in ids else None,
-                     'metrics': {'status': 'ranked', 'version': 43}}
+                     'metrics': {'status': 'ranked', 'version': 44}}
