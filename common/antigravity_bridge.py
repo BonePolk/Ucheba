@@ -494,6 +494,7 @@ class AntigravityBridgeSession:
 
         contents: list[dict] = []
         sig_by_item_id: dict[str, str] = dict(self.item_signatures)
+        pending_model_call_ids: set[str] = set()
 
         for item in history_items:
             if not isinstance(item, dict):
@@ -526,6 +527,7 @@ class AntigravityBridgeSession:
                 continue
 
             if item_type in ('message', None) and role in ('user', 'assistant'):
+                pending_model_call_ids.clear()
                 cc_role = 'model' if role == 'assistant' else 'user'
                 content = item.get('content')
                 item_id = item.get('id') if isinstance(item.get('id'), str) else ''
@@ -564,9 +566,13 @@ class AntigravityBridgeSession:
                 orig_name = str(item.get('name') or '').strip()
                 if not orig_name:
                     continue
+                if not contents or contents[-1]['role'] != 'model':
+                    pending_model_call_ids.clear()
                 orig_ns = str(item.get('namespace') or '').strip() or None
                 safe_name = _resolve_safe_name(orig_name, orig_ns)
                 call_id = str(item.get('call_id') or item.get('id') or '').strip()
+                if call_id:
+                    pending_model_call_ids.add(call_id)
                 meta = self.call_meta.get(call_id, {})
                 provider_id = meta.get('provider_id')
                 sig = meta.get('thought_signature') or sig_by_item_id.get(str(item.get('id') or ''), '')
@@ -599,25 +605,20 @@ class AntigravityBridgeSession:
                 call_id = str(item.get('call_id') or '').strip()
                 meta = self.call_meta.get(call_id, {})
                 inlined = inline_call_names.get(call_id)
-                safe_name = (
-                    meta.get('safe_name')
-                    or (inlined[1] if inlined else '')
-                    or _resolve_safe_name(str(item.get('name') or 'tool'), item.get('namespace'))
+                prev_ok = bool(contents) and (
+                    contents[-1]['role'] == 'model'
+                    or (
+                        contents[-1]['role'] == 'user'
+                        and any(isinstance(p, dict) and 'functionResponse' in p for p in contents[-1].get('parts', []))
+                    )
                 )
-                provider_id = meta.get('provider_id')
+                is_matching_call = bool(call_id and call_id in pending_model_call_ids and prev_ok)
+
                 raw_out = item.get('output')
                 images: list[tuple[str, str]] = []
                 text_parts: list[str] = []
 
-                if isinstance(raw_out, str):
-                    try:
-                        parsed_out = json.loads(raw_out)
-                        resp_obj = parsed_out if isinstance(parsed_out, dict) else {'result': parsed_out}
-                    except ValueError:
-                        resp_obj = {'result': raw_out}
-                elif isinstance(raw_out, dict):
-                    resp_obj = raw_out
-                elif isinstance(raw_out, list):
+                if isinstance(raw_out, list):
                     for entry in raw_out:
                         if not isinstance(entry, dict):
                             continue
@@ -628,6 +629,40 @@ class AntigravityBridgeSession:
                             parsed_img = _parse_data_uri(entry.get('image_url') or '')
                             if parsed_img:
                                 images.append(parsed_img)
+
+                if not is_matching_call:
+                    pending_model_call_ids.clear()
+                    if isinstance(raw_out, str):
+                        text_payload = raw_out
+                    elif isinstance(raw_out, list):
+                        text_payload = '\n'.join(text_parts)
+                    elif isinstance(raw_out, dict):
+                        text_payload = json.dumps(raw_out, ensure_ascii=False)
+                    else:
+                        text_payload = '' if raw_out is None else str(raw_out)
+                    if text_payload.strip():
+                        _append_part(contents, 'user', {'text': text_payload})
+                    for mime, b64 in images:
+                        _append_part(contents, 'user', {'inlineData': {'mimeType': mime, 'data': b64}})
+                    continue
+
+                pending_model_call_ids.discard(call_id)
+                safe_name = (
+                    meta.get('safe_name')
+                    or (inlined[1] if inlined else '')
+                    or _resolve_safe_name(str(item.get('name') or 'tool'), item.get('namespace'))
+                )
+                provider_id = meta.get('provider_id')
+
+                if isinstance(raw_out, str):
+                    try:
+                        parsed_out = json.loads(raw_out)
+                        resp_obj = parsed_out if isinstance(parsed_out, dict) else {'result': parsed_out}
+                    except ValueError:
+                        resp_obj = {'result': raw_out}
+                elif isinstance(raw_out, dict):
+                    resp_obj = raw_out
+                elif isinstance(raw_out, list):
                     if len(text_parts) == 1:
                         try:
                             parsed_out = json.loads(text_parts[0])

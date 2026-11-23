@@ -1275,6 +1275,44 @@ class AntigravityStrausRegressionTests(unittest.TestCase):
         self.assertEqual(seen_urls, ['https://daily-cloudcode-pa.googleapis.com', 'https://cloudcode-pa.googleapis.com'])
         self.assertEqual(resp.json()['output'][0]['content'][0]['text'], 'Ответ с backup-хоста')
 
+    def test_orphan_external_message_function_call_output_becomes_user_text(self):
+        session = antigravity_bridge.AntigravityBridgeSession(owner_id=1)
+        payload = json.dumps({'instruction': 'Добавь пару', 'calendar': {'events': []}}, ensure_ascii=False)
+        tools_ns = [{'type': 'namespace', 'name': 'mcp__ucheba', 'tools': _make_straus_tools()}]
+
+        # 1. Ход с ExternalMessage(tool_name='task_manager') не должен порождать functionResponse без functionCall.
+        meta1, _ = session.translate_request({
+            'model': 'gemini-4-neon-xhigh',
+            'tools': tools_ns,
+            'input': [
+                {
+                    'type': 'function_call_output',
+                    'call_id': 'ext_task_mgr_1',
+                    'name': 'task_manager',
+                    'output': payload,
+                }
+            ],
+        })
+        all_parts1 = [p for c in meta1['contents'] for p in c['parts']]
+        self.assertFalse(any('functionResponse' in p for p in all_parts1))
+        self.assertEqual(meta1['contents'][0]['role'], 'user')
+        self.assertIn('Добавь пару', meta1['contents'][0]['parts'][0]['text'])
+
+        # 2. На следующем ходу реальный function_call + function_call_output с тем же call_id даёт functionResponse.
+        meta2, _ = session.translate_request({
+            'model': 'gemini-4-neon-xhigh',
+            'tools': tools_ns,
+            'input': [
+                {'type': 'function_call_output', 'call_id': 'ext_task_mgr_1', 'name': 'task_manager', 'output': payload},
+                {'type': 'function_call', 'call_id': 'call_cal_1', 'namespace': 'mcp__ucheba', 'name': 'calendar_list', 'arguments': '{}'},
+                {'type': 'function_call_output', 'call_id': 'call_cal_1', 'output': json.dumps({'events': []})},
+            ],
+        })
+        self.assertEqual([c['role'] for c in meta2['contents']], ['user', 'model', 'user'])
+        self.assertIn('functionCall', meta2['contents'][1]['parts'][0])
+        self.assertIn('functionResponse', meta2['contents'][2]['parts'][0])
+        self.assertEqual(meta2['contents'][2]['parts'][0]['functionResponse']['name'], 'mcp__ucheba__calendar_list')
+
 
 class AntigravityAdminUserSeparationAndAgentsTests(unittest.TestCase):
     def setUp(self):
