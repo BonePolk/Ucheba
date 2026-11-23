@@ -132,6 +132,16 @@ def validate_cloudcode_url(value: str | None) -> str:
     return f'https://{host}'
 
 
+def alternate_cloudcode_url(current_url: str | None) -> str | None:
+    """Возвращает официальный резервный Cloud Code host из allowlist для обхода bare 429 маршрутизации."""
+    base = validate_cloudcode_url(current_url)
+    if base == 'https://daily-cloudcode-pa.googleapis.com':
+        return 'https://cloudcode-pa.googleapis.com'
+    if base == 'https://cloudcode-pa.googleapis.com':
+        return 'https://daily-cloudcode-pa.googleapis.com'
+    return None
+
+
 def validate_redirect_uri(value: str | None) -> str:
     raw = (value or '').strip()
     if not raw:
@@ -958,8 +968,11 @@ def build_cloudcode_envelope(
     tools: list[dict] | None = None,
     tool_config: dict | None = None,
     generation_config: dict | None = None,
+    session_id: str = '',
 ) -> dict:
     req: dict = {'contents': contents}
+    if session_id:
+        req['sessionId'] = session_id
     if system_instruction:
         req['systemInstruction'] = system_instruction
     if tools:
@@ -1024,6 +1037,23 @@ async def stream_generate_content(
                 )
                 yield single.get('response', single)
                 return
+
+            if response.status_code == 429:
+                raw = await response.aread()
+                err = _cloudcode_http_error(response.status_code, raw, stream_path, response.headers)
+                if err.error_status == 'RESOURCE_EXHAUSTED' and err.retryable:
+                    await cm.__aexit__(None, None, None)
+                    single = await cloudcode_post(
+                        '/v1internal:generateContent',
+                        envelope,
+                        access_token,
+                        cloudcode_url=base,
+                        user_agent=user_agent,
+                        timeout=first_byte_timeout,
+                    )
+                    yield single.get('response', single)
+                    return
+                raise err
 
             if not response.is_success:
                 raw = await response.aread()

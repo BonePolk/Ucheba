@@ -24,6 +24,7 @@ import uvicorn
 from common.antigravity import (
     AntigravityAuthError,
     AntigravityError,
+    alternate_cloudcode_url,
     build_cloudcode_envelope,
     fetch_backend_session,
     fetch_live_catalog,
@@ -40,6 +41,38 @@ _DATA_URI_RE = re.compile(r'^data:([^;,]+);base64,(.+)$', re.S)
 _EPHEMERAL_KEY_SEED = secrets.token_bytes(32)
 _MAX_PERSISTED_RESPONSES = 24
 _MAX_PERSISTED_BYTES = 512 * 1024
+
+_CODEX_HARNESS_TOOLS = frozenset({
+    'list_mcp_resources',
+    'list_mcp_resource_templates',
+    'read_mcp_resource',
+    'request_user_input',
+    'view_image',
+    'get_goal',
+    'create_goal',
+    'update_goal',
+})
+_CODEX_HARNESS_NAMESPACES = frozenset({'multi_agent_v1'})
+_HARNESS_XML_BLOCK_RE = re.compile(
+    r'<(skills_instructions|permissions instructions|collaboration_mode|apps_instructions|system-conventions)\b[^>]*>.*?</\1>',
+    re.S | re.I,
+)
+_ENV_CONTEXT_BLOCK_RE = re.compile(r'<environment_context\b[^>]*>.*?</environment_context>', re.S | re.I)
+_CODEX_PREAMBLE_PREFIX = 'You are a coding agent running in the Codex CLI'
+
+
+def _sanitize_system_text(text: str, *, has_custom_agent_prompt: bool) -> str:
+    raw = (text or '').strip()
+    if not raw:
+        return ''
+    if raw.startswith(_CODEX_PREAMBLE_PREFIX):
+        if has_custom_agent_prompt:
+            return ''
+        parts = raw.split('\n\n', 1)
+        raw = ('You are a helpful engineering assistant.\n\n' + parts[1]) if len(parts) > 1 else 'You are a helpful engineering assistant.'
+    cleaned = _HARNESS_XML_BLOCK_RE.sub('', raw)
+    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+    return cleaned
 
 _ALLOWED_FINISH_REASONS = frozenset({'STOP', 'MAX_TOKENS', 'TOOL_CALLS', 'FUNCTION_CALL'})
 _FAILED_FINISH_REASONS = frozenset({
@@ -171,6 +204,7 @@ class AntigravityBridgeSession:
         self.responses_history: dict[str, list] = {}
         self.state_path = state_path or _bridge_state_file(owner_id)
         self.session_lock = asyncio.Lock()
+        self.session_id: str = str(uuid.uuid4())
         self.error_sink = error_sink
         self.last_error: dict | None = None
         self._load_persisted_state()
@@ -280,6 +314,16 @@ class AntigravityBridgeSession:
         target_to_safe: dict[tuple[str | None, str], str] = {}
         custom_names: set[str] = set()
 
+        has_ucheba_mcp = any(
+            isinstance(t, dict) and t.get('type') == 'namespace' and str(t.get('name') or '').startswith('mcp__ucheba')
+            for t in raw_tools
+        )
+        has_shell_tool = any(
+            isinstance(t, dict) and str(t.get('name') or '') in ('shell', 'exec_command', 'local_shell', 'apply_patch')
+            for t in raw_tools
+        )
+        strip_codex_harness_tools = has_ucheba_mcp and not has_shell_tool
+
         def _add_declaration(
             *,
             orig_name: str,
@@ -337,6 +381,8 @@ class AntigravityBridgeSession:
                 orig_name = str(tool.get('name') or '').strip()
                 if not orig_name:
                     continue
+                if strip_codex_harness_tools and orig_name in _CODEX_HARNESS_TOOLS:
+                    continue
                 _add_declaration(
                     orig_name=orig_name,
                     orig_namespace=str(tool.get('namespace') or '').strip() or None,
@@ -346,6 +392,8 @@ class AntigravityBridgeSession:
                 )
             elif tool_type == 'namespace':
                 ns_name = str(tool.get('name') or '').strip() or None
+                if strip_codex_harness_tools and ns_name in _CODEX_HARNESS_NAMESPACES:
+                    continue
                 sub_tools = tool.get('tools') or []
                 if not isinstance(sub_tools, list):
                     continue
@@ -375,6 +423,8 @@ class AntigravityBridgeSession:
             raise AntigravityError('Не указана модель для запроса', status_code=400)
 
         tools_payload, safe_to_target, target_to_safe, custom_names = self.translate_tools(body.get('tools'))
+        namespaces = sorted({info['namespace'] for info in safe_to_target.values() if info.get('namespace')})
+        has_ucheba_mcp = any(ns.startswith('mcp__ucheba') for ns in namespaces)
         safe_to_orig = {
             safe: (f"{info['namespace']}__{info['name']}" if info.get('namespace') else info['name'])
             for safe, info in safe_to_target.items()
@@ -389,9 +439,13 @@ class AntigravityBridgeSession:
             hint = f'{ns}__{orig_name}' if ns else orig_name
             return _sanitize_tool_name(hint, set(safe_to_target))
 
-        system_parts: list[str] = []
+        raw_system_parts: list[str] = []
+        has_custom_agent_prompt = False
         if isinstance(body.get('instructions'), str) and body['instructions'].strip():
-            system_parts.append(body['instructions'].strip())
+            inst_txt = body['instructions'].strip()
+            raw_system_parts.append(inst_txt)
+            if _sanitize_system_text(inst_txt, has_custom_agent_prompt=True):
+                has_custom_agent_prompt = True
 
         raw_input = body.get('input')
         prev_id = body.get('previous_response_id')
@@ -412,6 +466,20 @@ class AntigravityBridgeSession:
             history_items.append({'type': 'message', 'role': 'user', 'content': raw_input})
         elif isinstance(raw_input, list):
             history_items.extend(raw_input)
+
+        for item in history_items:
+            if not isinstance(item, dict):
+                continue
+            if item.get('type') in ('message', None) and item.get('role') in ('system', 'developer'):
+                content = item.get('content')
+                chunks = [content] if isinstance(content, str) else [
+                    p.get('text', '') for p in (content if isinstance(content, list) else ()) if isinstance(p, dict)
+                ]
+                for chunk in chunks:
+                    if isinstance(chunk, str) and chunk.strip():
+                        stripped = chunk.strip()
+                        if not stripped.startswith(_CODEX_PREAMBLE_PREFIX) and _HARNESS_XML_BLOCK_RE.sub('', stripped).strip():
+                            has_custom_agent_prompt = True
 
         # Предварительно индексируем вызовы инструментов из истории запроса на случай полного реплея без кэша.
         inline_call_names: dict[str, tuple[str, str]] = {}
@@ -446,11 +514,15 @@ class AntigravityBridgeSession:
             if item_type in ('message', None) and role in ('system', 'developer'):
                 content = item.get('content')
                 if isinstance(content, str) and content.strip():
-                    system_parts.append(content.strip())
+                    cleaned_sys = _sanitize_system_text(content, has_custom_agent_prompt=has_custom_agent_prompt)
+                    if cleaned_sys:
+                        raw_system_parts.append(cleaned_sys)
                 elif isinstance(content, list):
                     for part in content:
                         if isinstance(part, dict) and isinstance(part.get('text'), str) and part['text'].strip():
-                            system_parts.append(part['text'].strip())
+                            cleaned_sys = _sanitize_system_text(part['text'], has_custom_agent_prompt=has_custom_agent_prompt)
+                            if cleaned_sys:
+                                raw_system_parts.append(cleaned_sys)
                 continue
 
             if item_type in ('message', None) and role in ('user', 'assistant'):
@@ -459,8 +531,9 @@ class AntigravityBridgeSession:
                 item_id = item.get('id') if isinstance(item.get('id'), str) else ''
                 attached_sig = sig_by_item_id.get(item_id, '')
                 if isinstance(content, str):
-                    if content:
-                        part = {'text': content}
+                    txt = _ENV_CONTEXT_BLOCK_RE.sub('', content).strip() if (cc_role == 'user' and has_custom_agent_prompt and has_ucheba_mcp) else content
+                    if txt:
+                        part = {'text': txt}
                         if cc_role == 'model' and attached_sig:
                             part['thoughtSignature'] = attached_sig
                             attached_sig = ''
@@ -471,13 +544,15 @@ class AntigravityBridgeSession:
                             continue
                         btype = block.get('type')
                         if btype in ('input_text', 'output_text', 'text'):
-                            txt = block.get('text')
-                            if isinstance(txt, str) and txt:
-                                part = {'text': txt}
-                                if cc_role == 'model' and attached_sig:
-                                    part['thoughtSignature'] = attached_sig
-                                    attached_sig = ''
-                                _append_part(contents, cc_role, part)
+                            raw_txt = block.get('text')
+                            if isinstance(raw_txt, str):
+                                txt = _ENV_CONTEXT_BLOCK_RE.sub('', raw_txt).strip() if (cc_role == 'user' and has_custom_agent_prompt and has_ucheba_mcp) else raw_txt
+                                if txt:
+                                    part = {'text': txt}
+                                    if cc_role == 'model' and attached_sig:
+                                        part['thoughtSignature'] = attached_sig
+                                        attached_sig = ''
+                                    _append_part(contents, cc_role, part)
                         elif btype == 'input_image':
                             parsed = _parse_data_uri(block.get('image_url') or '')
                             if parsed:
@@ -595,8 +670,6 @@ class AntigravityBridgeSession:
                 if allowed_list and cc_mode != 'NONE':
                     cfg_dict['allowedFunctionNames'] = allowed_list
                 tool_config = {'functionCallingConfig': cfg_dict}
-            else:
-                tool_config = {'functionCallingConfig': {'mode': 'AUTO'}}
 
         gen_config: dict = {}
         if type(body.get('max_output_tokens')) is int and body['max_output_tokens'] > 0:
@@ -606,6 +679,7 @@ class AntigravityBridgeSession:
         if isinstance(body.get('top_p'), (int, float)) and not isinstance(body.get('top_p'), bool):
             gen_config['topP'] = float(body['top_p'])
 
+        system_parts = [p for p in raw_system_parts if p]
         text_cfg = body.get('text')
         if isinstance(text_cfg, dict) and isinstance(text_cfg.get('format'), dict):
             fmt = text_cfg['format']
@@ -622,8 +696,7 @@ class AntigravityBridgeSession:
             elif fmt.get('type') == 'json_object' and not tools_payload:
                 gen_config['responseMimeType'] = 'application/json'
 
-        sys_inst = {'parts': [{'text': '\n\n'.join(system_parts)}]} if system_parts else None
-        namespaces = sorted({info['namespace'] for info in safe_to_target.values() if info.get('namespace')})
+        sys_inst = {'role': 'user', 'parts': [{'text': '\n\n'.join(system_parts)}]} if system_parts else None
         meta = {
             'model': model,
             'safe_to_orig': safe_to_orig,
@@ -796,15 +869,19 @@ def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, labe
     app.add_api_route('/models', _list_models, methods=['GET'])
 
     async def _run_generation(meta: dict):
-        """Открывает поток Cloud Code с обработкой 401 refresh и ретраем временных сбоев до первого чанка."""
+        """Открывает поток Cloud Code с обработкой 401 refresh, bare 429 fallback и ретраем временных сбоев."""
         max_attempts = 3
         refreshed = False
         attempt = 0
+        tried_alt_host = False
+        active_url_override = ''
         decls_count = len(meta['tools_payload'][0].get('functionDeclarations', [])) if meta['tools_payload'] else 0
+        sys_chars = sum(len(str(p.get('text') or '')) for p in (meta['system_instruction'] or {}).get('parts', []))
         while True:
             token_val, project_id, cc_url, ua = await _run_as_owner(
                 session.ensure_credentials(force_refresh=refreshed)
             )
+            effective_cc_url = active_url_override or cc_url
             envelope = build_cloudcode_envelope(
                 project_id=project_id,
                 model=meta['model'],
@@ -813,17 +890,20 @@ def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, labe
                 tools=meta['tools_payload'] or None,
                 tool_config=meta['tool_config'],
                 generation_config=meta['gen_config'] or None,
+                session_id=session.session_id,
             )
             bridge_log.info(
-                '%s stage=cloudcode_envelope_built model=%s decls=%d has_system=%s attempt=%d',
-                label, meta['model'], decls_count, bool(meta['system_instruction']), attempt + 1,
+                '%s stage=cloudcode_envelope_built model=%s decls=%d sys_chars=%d attempt=%d host=%s',
+                label, meta['model'], decls_count, sys_chars, attempt + 1, effective_cc_url,
             )
             t_start = time.monotonic()
             emitted_any = False
             try:
-                async for chunk in stream_generate_content(token_val, envelope, cloudcode_url=cc_url, user_agent=ua):
+                async for chunk in stream_generate_content(token_val, envelope, cloudcode_url=effective_cc_url, user_agent=ua):
                     if not emitted_any:
                         ttfb_ms = int((time.monotonic() - t_start) * 1000)
+                        if active_url_override:
+                            session.cloudcode_url = active_url_override
                         bridge_log.info(
                             '%s stage=cloudcode_response model=%s status=ok decls=%d',
                             label, meta['model'], decls_count,
@@ -851,6 +931,22 @@ def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, labe
                     '%s stage=cloudcode_response model=%s status=error http=%s code=%s retryable=%s decls=%d',
                     label, meta['model'], exc.status_code, exc.error_status or '-', bool(exc.retryable), decls_count,
                 )
+                is_bare_429 = (
+                    not emitted_any
+                    and exc.status_code == 429
+                    and exc.error_status == 'RESOURCE_EXHAUSTED'
+                    and bool(exc.retryable)
+                )
+                if is_bare_429 and not tried_alt_host:
+                    alt_url = alternate_cloudcode_url(effective_cc_url)
+                    if alt_url and alt_url != effective_cc_url:
+                        tried_alt_host = True
+                        active_url_override = alt_url
+                        bridge_log.warning(
+                            '%s stage=cloudcode_fallback model=%s from=%s to=%s reason=bare_429',
+                            label, meta['model'], effective_cc_url, alt_url,
+                        )
+                        continue
                 retry_limit = 1 if exc.status_code == 429 else (max_attempts - 1)
                 if emitted_any or not exc.retryable or attempt >= retry_limit:
                     raise
@@ -897,7 +993,11 @@ def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, labe
             current_user_id.reset(tok)
 
         decls_count = len(meta['tools_payload'][0].get('functionDeclarations', [])) if meta['tools_payload'] else 0
-        tc_mode = (meta['tool_config'] or {}).get('functionCallingConfig', {}).get('mode') if meta['tool_config'] else 'NONE'
+        tc_mode = (
+            (meta['tool_config'] or {}).get('functionCallingConfig', {}).get('mode')
+            if meta['tool_config']
+            else ('AUTO' if meta['tools_payload'] else 'NONE')
+        )
         bridge_log.info(
             '%s stage=bridge_request_parsed model=%s contents=%d decls=%d namespaces=%d tool_choice=%s',
             label, meta['model'], len(meta['contents']), decls_count, len(meta['namespaces']), tc_mode,

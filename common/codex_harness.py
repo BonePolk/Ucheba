@@ -402,8 +402,12 @@ async def detect_model_capabilities(
     cfg_out = _safe_int(cfg.get('max_output_tokens'), minimum=256)
 
     thread_cap = extract_model_limits(thread) if thread is not None else {}
-    codex_cap = await _probe_codex_models(client, active_model, mode, base_url=scope) or {}
-    codex_probe_state = _fresh_get(('probed', owner, 'codex', mode, scope))
+    if mode == 'antigravity':
+        codex_cap = {}
+        codex_probe_state = None
+    else:
+        codex_cap = await _probe_codex_models(client, active_model, mode, base_url=scope) or {}
+        codex_probe_state = _fresh_get(('probed', owner, 'codex', mode, scope))
     provider_cap = {}
     provider_probe_state = None
     if mode in ('api_key', 'antigravity') and scope:

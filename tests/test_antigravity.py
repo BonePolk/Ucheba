@@ -1163,6 +1163,118 @@ class AntigravityStrausRegressionTests(unittest.TestCase):
         self.assertIn('quota reset after 2h', outcome.error_detail)
         self.assertNotIn('exceeded retry limit', outcome.error_detail)
 
+    def test_bridge_strips_codex_boilerplate_xml_and_unused_harness_tools(self):
+        session = antigravity_bridge.AntigravityBridgeSession(owner_id=1)
+        straus_tools = _make_straus_tools()
+        tools = [
+            {'type': 'function', 'name': 'list_mcp_resources', 'description': 'List', 'parameters': {'type': 'object', 'properties': {}}},
+            {'type': 'function', 'name': 'create_goal', 'description': 'Goal', 'parameters': {'type': 'object', 'properties': {'objective': {'type': 'string'}}}},
+            {'type': 'namespace', 'name': 'multi_agent_v1', 'tools': [{'type': 'function', 'name': 'close_agent', 'parameters': {'type': 'object', 'properties': {}}}]},
+            {'type': 'namespace', 'name': 'mcp__ucheba', 'tools': straus_tools},
+        ]
+        meta, _ = session.translate_request({
+            'model': 'gemini-4-neon-xhigh',
+            'tools': tools,
+            'input': [
+                {
+                    'type': 'message',
+                    'role': 'developer',
+                    'content': [{'type': 'input_text', 'text': 'You are a coding agent running in the Codex CLI, led by OpenAI.'}],
+                },
+                {
+                    'type': 'message',
+                    'role': 'developer',
+                    'content': [
+                        {'type': 'input_text', 'text': 'Ты Straus, агент редактирования календаря.'},
+                        {'type': 'input_text', 'text': '<skills_instructions>## Skills\nsecret harness</skills_instructions>'},
+                        {'type': 'input_text', 'text': '<permissions instructions>sandbox_mode read-only</permissions instructions>'},
+                    ],
+                },
+                {'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': '<environment_context><cwd>/tmp</cwd></environment_context>'}]},
+                {'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': 'Добавь пару в пятницу'}]},
+            ],
+        })
+        sys_text = meta['system_instruction']['parts'][0]['text']
+        self.assertEqual(meta['system_instruction']['role'], 'user')
+        self.assertIn('Ты Straus', sys_text)
+        self.assertNotIn('Codex CLI', sys_text)
+        self.assertNotIn('<skills_instructions>', sys_text)
+        self.assertNotIn('<permissions instructions>', sys_text)
+
+        decls = meta['tools_payload'][0]['functionDeclarations']
+        self.assertEqual(len(decls), len(straus_tools))
+        names = {d['name'] for d in decls}
+        self.assertNotIn('create_goal', names)
+        self.assertNotIn('list_mcp_resources', names)
+        self.assertNotIn('multi_agent_v1__close_agent', names)
+
+        user_texts = [p.get('text', '') for c in meta['contents'] for p in c['parts']]
+        self.assertEqual(user_texts, ['Добавь пару в пятницу'])
+        env = antigravity.build_cloudcode_envelope(
+            project_id='projects/demo',
+            model=meta['model'],
+            contents=meta['contents'],
+            system_instruction=meta['system_instruction'],
+            tools=meta['tools_payload'],
+            tool_config=meta['tool_config'],
+            session_id=session.session_id,
+        )
+        self.assertEqual(env['request']['sessionId'], session.session_id)
+
+    def test_bare_429_falls_back_to_generate_content_and_alternate_cloudcode_host(self):
+        # 1. stream_generate_content при bare 429 RESOURCE_EXHAUSTED пробует /v1internal:generateContent.
+        class _Stream429:
+            def __init__(self):
+                self.status_code = 429
+                self.is_success = False
+                self.headers = {}
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): return False
+            async def aread(self):
+                return json.dumps({'error': {'code': 429, 'status': 'RESOURCE_EXHAUSTED', 'message': 'Resource has been exhausted (e.g. check quota).'}}).encode('utf-8')
+
+        class _Client429:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): return False
+            def stream(self, *args, **kwargs): return _Stream429()
+
+        with patch('common.antigravity.httpx.AsyncClient', return_value=_Client429()), \
+             patch('common.antigravity.cloudcode_post', AsyncMock(return_value={'response': {'candidates': [{'content': {'parts': [{'text': 'Через generateContent'}]}, 'finishReason': 'STOP'}]}})):
+            async def _collect():
+                return [ev async for ev in antigravity.stream_generate_content('tok', {'request': {'contents': []}})]
+            chunks = asyncio.run(_collect())
+        self.assertEqual(chunks[0]['candidates'][0]['content']['parts'][0]['text'], 'Через generateContent')
+
+        # 2. Мост при bare 429 на daily-cloudcode-pa переключается на cloudcode-pa.
+        session = antigravity_bridge.AntigravityBridgeSession(owner_id=1)
+        session.access_token = 'tok-1'
+        session.token_expires_at = time.time() + 3600
+        session.project_id = 'projects/demo'
+        client = TestClient(antigravity_bridge.create_bridge_app(session, 'sec', label='Straus'))
+        seen_urls = []
+
+        async def _host_fallback(tok, env, *, cloudcode_url='', **kwargs):
+            seen_urls.append(cloudcode_url)
+            if cloudcode_url == 'https://daily-cloudcode-pa.googleapis.com':
+                raise antigravity.AntigravityError(
+                    'Превышен лимит запросов или квота Google Antigravity (HTTP 429 (RESOURCE_EXHAUSTED)): Resource has been exhausted (e.g. check quota).',
+                    status_code=429,
+                    error_status='RESOURCE_EXHAUSTED',
+                    retryable=True,
+                    quota_exceeded=True,
+                )
+            yield {'candidates': [{'content': {'parts': [{'text': 'Ответ с backup-хоста'}]}, 'finishReason': 'STOP'}]}
+
+        with patch('common.antigravity_bridge.stream_generate_content', side_effect=_host_fallback):
+            resp = client.post(
+                '/v1/responses',
+                headers={'Authorization': 'Bearer sec'},
+                json={'model': 'gemini-4-neon-xhigh', 'input': 'Привет', 'stream': False},
+            )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(seen_urls, ['https://daily-cloudcode-pa.googleapis.com', 'https://cloudcode-pa.googleapis.com'])
+        self.assertEqual(resp.json()['output'][0]['content'][0]['text'], 'Ответ с backup-хоста')
+
 
 class AntigravityAdminUserSeparationAndAgentsTests(unittest.TestCase):
     def setUp(self):
