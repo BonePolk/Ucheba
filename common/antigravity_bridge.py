@@ -84,6 +84,18 @@ def _decode_encrypted_meta(token: str | None, *, owner_id: int) -> dict:
         return {}
 
 
+def decode_thought_signature(token: str | None, *, owner_id: int) -> str:
+    """Расшифровывает первую thoughtSignature, привязанную к owner_id."""
+    meta = _decode_encrypted_meta(token, owner_id=owner_id)
+    for bucket in ('call_sigs', 'item_sigs'):
+        sigs = meta.get(bucket)
+        if isinstance(sigs, dict):
+            for val in sigs.values():
+                if isinstance(val, str) and val:
+                    return val
+    return ''
+
+
 def _bridge_state_file(owner_id: int) -> Path:
     codex_root = Path('/home/codex/.codex')
     base = codex_root / 'bridge-state' if codex_root.is_dir() else Path(tempfile.gettempdir()) / 'ucheba-bridge-state'
@@ -240,47 +252,41 @@ class AntigravityBridgeSession:
                 await save_backend_project(self.project_id, self.subscription_tier)
             return self.access_token, self.project_id, self.cloudcode_url, self.user_agent
 
-    def translate_tools(self, raw_tools: list | None) -> tuple[list[dict], dict[str, str], dict[str, str], set[str]]:
+    def translate_tools(self, raw_tools: list | None) -> tuple[list[dict], dict[str, dict], dict[tuple[str | None, str], str], set[str]]:
         if not raw_tools:
             return [], {}, {}, set()
         used: set[str] = set()
         declarations: list[dict] = []
-        safe_to_orig: dict[str, str] = {}
-        orig_to_safe: dict[str, str] = {}
+        safe_to_target: dict[str, dict] = {}
+        target_to_safe: dict[tuple[str | None, str], str] = {}
         custom_names: set[str] = set()
 
-        for tool in raw_tools:
-            if not isinstance(tool, dict):
-                continue
-            tool_type = tool.get('type')
-            if tool_type == 'function':
-                orig_name = str(tool.get('name') or '').strip()
-                if not orig_name:
-                    continue
-                safe_name = _sanitize_tool_name(orig_name, used)
-                safe_to_orig[safe_name] = orig_name
-                orig_to_safe[orig_name] = safe_name
-                decl: dict = {
-                    'name': safe_name,
-                    'description': str(tool.get('description') or orig_name)[:1024],
-                }
-                params = tool.get('parameters')
-                if isinstance(params, dict):
-                    cleaned = sanitize_schema_for_cloudcode(params)
-                    if cleaned.get('properties'):
-                        decl['parameters'] = cleaned
-                declarations.append(decl)
-            elif tool_type == 'custom':
-                orig_name = str(tool.get('name') or '').strip()
-                if not orig_name:
-                    continue
-                safe_name = _sanitize_tool_name(orig_name, used)
-                safe_to_orig[safe_name] = orig_name
-                orig_to_safe[orig_name] = safe_name
+        def _add_declaration(
+            *,
+            orig_name: str,
+            orig_namespace: str | None,
+            description: str,
+            params,
+            is_custom: bool = False,
+        ) -> None:
+            raw_hint = f'{orig_namespace}__{orig_name}' if orig_namespace else orig_name
+            safe_name = _sanitize_tool_name(raw_hint, used)
+            safe_to_target[safe_name] = {
+                'name': orig_name,
+                'namespace': orig_namespace,
+                'is_custom': is_custom,
+            }
+            target_to_safe[(orig_namespace, orig_name)] = safe_name
+            if orig_namespace:
+                target_to_safe.setdefault((None, f'{orig_namespace}__{orig_name}'), safe_name)
+            else:
+                target_to_safe.setdefault((None, orig_name), safe_name)
+
+            if is_custom:
                 custom_names.add(orig_name)
                 declarations.append({
                     'name': safe_name,
-                    'description': str(tool.get('description') or orig_name)[:1024],
+                    'description': (description or orig_name)[:1024],
                     'parameters': {
                         'type': 'OBJECT',
                         'properties': {
@@ -292,15 +298,77 @@ class AntigravityBridgeSession:
                         'required': ['input'],
                     },
                 })
+                return
+
+            decl: dict = {
+                'name': safe_name,
+                'description': (description or orig_name)[:1024],
+            }
+            if isinstance(params, dict):
+                cleaned = sanitize_schema_for_cloudcode(params)
+                if cleaned.get('type') == 'OBJECT' and cleaned.get('properties'):
+                    decl['parameters'] = cleaned
+            declarations.append(decl)
+
+        for tool in raw_tools:
+            if not isinstance(tool, dict):
+                continue
+            tool_type = tool.get('type')
+            if tool_type in ('function', 'custom'):
+                orig_name = str(tool.get('name') or '').strip()
+                if not orig_name:
+                    continue
+                _add_declaration(
+                    orig_name=orig_name,
+                    orig_namespace=str(tool.get('namespace') or '').strip() or None,
+                    description=str(tool.get('description') or orig_name),
+                    params=tool.get('parameters'),
+                    is_custom=(tool_type == 'custom'),
+                )
+            elif tool_type == 'namespace':
+                ns_name = str(tool.get('name') or '').strip() or None
+                sub_tools = tool.get('tools') or []
+                if not isinstance(sub_tools, list):
+                    continue
+                for sub in sub_tools:
+                    if not isinstance(sub, dict):
+                        continue
+                    sub_type = sub.get('type') or 'function'
+                    if sub_type not in ('function', 'custom'):
+                        continue
+                    sub_name = str(sub.get('name') or '').strip()
+                    if not sub_name:
+                        continue
+                    _add_declaration(
+                        orig_name=sub_name,
+                        orig_namespace=ns_name,
+                        description=str(sub.get('description') or sub_name),
+                        params=sub.get('parameters'),
+                        is_custom=(sub_type == 'custom'),
+                    )
+
         tools_payload = [{'functionDeclarations': declarations}] if declarations else []
-        return tools_payload, safe_to_orig, orig_to_safe, custom_names
+        return tools_payload, safe_to_target, target_to_safe, custom_names
 
     def translate_request(self, body: dict) -> tuple[dict, dict]:
         model = str(body.get('model') or '').strip()
         if not model:
             raise AntigravityError('Не указана модель для запроса', status_code=400)
 
-        tools_payload, safe_to_orig, orig_to_safe, custom_names = self.translate_tools(body.get('tools'))
+        tools_payload, safe_to_target, target_to_safe, custom_names = self.translate_tools(body.get('tools'))
+        safe_to_orig = {
+            safe: (f"{info['namespace']}__{info['name']}" if info.get('namespace') else info['name'])
+            for safe, info in safe_to_target.items()
+        }
+
+        def _resolve_safe_name(orig_name: str, namespace: str | None = None) -> str:
+            ns = str(namespace or '').strip() or None
+            if (ns, orig_name) in target_to_safe:
+                return target_to_safe[(ns, orig_name)]
+            if (None, orig_name) in target_to_safe:
+                return target_to_safe[(None, orig_name)]
+            hint = f'{ns}__{orig_name}' if ns else orig_name
+            return _sanitize_tool_name(hint, set(safe_to_target))
 
         system_parts: list[str] = []
         if isinstance(body.get('instructions'), str) and body['instructions'].strip():
@@ -331,9 +399,10 @@ class AntigravityBridgeSession:
         for item in history_items:
             if isinstance(item, dict) and item.get('type') in ('function_call', 'custom_tool_call'):
                 orig_name = str(item.get('name') or '').strip()
+                orig_ns = str(item.get('namespace') or '').strip() or None
                 call_id = str(item.get('call_id') or item.get('id') or '').strip()
                 if orig_name and call_id:
-                    safe_name = orig_to_safe.get(orig_name) or _sanitize_tool_name(orig_name, set(safe_to_orig))
+                    safe_name = _resolve_safe_name(orig_name, orig_ns)
                     inline_call_names[call_id] = (orig_name, safe_name)
 
         contents: list[dict] = []
@@ -401,7 +470,8 @@ class AntigravityBridgeSession:
                 orig_name = str(item.get('name') or '').strip()
                 if not orig_name:
                     continue
-                safe_name = orig_to_safe.get(orig_name) or _sanitize_tool_name(orig_name, set(safe_to_orig))
+                orig_ns = str(item.get('namespace') or '').strip() or None
+                safe_name = _resolve_safe_name(orig_name, orig_ns)
                 call_id = str(item.get('call_id') or item.get('id') or '').strip()
                 meta = self.call_meta.get(call_id, {})
                 provider_id = meta.get('provider_id')
@@ -435,7 +505,11 @@ class AntigravityBridgeSession:
                 call_id = str(item.get('call_id') or '').strip()
                 meta = self.call_meta.get(call_id, {})
                 inlined = inline_call_names.get(call_id)
-                safe_name = meta.get('safe_name') or (inlined[1] if inlined else '') or str(item.get('name') or 'tool')
+                safe_name = (
+                    meta.get('safe_name')
+                    or (inlined[1] if inlined else '')
+                    or _resolve_safe_name(str(item.get('name') or 'tool'), item.get('namespace'))
+                )
                 provider_id = meta.get('provider_id')
                 raw_out = item.get('output')
                 images: list[tuple[str, str]] = []
@@ -488,9 +562,20 @@ class AntigravityBridgeSession:
                 tool_config = {'functionCallingConfig': {'mode': 'NONE'}}
             elif tc == 'required':
                 tool_config = {'functionCallingConfig': {'mode': 'ANY'}}
-            elif isinstance(tc, dict) and tc.get('type') == 'function' and tc.get('name'):
-                target_safe = orig_to_safe.get(tc['name'], tc['name'])
+            elif isinstance(tc, dict) and tc.get('type') in ('function', 'custom') and tc.get('name'):
+                target_safe = _resolve_safe_name(str(tc['name']).strip(), tc.get('namespace'))
                 tool_config = {'functionCallingConfig': {'mode': 'ANY', 'allowedFunctionNames': [target_safe]}}
+            elif isinstance(tc, dict) and tc.get('type') == 'allowed_tools':
+                mode_raw = str(tc.get('mode') or 'auto').lower()
+                cc_mode = 'ANY' if mode_raw == 'required' else 'NONE' if mode_raw == 'none' else 'AUTO'
+                allowed_list = []
+                for spec in tc.get('tools') or []:
+                    if isinstance(spec, dict) and spec.get('name'):
+                        allowed_list.append(_resolve_safe_name(str(spec['name']).strip(), spec.get('namespace')))
+                cfg_dict: dict = {'mode': cc_mode}
+                if allowed_list and cc_mode != 'NONE':
+                    cfg_dict['allowedFunctionNames'] = allowed_list
+                tool_config = {'functionCallingConfig': cfg_dict}
             else:
                 tool_config = {'functionCallingConfig': {'mode': 'AUTO'}}
 
@@ -519,10 +604,13 @@ class AntigravityBridgeSession:
                 gen_config['responseMimeType'] = 'application/json'
 
         sys_inst = {'parts': [{'text': '\n\n'.join(system_parts)}]} if system_parts else None
+        namespaces = sorted({info['namespace'] for info in safe_to_target.values() if info.get('namespace')})
         meta = {
             'model': model,
             'safe_to_orig': safe_to_orig,
+            'safe_to_target': safe_to_target,
             'custom_names': custom_names,
+            'namespaces': namespaces,
             'history_items': history_items,
             'tools_payload': tools_payload,
             'contents': contents,
@@ -588,6 +676,7 @@ def _evaluate_terminal_outcome(
     block_reason: str,
     has_text: bool,
     has_tool_calls: bool,
+    malformed_call_error: str = '',
 ) -> tuple[str, dict | None, dict | None]:
     """Определяет честный статус завершения Responses API из причины Cloud Code."""
     if block_reason:
@@ -595,6 +684,12 @@ def _evaluate_terminal_outcome(
             'failed',
             None,
             {'code': block_reason.lower(), 'message': f'Запрос заблокирован фильтром безопасности ({block_reason})'},
+        )
+    if malformed_call_error:
+        return (
+            'failed',
+            None,
+            {'code': 'malformed_function_call', 'message': malformed_call_error},
         )
     if finish_reason == 'MAX_TOKENS':
         return 'incomplete', {'reason': 'max_output_tokens'}, None
@@ -639,6 +734,14 @@ def _sse(event_type: str, payload: dict) -> bytes:
 
 def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, label: str = 'Agent') -> FastAPI:
     app = FastAPI(docs_url=None, openapi_url=None)
+    bridge_log = logging.getLogger('uvicorn.error')
+
+    async def _run_as_owner(awaitable):
+        tok = current_user_id.set(session.owner_id)
+        try:
+            return await awaitable
+        finally:
+            current_user_id.reset(tok)
 
     def _check_auth(request: Request) -> JSONResponse | None:
         auth = request.headers.get('authorization', '')
@@ -650,14 +753,11 @@ def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, labe
     async def _list_models(request: Request):
         if (denied := _check_auth(request)) is not None:
             return denied
-        token = current_user_id.set(session.owner_id)
         try:
-            catalog = await fetch_live_catalog()
+            catalog = await _run_as_owner(fetch_live_catalog())
         except AntigravityError as exc:
             status = exc.status_code or 502
             return JSONResponse(status_code=status, content={'error': {'message': exc.user_message, 'type': 'api_error', 'code': exc.error_status or str(status)}})
-        finally:
-            current_user_id.reset(token)
         return {
             'object': 'list',
             'data': [
@@ -681,8 +781,11 @@ def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, labe
         max_attempts = 3
         refreshed = False
         attempt = 0
+        decls_count = len(meta['tools_payload'][0].get('functionDeclarations', [])) if meta['tools_payload'] else 0
         while True:
-            token_val, project_id, cc_url, ua = await session.ensure_credentials(force_refresh=refreshed)
+            token_val, project_id, cc_url, ua = await _run_as_owner(
+                session.ensure_credentials(force_refresh=refreshed)
+            )
             envelope = build_cloudcode_envelope(
                 project_id=project_id,
                 model=meta['model'],
@@ -692,23 +795,46 @@ def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, labe
                 tool_config=meta['tool_config'],
                 generation_config=meta['gen_config'] or None,
             )
+            bridge_log.info(
+                '%s stage=cloudcode_envelope_built model=%s decls=%d has_system=%s attempt=%d',
+                label, meta['model'], decls_count, bool(meta['system_instruction']), attempt + 1,
+            )
+            t_start = time.monotonic()
             emitted_any = False
             try:
                 async for chunk in stream_generate_content(token_val, envelope, cloudcode_url=cc_url, user_agent=ua):
-                    emitted_any = True
+                    if not emitted_any:
+                        ttfb_ms = int((time.monotonic() - t_start) * 1000)
+                        bridge_log.info(
+                            '%s stage=cloudcode_response model=%s status=ok decls=%d',
+                            label, meta['model'], decls_count,
+                        )
+                        bridge_log.info(
+                            '%s stage=cloudcode_first_chunk model=%s ttfb_ms=%d',
+                            label, meta['model'], ttfb_ms,
+                        )
+                        emitted_any = True
                     yield chunk
                 return
-            except AntigravityAuthError:
+            except AntigravityAuthError as exc:
+                bridge_log.warning(
+                    '%s stage=cloudcode_response model=%s status=error http=%s code=%s retryable=%s decls=%d',
+                    label, meta['model'], exc.status_code, exc.error_status or '-', not emitted_any and not refreshed, decls_count,
+                )
                 if not emitted_any and not refreshed:
                     refreshed = True
                     continue
                 raise
             except AntigravityError as exc:
+                bridge_log.warning(
+                    '%s stage=cloudcode_response model=%s status=error http=%s code=%s retryable=%s decls=%d',
+                    label, meta['model'], exc.status_code, exc.error_status or '-', bool(exc.retryable), decls_count,
+                )
                 if emitted_any or not exc.retryable or attempt >= max_attempts - 1:
                     raise
                 attempt += 1
                 delay = exc.retry_after if exc.retry_after is not None else min(8.0, 0.8 * (2 ** (attempt - 1)))
-                logging.getLogger('uvicorn.error').warning(
+                bridge_log.warning(
                     '%s antigravity retry %d/%d (%s)', label, attempt, max_attempts, exc.status_code or exc.error_status or 'transient'
                 )
                 await asyncio.sleep(delay)
@@ -721,15 +847,36 @@ def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, labe
         except ValueError:
             return JSONResponse(status_code=400, content={'error': {'message': 'Invalid JSON', 'type': 'invalid_request_error'}})
 
-        token = current_user_id.set(session.owner_id)
+        raw_model = str(body.get('model') or '-').strip() if isinstance(body, dict) else '-'
+        bridge_log.info(
+            '%s stage=bridge_request_received model=%s stream=%s raw_tools=%d',
+            label,
+            raw_model,
+            bool(body.get('stream', False)) if isinstance(body, dict) else False,
+            len(body.get('tools') or []) if isinstance(body, dict) and isinstance(body.get('tools'), list) else 0,
+        )
+
+        tok = current_user_id.set(session.owner_id)
         try:
             meta, raw_body = session.translate_request(body)
         except AntigravityError as exc:
-            current_user_id.reset(token)
+            bridge_log.warning(
+                '%s stage=bridge_request_parsed model=%s status=error http=%s code=%s',
+                label, raw_model, exc.status_code or 400, exc.error_status or 'invalid_request',
+            )
             return JSONResponse(
                 status_code=exc.status_code or 400,
                 content={'error': {'message': exc.user_message, 'type': 'invalid_request_error', 'code': exc.error_status or 'invalid_request'}},
             )
+        finally:
+            current_user_id.reset(tok)
+
+        decls_count = len(meta['tools_payload'][0].get('functionDeclarations', [])) if meta['tools_payload'] else 0
+        tc_mode = (meta['tool_config'] or {}).get('functionCallingConfig', {}).get('mode') if meta['tool_config'] else 'NONE'
+        bridge_log.info(
+            '%s stage=bridge_request_parsed model=%s contents=%d decls=%d namespaces=%d tool_choice=%s',
+            label, meta['model'], len(meta['contents']), decls_count, len(meta['namespaces']), tc_mode,
+        )
 
         stream_mode = bool(raw_body.get('stream', False))
         resp_id = 'resp_' + uuid.uuid4().hex[:24]
@@ -745,6 +892,7 @@ def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, labe
             last_usage: dict | None = None
             finish_reason = ''
             block_reason = ''
+            malformed_call_error = ''
             has_text = False
             has_tool_calls = False
             seq = -1
@@ -844,7 +992,7 @@ def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, labe
                 pending_sig = ''
 
                 async def _process_chunk(chunk_resp: dict):
-                    nonlocal last_usage, finish_reason, block_reason, pending_sig, has_text, has_tool_calls
+                    nonlocal last_usage, finish_reason, block_reason, malformed_call_error, pending_sig, has_text, has_tool_calls
                     usage = _extract_usage(chunk_resp)
                     if usage is not None:
                         last_usage = usage
@@ -890,18 +1038,35 @@ def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, labe
                                     'content_index': 0,
                                     'delta': delta,
                                 }))
-                        elif isinstance(part.get('functionCall'), dict):
+                        elif 'functionCall' in part:
+                            fc = part.get('functionCall')
+                            if not isinstance(fc, dict):
+                                malformed_call_error = 'Модель вернула некорректный объект functionCall'
+                                continue
+                            safe_name = str(fc.get('name') or '').strip()
+                            if not safe_name:
+                                malformed_call_error = 'Модель вернула вызов инструмента без имени'
+                                continue
+                            raw_args_val = fc.get('args')
+                            if raw_args_val is not None and not isinstance(raw_args_val, dict):
+                                malformed_call_error = 'Модель вернула некорректные аргументы вызова инструмента'
+                                continue
                             has_tool_calls = True
                             if text_item_id is not None:
                                 events_out.extend(_close_text_item())
-                            fc = part['functionCall']
-                            safe_name = str(fc.get('name') or '').strip()
-                            orig_name = meta['safe_to_orig'].get(safe_name, safe_name)
-                            is_custom = orig_name in meta['custom_names']
+                            target = (meta.get('safe_to_target') or {}).get(safe_name)
+                            if target:
+                                orig_name = target['name']
+                                orig_ns = target.get('namespace')
+                                is_custom = bool(target.get('is_custom'))
+                            else:
+                                orig_name = meta['safe_to_orig'].get(safe_name, safe_name)
+                                orig_ns = None
+                                is_custom = orig_name in meta['custom_names']
                             provider_id = str(fc.get('id') or '').strip() or None
                             call_id = provider_id or ('call_' + uuid.uuid4().hex[:24])
                             fc_item_id = 'fc_' + uuid.uuid4().hex[:24]
-                            raw_args = fc.get('args') if isinstance(fc.get('args'), dict) else {}
+                            raw_args = raw_args_val if isinstance(raw_args_val, dict) else {}
 
                             sig = part_sig or pending_sig
                             pending_sig = ''
@@ -910,6 +1075,7 @@ def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, labe
                             session.call_meta[call_id] = {
                                 'provider_id': provider_id,
                                 'original_name': orig_name,
+                                'namespace': orig_ns,
                                 'safe_name': safe_name,
                                 'thought_signature': sig,
                                 'is_custom': is_custom,
@@ -925,6 +1091,8 @@ def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, labe
                                     'name': orig_name,
                                     'input': '',
                                 }
+                                if orig_ns:
+                                    fc_added['namespace'] = orig_ns
                                 fc_done = dict(fc_added, input=custom_input)
                                 output_items.append(fc_done)
                                 if stream_mode:
@@ -965,6 +1133,8 @@ def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, labe
                                     'name': orig_name,
                                     'arguments': '',
                                 }
+                                if orig_ns:
+                                    fc_added['namespace'] = orig_ns
                                 fc_done = {
                                     'id': fc_item_id,
                                     'type': 'function_call',
@@ -973,6 +1143,8 @@ def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, labe
                                     'name': orig_name,
                                     'arguments': args_json,
                                 }
+                                if orig_ns:
+                                    fc_done['namespace'] = orig_ns
                                 output_items.append(fc_done)
                                 if stream_mode:
                                     events_out.append(_sse('response.output_item.added', {
@@ -989,14 +1161,17 @@ def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, labe
                                             'output_index': out_idx,
                                             'delta': args_json,
                                         }))
-                                    events_out.append(_sse('response.function_call_arguments.done', {
+                                    args_done_ev = {
                                         'type': 'response.function_call_arguments.done',
                                         'sequence_number': next_seq(),
                                         'item_id': fc_item_id,
                                         'output_index': out_idx,
                                         'name': orig_name,
                                         'arguments': args_json,
-                                    }))
+                                    }
+                                    if orig_ns:
+                                        args_done_ev['namespace'] = orig_ns
+                                    events_out.append(_sse('response.function_call_arguments.done', args_done_ev))
                                     events_out.append(_sse('response.output_item.done', {
                                         'type': 'response.output_item.done',
                                         'sequence_number': next_seq(),
@@ -1042,11 +1217,22 @@ def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, labe
                             'item': rs_item,
                         })
 
+                bridge_log.info(
+                    '%s stage=cloudcode_finish model=%s finish_reason=%s block_reason=%s has_text=%s has_tools=%s',
+                    label, model, finish_reason or '-', block_reason or '-', has_text, has_tool_calls,
+                )
+
                 final_status, incomplete_details, err_payload = _evaluate_terminal_outcome(
                     finish_reason=finish_reason,
                     block_reason=block_reason,
                     has_text=has_text,
                     has_tool_calls=has_tool_calls,
+                    malformed_call_error=malformed_call_error,
+                )
+
+                bridge_log.info(
+                    '%s stage=responses_emitted model=%s final_status=%s output_items=%d error_code=%s',
+                    label, model, final_status, len(output_items), (err_payload or {}).get('code', '-'),
                 )
 
                 if final_status == 'failed':
@@ -1083,8 +1269,12 @@ def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, labe
                 else:
                     yield final_resp
             except AntigravityError as exc:
+                err_code = exc.error_status or str(exc.status_code or 502)
+                bridge_log.warning(
+                    '%s stage=responses_emitted model=%s final_status=failed http=%s error_code=%s',
+                    label, model, exc.status_code or 502, err_code,
+                )
                 if stream_mode and seq >= 0:
-                    err_code = exc.error_status or str(exc.status_code or 502)
                     err_obj = {'code': err_code, 'message': exc.user_message}
                     yield _sse('error', {
                         'type': 'error',
@@ -1097,8 +1287,29 @@ def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, labe
                     yield _sse('response.failed', {'type': 'response.failed', 'sequence_number': next_seq(), 'response': failed_resp})
                 else:
                     raise
-            finally:
-                current_user_id.reset(token)
+            except Exception as exc:
+                bridge_log.error(
+                    '%s stage=bridge_internal_error model=%s exc=%s',
+                    label, model, type(exc).__name__,
+                )
+                wrapped = AntigravityError(
+                    f'Внутренняя ошибка Responses-моста ({type(exc).__name__})',
+                    status_code=500,
+                    error_status='bridge_internal_error',
+                )
+                if stream_mode and seq >= 0:
+                    err_obj = {'code': 'bridge_internal_error', 'message': wrapped.user_message}
+                    yield _sse('error', {
+                        'type': 'error',
+                        'sequence_number': next_seq(),
+                        'code': 'bridge_internal_error',
+                        'message': wrapped.user_message,
+                        'param': None,
+                    })
+                    failed_resp = _make_response_obj(resp_id, model, 'failed', output_items, usage=last_usage, error=err_obj)
+                    yield _sse('response.failed', {'type': 'response.failed', 'sequence_number': next_seq(), 'response': failed_resp})
+                else:
+                    raise wrapped from None
 
         if not stream_mode:
             try:

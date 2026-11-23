@@ -8,6 +8,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import struct
@@ -59,6 +60,11 @@ _PROVIDER_CTX_KEYS = _CTX_WINDOW_KEYS + ('context', 'max_context')
 _INPUT_TOKEN_KEYS = ('max_input_tokens', 'maxInputTokens', 'input_token_limit', 'inputTokenLimit', 'max_prompt_tokens', 'input')
 _OUTPUT_TOKEN_KEYS = ('max_output_tokens', 'maxOutputTokens', 'output_token_limit', 'outputTokenLimit', 'max_completion_tokens', 'output')
 _CTX_ERROR_MARKERS = ('context_length_exceeded', 'context length', 'context window', 'maximum context', 'too many tokens', 'prompt is too long', 'input exceeds')
+_SECRET_ERR_RE = re.compile(
+    r'(Bearer\s+[A-Za-z0-9._~+/=-]+|Authorization:\s*[^\s,;]+|ya29\.[0-9A-Za-z_-]+|AIza[0-9A-Za-z_-]{16,}|sk-[A-Za-z0-9_-]{16,})',
+    re.I,
+)
+_HTTP_STATUS_RE = re.compile(r'\b(?:http(?:\s+status)?|status(?:\s+code)?)\s*[:=]?\s*([45]\d{2})\b', re.I)
 
 _CAP_CACHE: OrderedDict[tuple, tuple[float, Any]] = OrderedDict()
 
@@ -1019,9 +1025,47 @@ class TurnOutcome:
     error_kind: str | None = None
 
 
-def _extract_error_info(error_obj):
+def _sanitize_error_message(raw: str, *, limit: int = 220) -> str:
+    text = ' '.join((raw or '').split())
+    if not text:
+        return ''
+    text = _SECRET_ERR_RE.sub('[redacted]', text)
+    text = re.sub(r'(https?://[^\s?]+)\?[^\s]*', r'\1', text)
+    return text[:limit]
+
+
+def _extract_embedded_error_json(raw_msg: str) -> tuple[str | None, str | None, str]:
+    """Извлекает message/code из JSON-строки (или суффикса с JSON) без раскрытия секретов."""
+    txt = (raw_msg or '').strip()
+    if not txt:
+        return None, None, ''
+    prefix = ''
+    idx = txt.find('{')
+    if idx > 0:
+        prefix = txt[:idx].strip().rstrip(':').strip()
+        candidate = txt[idx:]
+    elif idx == 0:
+        candidate = txt
+    else:
+        return None, None, txt
+    try:
+        parsed = json.loads(candidate)
+    except ValueError:
+        return None, None, txt
+    if isinstance(parsed, dict) and isinstance(parsed.get('error'), dict):
+        parsed = parsed['error']
+    if not isinstance(parsed, dict):
+        return None, None, txt
+    nested_msg = parsed.get('message') if isinstance(parsed.get('message'), str) else ''
+    nested_code = parsed.get('code') or parsed.get('status') or parsed.get('type')
+    code_str = re.sub(r'[^a-zA-Z0-9_.:-]', '', str(nested_code))[:64] if nested_code else None
+    combined = nested_msg or prefix or txt
+    return code_str, None, combined
+
+
+def _extract_error_details(error_obj) -> dict:
     if error_obj is None:
-        return None, None
+        return {'kind': None, 'status_code': None, 'code': None, 'message': ''}
     info = _field(error_obj, 'codex_error_info', 'codexErrorInfo')
     inner = _field(info, 'root') or info
     kind = None
@@ -1038,32 +1082,92 @@ def _extract_error_info(error_obj):
             nested = next(iter(inner.values()))
             if isinstance(nested, dict):
                 status_code = nested.get('http_status_code') or nested.get('httpStatusCode')
+
+    raw_msg = _field(inner, 'message') or _field(error_obj, 'message') or ''
+    if not isinstance(raw_msg, str):
+        raw_msg = ''
+    code, _, unpacked_msg = _extract_embedded_error_json(raw_msg)
+    if code is None:
+        raw_code = _field(inner, 'code') or _field(error_obj, 'code')
+        if raw_code is not None:
+            code = re.sub(r'[^a-zA-Z0-9_.:-]', '', str(raw_code))[:64] or None
+
+    additional = _field(error_obj, 'additional_details', 'additionalDetails')
+    if not unpacked_msg and isinstance(additional, str):
+        unpacked_msg = additional
+
+    if status_code is None and unpacked_msg:
+        match = _HTTP_STATUS_RE.search(unpacked_msg)
+        if match:
+            try:
+                status_code = int(match.group(1))
+            except ValueError:
+                status_code = None
+
+    safe_msg = _sanitize_error_message(unpacked_msg)
     if kind != 'contextWindowExceeded':
-        msg = _field(inner, 'message') or _field(error_obj, 'message')
-        if status_code == 413 or (type(msg) is str and any(m in msg.lower() for m in _CTX_ERROR_MARKERS)):
+        if status_code == 413 or (safe_msg and any(m in safe_msg.lower() for m in _CTX_ERROR_MARKERS)):
             kind = 'contextWindowExceeded'
-    return kind, status_code
+    return {
+        'kind': kind,
+        'status_code': status_code,
+        'code': code,
+        'message': safe_msg,
+    }
+
+
+def _extract_error_info(error_obj):
+    details = _extract_error_details(error_obj)
+    return details['kind'], details['status_code']
+
+
+def _is_generic_turn_error(label: str, detail: str | None) -> bool:
+    return not detail or detail == f'{label}: агент не завершил работу'
 
 
 def format_turn_error(label: str, turn_obj) -> str:
     error_obj = getattr(turn_obj, 'error', None)
-    kind, status_code = _extract_error_info(error_obj)
+    details = _extract_error_details(error_obj)
+    kind = details['kind']
+    status_code = details['status_code']
+    code = details['code']
+    safe_msg = details['message']
+    code_suffix = f', {code}' if code and (not safe_msg or code not in safe_msg) else ''
+    msg_suffix = f': {safe_msg}' if safe_msg else ''
+
+    if status_code == 400 or kind == 'badRequest':
+        return f'{label}: провайдер отклонил запрос (HTTP 400{code_suffix}){msg_suffix}'
     if status_code == 401 or kind == 'unauthorized':
-        return f'{label}: провайдер отклонил авторизацию (HTTP 401)'
+        return f'{label}: провайдер отклонил авторизацию (HTTP 401{code_suffix}){msg_suffix}'
     if status_code == 402:
-        return f'{label}: недостаточно средств или исчерпан баланс ключа (HTTP 402)'
+        return f'{label}: недостаточно средств или исчерпан баланс ключа (HTTP 402{code_suffix})'
     if status_code == 403:
-        return f'{label}: провайдер запретил доступ к модели или аккаунту (HTTP 403)'
+        return f'{label}: провайдер запретил доступ к модели или аккаунту (HTTP 403{code_suffix}){msg_suffix}'
     if status_code == 404 or kind == 'modelNotFound':
-        return f'{label}: провайдер не нашёл запрошенную модель или endpoint (HTTP 404)'
-    if status_code == 429 or kind == 'usageLimitExceeded':
-        return f'{label}: превышен лимит запросов или квота (HTTP 429)'
-    if status_code == 503:
-        return f'{label}: AI-сервис временно недоступен (HTTP 503)'
+        return f'{label}: провайдер не нашёл запрошенную модель или endpoint (HTTP 404{code_suffix})'
+    if status_code == 429 or kind in ('usageLimitExceeded', 'rateLimitExceeded'):
+        return f'{label}: превышен лимит запросов или квота (HTTP 429{code_suffix}){msg_suffix}'
+    if status_code in (500, 502, 504) or kind == 'internalServerError':
+        http_part = f'HTTP {status_code}' if status_code else 'internal_server_error'
+        return f'{label}: ошибка модельного сервиса ({http_part}{code_suffix}){msg_suffix}'
+    if status_code == 503 or kind == 'serverOverloaded':
+        return f'{label}: AI-сервис временно недоступен (HTTP 503{code_suffix})'
     if kind in ('httpConnectionFailed', 'responseStreamConnectionFailed', 'responseStreamDisconnected'):
+        if safe_msg:
+            return f'{label}: сбой потока или соединения с провайдером{msg_suffix}'
         return f'{label}: ошибка соединения с модельным провайдером'
     if kind == 'contextWindowExceeded':
         return f'{label}: превышен контекст модели'
+    if kind == 'sessionBudgetExceeded':
+        return f'{label}: превышен бюджет токенов сессии'
+    if kind == 'sandboxError':
+        return f'{label}: ошибка изолированной среды выполнения{msg_suffix}'
+    if safe_msg:
+        return f'{label}: {safe_msg}'
+    if code:
+        return f'{label}: ошибка генерации ({code})'
+    if kind and kind != 'other':
+        return f'{label}: ошибка генерации ({kind})'
     return f'{label}: агент не завершил работу'
 
 
@@ -1123,6 +1227,12 @@ async def run_codex_turn(
     turn_status = ''
     error_detail = None
     error_kind = None
+    first_error_detail = None
+    first_error_kind = None
+    last_retry_error_detail = None
+    last_retry_error_kind = None
+    codex_response_accepted = False
+    tool_calls_count = 0
     usage = {'input_tokens': 0, 'output_tokens': 0}
     last_usage = None
     runtime_context_window = None
@@ -1147,7 +1257,12 @@ async def run_codex_turn(
         last_item_type = ''
 
         async def consume():
-            nonlocal summary_text, fallback_text, last_delta_id, completed, turn_status, error_detail, error_kind, usage, last_usage, runtime_context_window, compacted, idle_since, last_method, last_item_type
+            nonlocal summary_text, fallback_text, last_delta_id, completed, turn_status
+            nonlocal error_detail, error_kind, first_error_detail, first_error_kind
+            nonlocal last_retry_error_detail, last_retry_error_kind
+            nonlocal codex_response_accepted, tool_calls_count
+            nonlocal usage, last_usage, runtime_context_window, compacted, idle_since
+            nonlocal last_method, last_item_type
             async for event in turn.stream():
                 method = event.method
                 last_method = method
@@ -1164,6 +1279,16 @@ async def run_codex_turn(
                     item = data.item.root if hasattr(data.item, 'root') else data.item
                     item_type = getattr(getattr(item, 'type', None), 'value', getattr(item, 'type', None))
                     last_item_type = str(item_type or '')
+                    if not codex_response_accepted and last_item_type in (
+                        'agentMessage', 'reasoning', 'mcpToolCall', 'commandExecution', 'fileChange', 'webSearch', 'customToolCall',
+                    ):
+                        codex_response_accepted = True
+                        logging.getLogger('uvicorn.error').info(
+                            '%s: stage=codex_response_accepted model=%s first_item=%s',
+                            label, active_model or '-', last_item_type,
+                        )
+                    if method == 'item/started' and last_item_type == 'mcpToolCall':
+                        tool_calls_count += 1
                     phase = getattr(getattr(item, 'phase', None), 'value', getattr(item, 'phase', None))
                     item_id = getattr(item, 'id', None)
                     if method == 'item/started':
@@ -1263,23 +1388,67 @@ async def run_codex_turn(
                         if callable(adapter.on_token_usage):
                             adapter.on_token_usage(last_usage=last_usage, total_usage=usage, context_window=runtime_context_window)
                 elif method == 'error':
-                    kind, status_code = _extract_error_info(getattr(data, 'error', None))
+                    details = _extract_error_details(getattr(data, 'error', None))
+                    kind = details['kind']
+                    status_code = details['status_code']
+                    err_code = details['code']
                     will_retry = getattr(data, 'will_retry', getattr(data, 'willRetry', None))
                     logging.getLogger('uvicorn.error').warning(
-                        '%s: codex stream error (kind=%s, status=%s, retry=%s)',
-                        label, kind, status_code, will_retry,
+                        '%s: stage=codex_error model=%s type=%s kind=%s http=%s code=%s retry=%s',
+                        label, active_model or '-', 'stream_error', kind or '-', status_code or '-', err_code or '-', will_retry,
                     )
-                    if will_retry is False and not error_detail:
-                        error_detail = format_turn_error(label, data)
-                        error_kind = kind
+                    formatted = format_turn_error(label, data)
+                    if will_retry is False:
+                        if _is_generic_turn_error(label, first_error_detail) and not _is_generic_turn_error(label, formatted):
+                            first_error_detail = formatted
+                        elif first_error_detail is None:
+                            first_error_detail = formatted
+                        if first_error_kind in (None, 'other') and kind:
+                            first_error_kind = kind
+                    elif not _is_generic_turn_error(label, formatted):
+                        last_retry_error_detail = formatted
+                        if last_retry_error_kind in (None, 'other') and kind:
+                            last_retry_error_kind = kind
                 elif method == 'turn/completed':
                     turn_status = getattr(getattr(data.turn, 'status', None), 'value', None) or str(getattr(data.turn, 'status', ''))
                     completed = turn_status == 'completed'
                     if not completed:
-                        error_detail = format_turn_error(label, data.turn)
-                        turn_kind, _ = _extract_error_info(getattr(data.turn, 'error', None))
-                        if turn_kind:
-                            error_kind = turn_kind
+                        turn_details = _extract_error_details(getattr(data.turn, 'error', None))
+                        turn_formatted = format_turn_error(label, data.turn)
+                        turn_kind = turn_details['kind']
+                        # Сохраняем первую содержательную ошибку; не затираем её общим fallback из turn/completed.
+                        candidates = [
+                            (first_error_detail, first_error_kind),
+                            (turn_formatted, turn_kind),
+                            (last_retry_error_detail, last_retry_error_kind),
+                        ]
+                        chosen_detail = None
+                        chosen_kind = None
+                        for cand_detail, cand_kind in candidates:
+                            if not _is_generic_turn_error(label, cand_detail):
+                                chosen_detail = cand_detail
+                                chosen_kind = cand_kind
+                                break
+                        if chosen_detail is None:
+                            chosen_detail = first_error_detail or turn_formatted or last_retry_error_detail
+                            chosen_kind = first_error_kind or turn_kind or last_retry_error_kind
+                        error_detail = chosen_detail
+                        error_kind = chosen_kind if chosen_kind not in (None, 'other') else (first_error_kind or turn_kind or last_retry_error_kind)
+                        logging.getLogger('uvicorn.error').warning(
+                            '%s: stage=agent_turn_finished model=%s status=%s kind=%s http=%s code=%s tools_called=%d',
+                            label,
+                            active_model or '-',
+                            turn_status or '-',
+                            error_kind or '-',
+                            turn_details['status_code'] or '-',
+                            turn_details['code'] or '-',
+                            tool_calls_count,
+                        )
+                    else:
+                        logging.getLogger('uvicorn.error').info(
+                            '%s: stage=agent_turn_finished model=%s status=%s tools_called=%d',
+                            label, active_model or '-', turn_status or 'completed', tool_calls_count,
+                        )
                     break
 
         async def watchdog():

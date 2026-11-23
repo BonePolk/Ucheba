@@ -5,6 +5,8 @@ from pathlib import Path
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
+from typing import Literal
 import unittest
 from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs, urlsplit
@@ -12,6 +14,7 @@ from urllib.parse import parse_qs, urlsplit
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 import httpx
+from pydantic import BaseModel
 from sqlalchemy import create_engine
 from sqlmodel import Session
 
@@ -19,13 +22,82 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / 'backend')]
 
 from common import antigravity, antigravity_bridge, codex_harness, database, settings as settings_mod
+from common.agent_issues import ISSUE_TOOL
+from common.agent_memory import MEMORY_TOOLS
+from common.agent_questions import QUESTION_TOOL
+from common.browser_tools import BROWSER_TOOLS
+from common.file_tools import FILE_TOOLS
 from common.identity import current_user_id
 from common.models.integration import IntegrationSetting
 from common.models.user import SystemSetting, User
+from common.progress import NOTE_TOOL
 from common.security import decrypt, encrypt
 from common.settings import public_settings, read_settings, resolve_agent_auth, save_settings
 from integrations import antigravity as backend_ag
 from routers import integrations as integrations_router, users as users_router
+
+
+class _StrausEventInput(BaseModel):
+    model_config = {'extra': 'forbid'}
+    id: str
+    title: str
+    summary: str
+    task_id: int | None
+    date: str
+    start: str
+    end: str
+    kind: Literal['task', 'busy', 'sleep', 'meal', 'break', 'work']
+    repeat_unit: Literal['none', 'day', 'week', 'month']
+    repeat_interval: int
+    repeat_count: int | None
+    week_pattern: Literal['all', 'even', 'odd']
+    parity_anchor: str | None
+
+
+class _StrausSaveEvents(BaseModel):
+    model_config = {'extra': 'forbid'}
+    events: list[_StrausEventInput]
+
+
+def _make_straus_tools() -> list[dict]:
+    def _t(name, desc, props, req=None):
+        return {
+            'type': 'function',
+            'name': name,
+            'description': desc,
+            'strict': True,
+            'parameters': {
+                'type': 'object',
+                'properties': props,
+                'required': list(props) if req is None else req,
+                'additionalProperties': False,
+            },
+        }
+
+    return [
+        QUESTION_TOOL,
+        NOTE_TOOL,
+        ISSUE_TOOL,
+        *MEMORY_TOOLS,
+        *FILE_TOOLS,
+        *BROWSER_TOOLS,
+        _t(
+            'calendar_finish',
+            'Завершить поручение.',
+            {'status': {'type': 'string', 'enum': ['changed', 'unchanged', 'blocked']}, 'reason': {'type': 'string'}},
+            ['status', 'reason'],
+        ),
+        _t('calendar_list', 'Прочитать события календаря.', {}, []),
+        {
+            'type': 'function',
+            'name': 'calendar_save_events',
+            'strict': True,
+            'description': 'Добавить или изменить события.',
+            'parameters': _StrausSaveEvents.model_json_schema(),
+        },
+        _t('calendar_remove_events', 'Удалить события.', {'ids': {'type': 'array', 'items': {'type': 'string'}}}, ['ids']),
+        _t('calendar_timezone', 'Изменить часовой пояс.', {'timezone': {'type': 'string'}}, ['timezone']),
+    ]
 
 
 class AntigravityOAuthAndUrlHardeningTests(unittest.TestCase):
@@ -390,8 +462,22 @@ class AntigravityBridgeTests(unittest.TestCase):
         app = antigravity_bridge.create_bridge_app(session, 'bridge-secret', label='Arrodes')
         client = TestClient(app)
 
+        # MAX_TOKENS завершается как response.incomplete (никогда не response.completed).
+        async def _stream_max_tokens(tok, env, **kwargs):
+            yield {'candidates': [{'content': {'parts': [{'text': 'обрыв'}]}, 'finishReason': 'MAX_TOKENS'}]}
+
+        with patch('common.antigravity_bridge.stream_generate_content', side_effect=_stream_max_tokens):
+            with client.stream(
+                'POST',
+                '/v1/responses',
+                headers={'Authorization': 'Bearer bridge-secret'},
+                json={'model': 'gemini-4-neon-low', 'input': 'test', 'stream': True},
+            ) as resp:
+                sse_inc = b''.join(resp.iter_bytes()).decode('utf-8')
+            self.assertNotIn('response.completed', sse_inc)
+            self.assertIn('response.incomplete', sse_inc)
+
         scenarios = [
-            [{'candidates': [{'content': {'parts': [{'text': 'обрыв'}]}, 'finishReason': 'MAX_TOKENS'}]}],
             [{'candidates': [{'content': {'parts': []}, 'finishReason': 'SAFETY'}]}],
             [{'candidates': [{'content': {'parts': []}, 'finishReason': 'MALFORMED_FUNCTION_CALL'}]}],
             [{'promptFeedback': {'blockReason': 'PROHIBITED_CONTENT'}, 'candidates': []}],
@@ -518,6 +604,429 @@ class AntigravityBridgeTests(unittest.TestCase):
                 json={'model': 'gemini-4-neon-low', 'input': 'hi', 'stream': True},
             )
         self.assertEqual(resp_err.status_code, 429)
+
+
+class AntigravityStrausRegressionTests(unittest.TestCase):
+    """Регрессионные тесты A–I для падения Straus с нативным Antigravity и gemini-4-neon-xhigh."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.env_patch = patch.dict(
+            'os.environ',
+            {
+                'INTEGRATION_ENCRYPTION_KEY': 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+                'UCHEBA_BRIDGE_STATE_DIR': self.tmpdir.name,
+            },
+        )
+        self.env_patch.start()
+
+    def tearDown(self):
+        self.env_patch.stop()
+        self.tmpdir.cleanup()
+
+    def test_scenario_a_text_generation_gemini_4_neon_xhigh_streaming_context_safe(self):
+        session = antigravity_bridge.AntigravityBridgeSession(owner_id=42)
+        session.access_token = 'tok-a'
+        session.token_expires_at = time.time() + 3600
+        session.project_id = 'projects/demo-a'
+        app = antigravity_bridge.create_bridge_app(session, 'bridge-secret', label='Straus')
+        client = TestClient(app)
+
+        async def _text_stream(tok, env, **kwargs):
+            # Убеждаемся, что SSE-итерация не зависит от незакрытого ContextVar между задачами anyio.
+            yield {'candidates': [{'content': {'parts': [{'text': 'Привет, '}]}}]}
+            yield {
+                'candidates': [{'content': {'parts': [{'text': 'календарь готов.'}]}, 'finishReason': 'STOP'}],
+                'usageMetadata': {'promptTokenCount': 20, 'candidatesTokenCount': 5, 'totalTokenCount': 25},
+            }
+
+        with patch('common.antigravity_bridge.stream_generate_content', side_effect=_text_stream):
+            with client.stream(
+                'POST',
+                '/v1/responses',
+                headers={'Authorization': 'Bearer bridge-secret'},
+                json={
+                    'model': 'gemini-4-neon-xhigh',
+                    'instructions': 'Ты Straus.',
+                    'input': [{'type': 'message', 'role': 'user', 'content': 'Скажи привет'}],
+                    'stream': True,
+                },
+            ) as resp:
+                self.assertEqual(resp.status_code, 200)
+                sse = b''.join(resp.iter_bytes()).decode('utf-8')
+        self.assertIn('response.created', sse)
+        self.assertIn('response.output_text.done', sse)
+        self.assertIn('response.completed', sse)
+        self.assertIn('Привет, календарь готов.', sse)
+
+    def test_scenario_b_full_straus_namespace_tools_and_schema_sanitization(self):
+        session = antigravity_bridge.AntigravityBridgeSession(owner_id=1)
+        straus_tools = _make_straus_tools()
+        raw_tools = [{'type': 'namespace', 'name': 'mcp__ucheba', 'description': 'Ucheba MCP', 'tools': straus_tools}]
+        meta, _ = session.translate_request({
+            'model': 'gemini-4-neon-xhigh',
+            'input': 'Проверь календарь',
+            'tools': raw_tools,
+            'tool_choice': {'type': 'allowed_tools', 'mode': 'auto', 'tools': [{'type': 'function', 'namespace': 'mcp__ucheba', 'name': 'calendar_list'}]},
+        })
+        decls = meta['tools_payload'][0]['functionDeclarations']
+        self.assertEqual(len(decls), len(straus_tools))
+        self.assertEqual(meta['namespaces'], ['mcp__ucheba'])
+        self.assertEqual(
+            meta['tool_config'],
+            {'functionCallingConfig': {'mode': 'AUTO', 'allowedFunctionNames': ['mcp__ucheba__calendar_list']}},
+        )
+
+        # Проверяем отсутствие запрещённых Gemini элементов во всех 49 схемах (вкл. SaveEvents, python_http_request, таблицы).
+        def _walk(node, path, *, is_root=False):
+            if not isinstance(node, dict):
+                return
+            forbidden = {'$defs', 'definitions', '$ref', 'additionalProperties', 'anyOf', 'oneOf', 'allOf', 'const'} & set(node)
+            self.assertFalse(forbidden, f'Forbidden keys {forbidden} at {path}')
+            if not is_root and node.get('type') == 'OBJECT':
+                self.assertTrue(node.get('properties'), f'Nested empty OBJECT at {path}')
+            if 'enum' in node:
+                self.assertEqual(node.get('type'), 'STRING', f'Non-string enum at {path}')
+                self.assertTrue(all(isinstance(v, str) and v != '' for v in node['enum']), f'Empty string in enum at {path}')
+            for k, v in (node.get('properties') or {}).items():
+                _walk(v, f'{path}.{k}', is_root=False)
+            if 'items' in node:
+                _walk(node['items'], f'{path}[]', is_root=False)
+
+        for d in decls:
+            if 'parameters' in d:
+                _walk(d['parameters'], d['name'], is_root=True)
+
+        http_decl = next(d for d in decls if d['name'].endswith('python_http_request'))
+        ct_schema = http_decl['parameters']['properties']['content_type']
+        self.assertNotIn('enum', ct_schema)
+        self.assertIn('application/json', ct_schema.get('description', ''))
+
+    def test_scenario_c_cloudcode_http_400_object_and_array_error(self):
+        err_obj = antigravity._cloudcode_http_error(
+            400,
+            json.dumps({'error': {'code': 400, 'status': 'INVALID_ARGUMENT', 'message': 'Invalid function declaration'}}).encode('utf-8'),
+            '/v1internal:streamGenerateContent',
+        )
+        self.assertEqual(err_obj.status_code, 400)
+        self.assertEqual(err_obj.error_status, 'INVALID_ARGUMENT')
+        self.assertIn('Invalid function declaration', err_obj.user_message)
+
+        err_arr = antigravity._cloudcode_http_error(
+            400,
+            json.dumps([{'error': {'code': 400, 'status': 'INVALID_ARGUMENT', 'message': 'Bad field in schema Bearer secret-tok'}}]).encode('utf-8'),
+            '/v1internal:streamGenerateContent',
+        )
+        self.assertEqual(err_arr.status_code, 400)
+        self.assertEqual(err_arr.error_status, 'INVALID_ARGUMENT')
+        self.assertNotIn('secret-tok', err_arr.user_message)
+
+        session = antigravity_bridge.AntigravityBridgeSession(owner_id=1)
+        session.access_token = 'tok-1'
+        session.token_expires_at = time.time() + 3600
+        session.project_id = 'projects/demo'
+        client = TestClient(antigravity_bridge.create_bridge_app(session, 'sec', label='Straus'))
+
+        async def _fail_400(tok, env, **kwargs):
+            raise err_obj
+            yield {}
+
+        with patch('common.antigravity_bridge.stream_generate_content', side_effect=_fail_400):
+            resp = client.post(
+                '/v1/responses',
+                headers={'Authorization': 'Bearer sec'},
+                json={'model': 'gemini-4-neon-xhigh', 'input': 'test', 'stream': True},
+            )
+        self.assertEqual(resp.status_code, 400)
+        payload = resp.json()
+        self.assertEqual(payload['error']['code'], 'INVALID_ARGUMENT')
+        msg = codex_harness.format_turn_error(
+            'Straus',
+            SimpleNamespace(error={'message': json.dumps(payload), 'codexErrorInfo': 'other'}),
+        )
+        self.assertIn('HTTP 400', msg)
+        self.assertIn('Invalid function declaration', msg)
+
+    def test_scenario_d_bridge_returns_response_failed_on_terminal_error(self):
+        session = antigravity_bridge.AntigravityBridgeSession(owner_id=1)
+        session.access_token = 'tok-1'
+        session.token_expires_at = time.time() + 3600
+        session.project_id = 'projects/demo'
+        client = TestClient(antigravity_bridge.create_bridge_app(session, 'sec', label='Straus'))
+
+        async def _safety_stream(tok, env, **kwargs):
+            yield {'candidates': [{'content': {'parts': [{'text': 'partial'}]}, 'finishReason': 'SAFETY'}]}
+
+        with patch('common.antigravity_bridge.stream_generate_content', side_effect=_safety_stream):
+            with client.stream(
+                'POST',
+                '/v1/responses',
+                headers={'Authorization': 'Bearer sec'},
+                json={'model': 'gemini-4-neon-xhigh', 'input': 'test', 'stream': True},
+            ) as resp:
+                sse = b''.join(resp.iter_bytes()).decode('utf-8')
+        self.assertNotIn('response.completed', sse)
+        self.assertIn('response.failed', sse)
+        self.assertIn('SAFETY', sse)
+
+    def test_scenario_e_run_codex_turn_preserves_first_error_before_turn_completed(self):
+        class _FakeProgress:
+            def __init__(self):
+                self.record = {'events': []}
+                self.events = []
+
+            def begin_response(self): pass
+            def update(self, **kw): self.record.update(kw)
+            def add(self, msg, **kw): self.events.append(msg)
+            def reasoning_delta(self, *a): pass
+            def summary(self, *a): return ''
+
+        class _FakeTurn:
+            async def stream(self):
+                yield SimpleNamespace(
+                    method='error',
+                    payload=SimpleNamespace(
+                        will_retry=False,
+                        error={
+                            'message': '{"error":{"message":"Cloud Code HTTP 400: unsupported schema","code":"INVALID_ARGUMENT"}}',
+                            'codex_error_info': 'other',
+                        },
+                    ),
+                )
+                yield SimpleNamespace(
+                    method='turn/completed',
+                    payload=SimpleNamespace(
+                        turn=SimpleNamespace(
+                            status='failed',
+                            error={'message': '', 'codex_error_info': 'other'},
+                        ),
+                    ),
+                )
+
+        class _FakeThread:
+            model = 'gemini-4-neon-xhigh'
+
+            async def turn(self, *args, **kwargs):
+                return _FakeTurn()
+
+        outcome = asyncio.run(
+            codex_harness.run_codex_turn(
+                _FakeThread(),
+                'Проверь календарь',
+                label='Straus',
+                progress=_FakeProgress(),
+                effort='medium',
+            )
+        )
+        self.assertFalse(outcome.completed)
+        self.assertEqual(outcome.status, 'failed')
+        self.assertNotEqual(outcome.error_detail, 'Straus: агент не завершил работу')
+        self.assertIn('HTTP 400', outcome.error_detail)
+        self.assertIn('INVALID_ARGUMENT', outcome.error_detail)
+        self.assertIn('unsupported schema', outcome.error_detail)
+
+    def test_scenario_f_calendar_list_then_calendar_finish_namespace_roundtrip(self):
+        session = antigravity_bridge.AntigravityBridgeSession(owner_id=1)
+        session.access_token = 'tok-1'
+        session.token_expires_at = time.time() + 3600
+        session.project_id = 'projects/demo'
+        client = TestClient(antigravity_bridge.create_bridge_app(session, 'sec', label='Straus'))
+
+        tools_ns = [{'type': 'namespace', 'name': 'mcp__ucheba', 'tools': _make_straus_tools()}]
+        captured_envelopes = []
+
+        async def _calendar_flow(tok, env, **kwargs):
+            captured_envelopes.append(env)
+            if len(captured_envelopes) == 1:
+                yield {
+                    'candidates': [{
+                        'content': {
+                            'parts': [{'functionCall': {'id': 'fc_cal_1', 'name': 'mcp__ucheba__calendar_list', 'args': {}}}]
+                        },
+                        'finishReason': 'STOP',
+                    }]
+                }
+            else:
+                yield {
+                    'candidates': [{
+                        'content': {
+                            'parts': [{
+                                'functionCall': {
+                                    'id': 'fc_cal_2',
+                                    'name': 'mcp__ucheba__calendar_finish',
+                                    'args': {'status': 'unchanged', 'reason': 'Календарь уже актуален'},
+                                }
+                            }]
+                        },
+                        'finishReason': 'STOP',
+                    }]
+                }
+
+        with patch('common.antigravity_bridge.stream_generate_content', side_effect=_calendar_flow):
+            with client.stream(
+                'POST',
+                '/v1/responses',
+                headers={'Authorization': 'Bearer sec'},
+                json={'model': 'gemini-4-neon-xhigh', 'input': 'Проверь расписание', 'tools': tools_ns, 'stream': True},
+            ) as resp1:
+                self.assertEqual(resp1.status_code, 200)
+                sse1 = b''.join(resp1.iter_bytes()).decode('utf-8')
+
+        completed1 = None
+        for block in sse1.strip().split('\n\n'):
+            if block.startswith('event: response.completed'):
+                data_ln = [ln[5:].strip() for ln in block.splitlines() if ln.startswith('data:')][0]
+                completed1 = json.loads(data_ln)['response']
+        self.assertIsNotNone(completed1)
+        fc1 = completed1['output'][0]
+        self.assertEqual(fc1['namespace'], 'mcp__ucheba')
+        self.assertEqual(fc1['name'], 'calendar_list')
+
+        with patch('common.antigravity_bridge.stream_generate_content', side_effect=_calendar_flow):
+            with client.stream(
+                'POST',
+                '/v1/responses',
+                headers={'Authorization': 'Bearer sec'},
+                json={
+                    'model': 'gemini-4-neon-xhigh',
+                    'tools': tools_ns,
+                    'stream': True,
+                    'input': [
+                        {'type': 'message', 'role': 'user', 'content': 'Проверь расписание'},
+                        fc1,
+                        {'type': 'function_call_output', 'call_id': fc1['call_id'], 'output': json.dumps({'events': [], 'timezone': 'UTC'})},
+                    ],
+                },
+            ) as resp2:
+                self.assertEqual(resp2.status_code, 200)
+                sse2 = b''.join(resp2.iter_bytes()).decode('utf-8')
+
+        completed2 = None
+        for block in sse2.strip().split('\n\n'):
+            if block.startswith('event: response.completed'):
+                data_ln = [ln[5:].strip() for ln in block.splitlines() if ln.startswith('data:')][0]
+                completed2 = json.loads(data_ln)['response']
+        self.assertIsNotNone(completed2)
+        fc2 = completed2['output'][0]
+        self.assertEqual(fc2['namespace'], 'mcp__ucheba')
+        self.assertEqual(fc2['name'], 'calendar_finish')
+        self.assertEqual(json.loads(fc2['arguments'])['status'], 'unchanged')
+        user_parts2 = [p for c in captured_envelopes[1]['request']['contents'] if c['role'] == 'user' for p in c['parts']]
+        fr_parts2 = [p['functionResponse'] for p in user_parts2 if 'functionResponse' in p]
+        self.assertEqual(fr_parts2[0]['name'], 'mcp__ucheba__calendar_list')
+
+    def test_scenario_g_malformed_function_call(self):
+        session = antigravity_bridge.AntigravityBridgeSession(owner_id=1)
+        session.access_token = 'tok-1'
+        session.token_expires_at = time.time() + 3600
+        session.project_id = 'projects/demo'
+        client = TestClient(antigravity_bridge.create_bridge_app(session, 'sec', label='Straus'))
+
+        bad_sequences = [
+            [{'candidates': [{'content': {'parts': [{'functionCall': {'name': '', 'args': {}}}]}, 'finishReason': 'STOP'}]}],
+            [{'candidates': [{'content': {'parts': [{'functionCall': {'name': 'calendar_list', 'args': 'not-a-dict'}}]}, 'finishReason': 'STOP'}]}],
+            [{'candidates': [{'content': {'parts': []}, 'finishReason': 'MALFORMED_FUNCTION_CALL'}]}],
+        ]
+        for seq in bad_sequences:
+            async def _bad_fc(tok, env, items=seq, **kwargs):
+                for item in items:
+                    yield item
+
+            with patch('common.antigravity_bridge.stream_generate_content', side_effect=_bad_fc):
+                with client.stream(
+                    'POST',
+                    '/v1/responses',
+                    headers={'Authorization': 'Bearer sec'},
+                    json={'model': 'gemini-4-neon-xhigh', 'input': 'test', 'stream': True},
+                ) as resp:
+                    sse = b''.join(resp.iter_bytes()).decode('utf-8')
+            self.assertNotIn('response.completed', sse)
+            self.assertIn('response.failed', sse)
+            self.assertIn('malformed_function_call', sse)
+
+    def test_scenario_h_cloudcode_http_200_invalid_sse(self):
+        class _FakeStreamResp:
+            def __init__(self, lines):
+                self.status_code = 200
+                self.is_success = True
+                self.headers = {}
+                self._lines = lines
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def aiter_lines(self):
+                for ln in self._lines:
+                    yield ln
+
+        class _FakeClient:
+            def __init__(self, lines):
+                self._lines = lines
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            def stream(self, *args, **kwargs):
+                return _FakeStreamResp(self._lines)
+
+        for bad_lines in (['data: {broken json', ''], ['<html>not sse</html>']):
+            with patch('common.antigravity.httpx.AsyncClient', return_value=_FakeClient(bad_lines)):
+                async def _consume():
+                    out = []
+                    async for ev in antigravity.stream_generate_content('tok', {'request': {'contents': []}}):
+                        out.append(ev)
+                    return out
+
+                with self.assertRaises(antigravity.AntigravityError) as ctx:
+                    asyncio.run(_consume())
+                self.assertEqual(ctx.exception.error_status, 'INVALID_SSE')
+
+    def test_scenario_i_text_vs_tools_failure_localization(self):
+        session = antigravity_bridge.AntigravityBridgeSession(owner_id=1)
+        session.access_token = 'tok-secret-never-logged'
+        session.token_expires_at = time.time() + 3600
+        session.project_id = 'projects/demo'
+        client = TestClient(antigravity_bridge.create_bridge_app(session, 'sec', label='Straus'))
+
+        async def _ok_without_tools_fail_with_tools(tok, env, **kwargs):
+            tools = env['request'].get('tools') or []
+            if not tools:
+                yield {'candidates': [{'content': {'parts': [{'text': 'Текст без инструментов'}]}, 'finishReason': 'STOP'}]}
+                return
+            raise antigravity.AntigravityError(
+                'Cloud Code HTTP 400 (INVALID_ARGUMENT): bad tool schema',
+                status_code=400,
+                error_status='INVALID_ARGUMENT',
+            )
+
+        tools_ns = [{'type': 'namespace', 'name': 'mcp__ucheba', 'tools': _make_straus_tools()}]
+        with self.assertLogs('uvicorn.error', level='INFO') as logs:
+            with patch('common.antigravity_bridge.stream_generate_content', side_effect=_ok_without_tools_fail_with_tools):
+                r_text = client.post(
+                    '/v1/responses',
+                    headers={'Authorization': 'Bearer sec'},
+                    json={'model': 'gemini-4-neon-xhigh', 'input': 'Привет', 'stream': False},
+                )
+                r_tools = client.post(
+                    '/v1/responses',
+                    headers={'Authorization': 'Bearer sec'},
+                    json={'model': 'gemini-4-neon-xhigh', 'input': 'Календарь', 'tools': tools_ns, 'stream': True},
+                )
+        self.assertEqual(r_text.status_code, 200)
+        self.assertEqual(r_tools.status_code, 400)
+        joined = '\n'.join(logs.output)
+        self.assertNotIn('tok-secret-never-logged', joined)
+        self.assertIn('stage=bridge_request_received', joined)
+        self.assertIn('stage=cloudcode_envelope_built', joined)
+        self.assertIn('decls=0', joined)
+        self.assertIn('decls=49', joined)
+        self.assertIn('stage=cloudcode_response model=gemini-4-neon-xhigh status=error http=400 code=INVALID_ARGUMENT', joined)
 
 
 class AntigravityAdminUserSeparationAndAgentsTests(unittest.TestCase):

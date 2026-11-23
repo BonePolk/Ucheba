@@ -55,6 +55,10 @@ OAUTH_HINTS = {
 
 _PARAM_FIELD_RE = re.compile(r'\b(client_secret|client_id|redirect_uri|grant_type|code_verifier|code|refresh_token)\b', re.I)
 _PARAM_MISSING_RE = re.compile(r'\b(missing|required|must be provided|not provided)\b', re.I)
+_SECRET_MSG_RE = re.compile(
+    r'(Bearer\s+[A-Za-z0-9._~+/=-]+|Authorization:\s*[^\s,;]+|ya29\.[0-9A-Za-z_-]+|AIza[0-9A-Za-z_-]{16,}|sk-[A-Za-z0-9_-]{16,})',
+    re.I,
+)
 _CTX_KEYS = ('maxTokens', 'contextWindow', 'context_window', 'contextLength', 'context_length', 'maxContextTokens')
 _IN_KEYS = ('maxInputTokens', 'max_input_tokens', 'inputTokenLimit', 'input_token_limit')
 _OUT_KEYS = ('maxOutputTokens', 'max_output_tokens', 'outputTokenLimit', 'output_token_limit')
@@ -382,18 +386,28 @@ def _parse_retry_after(headers: httpx.Headers | None) -> float | None:
         return None
 
 
+def _sanitize_server_message(raw: str, *, limit: int = 240) -> str:
+    text = ' '.join((raw or '').split())
+    if not text:
+        return ''
+    text = _SECRET_MSG_RE.sub('[redacted]', text)
+    return text[:limit]
+
+
 def _cloudcode_http_error(status_code: int, raw_bytes: bytes, path: str, headers: httpx.Headers | None = None) -> AntigravityError:
     err_status = 'HTTP_ERROR'
     raw_msg = ''
     try:
         parsed = json.loads(raw_bytes.decode('utf-8'))
+        if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+            parsed = parsed[0]
         if isinstance(parsed, dict):
             err = parsed.get('error')
             if isinstance(err, dict):
-                err_status = str(err.get('status') or err_status)[:64]
-                raw_msg = str(err.get('message') or '')[:240]
+                err_status = re.sub(r'[^a-zA-Z0-9_.:-]', '', str(err.get('status') or err.get('code') or err_status))[:64] or 'HTTP_ERROR'
+                raw_msg = _sanitize_server_message(str(err.get('message') or ''))
             elif isinstance(parsed.get('message'), str):
-                raw_msg = parsed['message'][:240]
+                raw_msg = _sanitize_server_message(parsed['message'])
     except (UnicodeError, ValueError):
         pass
     retry_after = _parse_retry_after(headers)
@@ -643,10 +657,51 @@ def _extract_non_null_type(type_val) -> tuple[str | None, bool]:
     return None, False
 
 
-def sanitize_schema_for_cloudcode(schema: dict, *, defs: dict | None = None, seen_refs: frozenset[str] = frozenset()) -> dict:
+def _merge_allof_branches(branches: list, *, defs: dict, seen_refs: frozenset[str]) -> dict:
+    merged: dict = {}
+    merged_props: dict = {}
+    merged_req: list[str] = []
+    descs: list[str] = []
+    for branch in branches:
+        if not isinstance(branch, dict):
+            continue
+        item = branch
+        if '$ref' in item:
+            ref = str(item['$ref'])
+            resolved = _resolve_ref(ref, defs) if ref not in seen_refs else None
+            if resolved is not None:
+                item = resolved | {k: v for k, v in item.items() if k != '$ref'}
+        if isinstance(item.get('description'), str) and item['description'].strip():
+            descs.append(item['description'].strip())
+        if isinstance(item.get('properties'), dict):
+            merged_props.update(item['properties'])
+        if isinstance(item.get('required'), list):
+            for req_name in item['required']:
+                if isinstance(req_name, str) and req_name not in merged_req:
+                    merged_req.append(req_name)
+        for key, val in item.items():
+            if key not in ('properties', 'required', 'description', '$ref'):
+                merged.setdefault(key, val)
+    if merged_props:
+        merged['type'] = merged.get('type') or 'object'
+        merged['properties'] = merged_props
+    if merged_req:
+        merged['required'] = merged_req
+    if descs:
+        merged['description'] = '; '.join(dict.fromkeys(descs))
+    return merged
+
+
+def sanitize_schema_for_cloudcode(
+    schema: dict,
+    *,
+    defs: dict | None = None,
+    seen_refs: frozenset[str] = frozenset(),
+    is_root: bool = True,
+) -> dict:
     """Преобразует JSON Schema (включая strict OpenAI-схемы) в допустимый для Cloud Code формат."""
     if not isinstance(schema, dict):
-        return {'type': 'OBJECT'}
+        return {'type': 'OBJECT'} if is_root else {'type': 'STRING'}
     root_defs = defs if defs is not None else {
         **(schema.get('$defs') if isinstance(schema.get('$defs'), dict) else {}),
         **(schema.get('definitions') if isinstance(schema.get('definitions'), dict) else {}),
@@ -659,11 +714,30 @@ def sanitize_schema_for_cloudcode(schema: dict, *, defs: dict | None = None, see
             if resolved is not None:
                 merged = {k: v for k, v in schema.items() if k != '$ref'}
                 merged = resolved | merged
-                return sanitize_schema_for_cloudcode(merged, defs=root_defs, seen_refs=seen_refs | {ref})
+                return sanitize_schema_for_cloudcode(
+                    merged,
+                    defs=root_defs,
+                    seen_refs=seen_refs | {ref},
+                    is_root=is_root,
+                )
         return {'type': 'STRING', 'description': str(schema.get('description') or '')[:200] or 'Value'}
 
     nullable = False
     working = dict(schema)
+
+    if isinstance(working.get('allOf'), list) and working['allOf']:
+        allof_merged = _merge_allof_branches(working.pop('allOf'), defs=root_defs, seen_refs=seen_refs)
+        base_props = dict(allof_merged.get('properties') or {})
+        if isinstance(working.get('properties'), dict):
+            base_props.update(working['properties'])
+        if base_props:
+            working['properties'] = base_props
+        base_req = list(dict.fromkeys([*(allof_merged.get('required') or []), *(working.get('required') or [])]))
+        if base_req:
+            working['required'] = base_req
+        for k, v in allof_merged.items():
+            if k not in ('properties', 'required'):
+                working.setdefault(k, v)
 
     for union_key in ('anyOf', 'oneOf'):
         variants = working.get(union_key)
@@ -674,32 +748,46 @@ def sanitize_schema_for_cloudcode(schema: dict, *, defs: dict | None = None, see
                     nullable = True
                 else:
                     non_null.append(item)
+            base_desc = working.get('description')
             if len(non_null) == 1 and isinstance(non_null[0], dict):
-                base_desc = working.get('description')
                 working = dict(non_null[0])
                 if base_desc and not working.get('description'):
                     working['description'] = base_desc
                 if '$ref' in working:
-                    cleaned = sanitize_schema_for_cloudcode(working, defs=root_defs, seen_refs=seen_refs)
+                    cleaned = sanitize_schema_for_cloudcode(
+                        working,
+                        defs=root_defs,
+                        seen_refs=seen_refs,
+                        is_root=is_root,
+                    )
                     if nullable:
                         cleaned['nullable'] = True
                     return cleaned
             elif non_null and isinstance(non_null[0], dict):
                 enum_vals = [v.get('const') for v in non_null if isinstance(v, dict) and 'const' in v]
                 if len(enum_vals) == len(non_null):
+                    if any(v is None for v in enum_vals):
+                        nullable = True
+                    non_null_vals = [v for v in enum_vals if v is not None]
                     working = {
-                        'type': 'string' if all(isinstance(v, str) for v in enum_vals) else 'integer',
-                        'enum': enum_vals,
-                        **({'description': working['description']} if working.get('description') else {}),
+                        'type': 'string' if all(isinstance(v, str) for v in non_null_vals) else 'integer',
+                        'enum': non_null_vals,
+                        **({'description': base_desc} if base_desc else {}),
                     }
                 else:
                     working = dict(non_null[0])
+                    if base_desc and not working.get('description'):
+                        working['description'] = base_desc
 
     if 'const' in working and 'enum' not in working:
         val = working['const']
-        working['enum'] = [val]
-        if 'type' not in working:
-            working['type'] = 'boolean' if isinstance(val, bool) else 'integer' if isinstance(val, int) else 'number' if isinstance(val, float) else 'string'
+        if val is None:
+            nullable = True
+            working.setdefault('type', 'string')
+        else:
+            working['enum'] = [val]
+            if 'type' not in working:
+                working['type'] = 'boolean' if isinstance(val, bool) else 'integer' if isinstance(val, int) else 'number' if isinstance(val, float) else 'string'
 
     raw_type, type_nullable = _extract_non_null_type(working.get('type'))
     nullable = nullable or type_nullable
@@ -731,6 +819,34 @@ def sanitize_schema_for_cloudcode(schema: dict, *, defs: dict | None = None, see
     for key, label in (('minimum', 'min'), ('maximum', 'max'), ('minLength', 'minLen'), ('maxLength', 'maxLen'), ('pattern', 'pattern')):
         if key in working and working[key] is not None:
             constraints.append(f'{label}={working[key]}')
+
+    raw_enum = working.get('enum')
+    enum_hint = ''
+    if isinstance(raw_enum, list) and raw_enum:
+        if any(v is None for v in raw_enum):
+            nullable = True
+            out['nullable'] = True
+        clean_enum = [v for v in raw_enum if v is not None]
+        if upper_type == 'STRING' and clean_enum and all(isinstance(v, str) and v != '' for v in clean_enum):
+            out['enum'] = clean_enum
+        elif clean_enum:
+            enum_hint = f"allowed={json.dumps(clean_enum, ensure_ascii=False)}"
+
+    raw_fmt = working.get('format')
+    if isinstance(raw_fmt, str) and raw_fmt:
+        allowed_fmts = {
+            'STRING': ('date-time',) if 'enum' not in out else (),
+            'INTEGER': ('int32', 'int64'),
+            'NUMBER': ('float', 'double'),
+        }
+        if raw_fmt in allowed_fmts.get(upper_type, ()):
+            out['format'] = raw_fmt
+        else:
+            constraints.append(f'format={raw_fmt}')
+
+    if enum_hint:
+        constraints.append(enum_hint)
+
     desc = working.get('description')
     desc_text = desc.strip() if isinstance(desc, str) else ''
     if constraints:
@@ -739,30 +855,36 @@ def sanitize_schema_for_cloudcode(schema: dict, *, defs: dict | None = None, see
     if desc_text:
         out['description'] = desc_text[:500]
 
-    if isinstance(working.get('enum'), list) and working['enum']:
-        out['enum'] = [str(v) if upper_type == 'STRING' and v is not None else v for v in working['enum'] if v is not None]
-
-    if isinstance(working.get('format'), str) and working['format'] in ('date-time', 'date', 'email', 'uuid', 'enum'):
-        out['format'] = working['format']
-
     if upper_type == 'OBJECT':
         props = working.get('properties')
+        clean_props = {}
         if isinstance(props, dict) and props:
             clean_props = {
-                str(k): sanitize_schema_for_cloudcode(v, defs=root_defs, seen_refs=seen_refs)
+                str(k): sanitize_schema_for_cloudcode(v, defs=root_defs, seen_refs=seen_refs, is_root=False)
                 for k, v in props.items()
                 if isinstance(v, dict)
             }
-            if clean_props:
-                out['properties'] = clean_props
-                req = working.get('required')
-                if isinstance(req, list):
-                    valid_req = [str(r) for r in req if str(r) in clean_props]
-                    if valid_req:
-                        out['required'] = valid_req
+        if clean_props:
+            out['properties'] = clean_props
+            req = working.get('required')
+            if isinstance(req, list):
+                valid_req = [str(r) for r in req if str(r) in clean_props]
+                if valid_req:
+                    out['required'] = valid_req
+        elif not is_root:
+            # Вложенные пустые OBJECT без properties отклоняются частью Gemini/Cloud Code валидаторов.
+            nested_desc = (f'{desc_text} (JSON object)'.strip() if desc_text else 'JSON object')[:500]
+            res = {'type': 'STRING', 'description': nested_desc}
+            if nullable:
+                res['nullable'] = True
+            return res
     elif upper_type == 'ARRAY':
         items = working.get('items')
-        out['items'] = sanitize_schema_for_cloudcode(items, defs=root_defs, seen_refs=seen_refs) if isinstance(items, dict) else {'type': 'STRING'}
+        out['items'] = (
+            sanitize_schema_for_cloudcode(items, defs=root_defs, seen_refs=seen_refs, is_root=False)
+            if isinstance(items, dict)
+            else {'type': 'STRING'}
+        )
 
     return out
 
@@ -848,8 +970,11 @@ async def stream_generate_content(
                 raise _cloudcode_http_error(response.status_code, raw, stream_path, response.headers)
 
             data_lines: list[str] = []
+            valid_events = 0
+            saw_non_empty_non_sse = False
 
             def _flush_event() -> dict | None:
+                nonlocal valid_events
                 if not data_lines:
                     return None
                 raw_text = '\n'.join(data_lines).strip()
@@ -859,13 +984,22 @@ async def stream_generate_content(
                 try:
                     chunk = json.loads(raw_text)
                 except ValueError:
-                    return None
+                    raise AntigravityError(
+                        'Google Antigravity вернул некорректный SSE-поток (INVALID_SSE)',
+                        status_code=502,
+                        error_status='INVALID_SSE',
+                    ) from None
                 if not isinstance(chunk, dict):
-                    return None
+                    raise AntigravityError(
+                        'Google Antigravity вернул неожиданный формат SSE-события',
+                        status_code=502,
+                        error_status='INVALID_SSE',
+                    )
                 if 'error' in chunk and isinstance(chunk['error'], dict):
                     err = chunk['error']
                     code = err.get('code') if isinstance(err.get('code'), int) else 502
                     raise _cloudcode_http_error(code, json.dumps({'error': err}).encode('utf-8'), stream_path)
+                valid_events += 1
                 return chunk.get('response', chunk)
 
             async for line in response.aiter_lines():
@@ -880,14 +1014,30 @@ async def stream_generate_content(
                     payload_line = line[5:].lstrip()
                     data_lines.append(payload_line)
                     # Некоторые прокси/серверы отдают одиночный JSON на каждой строке data: без пустой строки.
-                    if payload_line.startswith('{') and payload_line.endswith('}'):
+                    if len(data_lines) == 1 and payload_line.startswith('{') and payload_line.endswith('}'):
+                        try:
+                            json.loads(payload_line)
+                        except ValueError:
+                            # Многострочный или фрагментированный JSON — дождёмся пустой строки/конца события.
+                            continue
                         event = _flush_event()
                         if event is not None:
                             yield event
+                    continue
+                if line.startswith(('event:', 'id:', 'retry:')):
+                    continue
+                if line.strip():
+                    saw_non_empty_non_sse = True
 
             tail = _flush_event()
             if tail is not None:
                 yield tail
+            if valid_events == 0 and saw_non_empty_non_sse:
+                raise AntigravityError(
+                    'Google Antigravity вернул неожиданный формат ответа вместо SSE',
+                    status_code=502,
+                    error_status='INVALID_SSE',
+                )
         except httpx.TimeoutException:
             raise AntigravityError('Поток Google Antigravity не передавал данные слишком долго', retryable=True) from None
         except httpx.HTTPError:
