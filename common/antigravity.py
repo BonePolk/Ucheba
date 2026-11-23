@@ -386,6 +386,29 @@ def _parse_retry_after(headers: httpx.Headers | None) -> float | None:
         return None
 
 
+def _parse_duration_seconds(raw: str | None) -> float | None:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    text = raw.strip().lower()
+    if text.endswith('s') and text[:-1].replace('.', '', 1).isdigit():
+        try:
+            return float(text[:-1])
+        except ValueError:
+            return None
+    total = 0.0
+    matched = False
+    for num_str, unit in re.findall(r'(\d+(?:\.\d+)?)\s*([hms])', text):
+        matched = True
+        val = float(num_str)
+        if unit == 'h':
+            total += val * 3600.0
+        elif unit == 'm':
+            total += val * 60.0
+        else:
+            total += val
+    return total if matched else None
+
+
 def _sanitize_server_message(raw: str, *, limit: int = 240) -> str:
     text = ' '.join((raw or '').split())
     if not text:
@@ -397,6 +420,10 @@ def _sanitize_server_message(raw: str, *, limit: int = 240) -> str:
 def _cloudcode_http_error(status_code: int, raw_bytes: bytes, path: str, headers: httpx.Headers | None = None) -> AntigravityError:
     err_status = 'HTTP_ERROR'
     raw_msg = ''
+    reason = ''
+    quota_reset_delay = ''
+    quota_reset_at = ''
+    retry_delay = ''
     try:
         parsed = json.loads(raw_bytes.decode('utf-8'))
         if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
@@ -406,11 +433,28 @@ def _cloudcode_http_error(status_code: int, raw_bytes: bytes, path: str, headers
             if isinstance(err, dict):
                 err_status = re.sub(r'[^a-zA-Z0-9_.:-]', '', str(err.get('status') or err.get('code') or err_status))[:64] or 'HTTP_ERROR'
                 raw_msg = _sanitize_server_message(str(err.get('message') or ''))
+                details = err.get('details')
+                if isinstance(details, list):
+                    for item in details:
+                        if not isinstance(item, dict):
+                            continue
+                        if isinstance(item.get('reason'), str) and item['reason'].strip() and not reason:
+                            reason = re.sub(r'[^a-zA-Z0-9_.:-]', '', item['reason'].strip())[:64]
+                        meta = item.get('metadata')
+                        if isinstance(meta, dict):
+                            if isinstance(meta.get('quotaResetDelay'), str) and meta['quotaResetDelay'].strip():
+                                quota_reset_delay = _sanitize_server_message(meta['quotaResetDelay'], limit=48)
+                            if isinstance(meta.get('quotaResetTimeStamp'), str) and meta['quotaResetTimeStamp'].strip():
+                                quota_reset_at = _sanitize_server_message(meta['quotaResetTimeStamp'], limit=48)
+                        if isinstance(item.get('retryDelay'), str) and item['retryDelay'].strip():
+                            retry_delay = _sanitize_server_message(item['retryDelay'], limit=48)
             elif isinstance(parsed.get('message'), str):
                 raw_msg = _sanitize_server_message(parsed['message'])
     except (UnicodeError, ValueError):
         pass
     retry_after = _parse_retry_after(headers)
+    if reason and (err_status in ('HTTP_ERROR', 'RESOURCE_EXHAUSTED') or status_code == 429):
+        err_status = reason
     if status_code == 401:
         return AntigravityAuthError(
             'Google Antigravity отклонил токен доступа (HTTP 401)',
@@ -429,16 +473,32 @@ def _cloudcode_http_error(status_code: int, raw_bytes: bytes, path: str, headers
             msg = f'{msg}: {raw_msg}'
         return AntigravityError(msg, status_code=404, error_status=err_status)
     if status_code == 429:
-        msg = 'Превышен лимит запросов или квота Google Antigravity (HTTP 429)'
+        delay_sec = retry_after if retry_after is not None else (
+            _parse_duration_seconds(retry_delay) if retry_delay else _parse_duration_seconds(quota_reset_delay)
+        )
+        lower_msg = raw_msg.lower()
+        is_quota_exhausted = (
+            reason == 'QUOTA_EXHAUSTED'
+            or (delay_sec is not None and delay_sec > 15.0)
+            or ('quota' in lower_msg and 'reset' in lower_msg)
+        )
+        effective_retryable = not is_quota_exhausted
+        effective_retry_after = min(5.0, max(0.2, delay_sec)) if (effective_retryable and delay_sec is not None) else None
+        code_note = f' ({err_status})' if err_status and err_status != 'HTTP_ERROR' else ''
+        msg = f'Превышен лимит запросов или квота Google Antigravity (HTTP 429{code_note})'
         if raw_msg:
             msg = f'{msg}: {raw_msg}'
+        if quota_reset_delay and quota_reset_delay not in msg:
+            msg = f'{msg} (сброс через {quota_reset_delay})'
+        elif quota_reset_at and quota_reset_at not in msg:
+            msg = f'{msg} (сброс: {quota_reset_at})'
         return AntigravityError(
             msg,
             status_code=429,
             error_status=err_status,
-            retryable=True,
+            retryable=effective_retryable,
             quota_exceeded=True,
-            retry_after=retry_after,
+            retry_after=effective_retry_after,
         )
     retryable = status_code in (408, 500, 502, 503, 504)
     msg = f'Cloud Code HTTP {status_code} ({err_status})'

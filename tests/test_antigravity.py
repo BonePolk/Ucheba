@@ -1028,6 +1028,141 @@ class AntigravityStrausRegressionTests(unittest.TestCase):
         self.assertIn('decls=49', joined)
         self.assertIn('stage=cloudcode_response model=gemini-4-neon-xhigh status=error http=400 code=INVALID_ARGUMENT', joined)
 
+    def test_cloudcode_429_parses_quota_exhausted_vs_transient_capacity(self):
+        quota_payload = {
+            'error': {
+                'code': 429,
+                'status': 'RESOURCE_EXHAUSTED',
+                'message': 'You have exhausted your capacity on this model. Your quota will reset after 3h15m.',
+                'details': [{
+                    '@type': 'type.googleapis.com/google.rpc.ErrorInfo',
+                    'reason': 'QUOTA_EXHAUSTED',
+                    'metadata': {'quotaResetDelay': '3h15m'},
+                }],
+            }
+        }
+        err_q = antigravity._cloudcode_http_error(429, json.dumps(quota_payload).encode('utf-8'), '/v1internal:streamGenerateContent')
+        self.assertEqual(err_q.status_code, 429)
+        self.assertEqual(err_q.error_status, 'QUOTA_EXHAUSTED')
+        self.assertFalse(err_q.retryable)
+        self.assertIn('QUOTA_EXHAUSTED', err_q.user_message)
+        self.assertIn('3h15m', err_q.user_message)
+
+        cap_payload = {
+            'error': {
+                'code': 429,
+                'status': 'RESOURCE_EXHAUSTED',
+                'message': 'No capacity available for model gemini-4-neon-xhigh',
+                'details': [
+                    {'@type': 'type.googleapis.com/google.rpc.ErrorInfo', 'reason': 'MODEL_CAPACITY_EXHAUSTED'},
+                    {'@type': 'type.googleapis.com/google.rpc.RetryInfo', 'retryDelay': '2s'},
+                ],
+            }
+        }
+        err_c = antigravity._cloudcode_http_error(429, json.dumps(cap_payload).encode('utf-8'), '/v1internal:streamGenerateContent')
+        self.assertEqual(err_c.status_code, 429)
+        self.assertEqual(err_c.error_status, 'MODEL_CAPACITY_EXHAUSTED')
+        self.assertTrue(err_c.retryable)
+        self.assertEqual(err_c.retry_after, 2.0)
+
+    def test_bridge_does_not_retry_quota_exhausted_and_populates_error_sink(self):
+        sink = {}
+        session = antigravity_bridge.AntigravityBridgeSession(owner_id=1, error_sink=sink)
+        session.access_token = 'tok-1'
+        session.token_expires_at = time.time() + 3600
+        session.project_id = 'projects/demo'
+        client = TestClient(antigravity_bridge.create_bridge_app(session, 'sec', label='Straus'))
+
+        attempts = {'n': 0}
+
+        async def _quota_fail(tok, env, **kwargs):
+            attempts['n'] += 1
+            raise antigravity.AntigravityError(
+                'Превышен лимит запросов или квота Google Antigravity (HTTP 429, QUOTA_EXHAUSTED): сброс через 2h',
+                status_code=429,
+                error_status='QUOTA_EXHAUSTED',
+                retryable=False,
+                quota_exceeded=True,
+            )
+            yield {}
+
+        with patch('common.antigravity_bridge.stream_generate_content', side_effect=_quota_fail):
+            resp = client.post(
+                '/v1/responses',
+                headers={'Authorization': 'Bearer sec'},
+                json={'model': 'gemini-4-neon-xhigh', 'input': 'test', 'stream': True},
+            )
+        self.assertEqual(resp.status_code, 429)
+        self.assertEqual(attempts['n'], 1)
+        self.assertEqual(sink.get('status_code'), 429)
+        self.assertEqual(sink.get('code'), 'QUOTA_EXHAUSTED')
+        self.assertIn('QUOTA_EXHAUSTED', sink.get('message', ''))
+
+    def test_run_codex_turn_enriches_codex_429_with_bridge_reason_and_zero_sdk_retries(self):
+        cfg, provider_id = codex_harness.build_codex_config('antigravity', base_url='http://127.0.0.1:9999/v1')
+        self.assertEqual(provider_id, codex_harness.ANTIGRAVITY_PROVIDER_ID)
+        self.assertIn('model_providers.ucheba_antigravity.stream_max_retries=0', cfg.launch_args_override)
+
+        class _FakeProgress:
+            def __init__(self):
+                self.record = {'events': []}
+            def begin_response(self): pass
+            def update(self, **kw): self.record.update(kw)
+            def add(self, *a, **kw): pass
+            def reasoning_delta(self, *a): pass
+            def summary(self, *a): return ''
+
+        class _FakeTurn:
+            async def stream(self):
+                yield SimpleNamespace(
+                    method='error',
+                    payload=SimpleNamespace(
+                        will_retry=False,
+                        error={
+                            'message': 'exceeded retry limit, last status: 429 Too Many Requests',
+                            'codex_error_info': {'responseTooManyFailedAttempts': {'httpStatusCode': 429}},
+                        },
+                    ),
+                )
+                yield SimpleNamespace(
+                    method='turn/completed',
+                    payload=SimpleNamespace(
+                        turn=SimpleNamespace(
+                            status='failed',
+                            error={
+                                'message': 'exceeded retry limit, last status: 429 Too Many Requests',
+                                'codex_error_info': {'responseTooManyFailedAttempts': {'httpStatusCode': 429}},
+                            },
+                        ),
+                    ),
+                )
+
+        fake_client = SimpleNamespace()
+        sink = {'status_code': 429, 'code': 'QUOTA_EXHAUSTED', 'message': 'Превышен лимит запросов или квота Google Antigravity (HTTP 429, QUOTA_EXHAUSTED): quota reset after 2h'}
+        codex_harness._attach_bridge_error_sink(fake_client, sink)
+
+        class _FakeThread:
+            model = 'gemini-4-neon-xhigh'
+            async def turn(self, *args, **kwargs):
+                # Имитируем заполнение sink мостом уже во время выполнения хода (после begin_response).
+                sink.update({'status_code': 429, 'code': 'QUOTA_EXHAUSTED', 'message': 'Превышен лимит запросов или квота Google Antigravity (HTTP 429, QUOTA_EXHAUSTED): quota reset after 2h'})
+                return _FakeTurn()
+
+        outcome = asyncio.run(
+            codex_harness.run_codex_turn(
+                _FakeThread(),
+                'Проверь календарь',
+                label='Straus',
+                progress=_FakeProgress(),
+                client=fake_client,
+                effort='medium',
+            )
+        )
+        self.assertFalse(outcome.completed)
+        self.assertIn('QUOTA_EXHAUSTED', outcome.error_detail)
+        self.assertIn('quota reset after 2h', outcome.error_detail)
+        self.assertNotIn('exceeded retry limit', outcome.error_detail)
+
 
 class AntigravityAdminUserSeparationAndAgentsTests(unittest.TestCase):
     def setUp(self):

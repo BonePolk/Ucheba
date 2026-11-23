@@ -18,6 +18,7 @@ import time
 import types
 from typing import Any
 from urllib.parse import urlsplit
+from weakref import WeakKeyDictionary
 
 from fastapi import HTTPException
 import httpx
@@ -67,6 +68,32 @@ _SECRET_ERR_RE = re.compile(
 _HTTP_STATUS_RE = re.compile(r'\b(?:http(?:\s+status)?|status(?:\s+code)?)\s*[:=]?\s*([45]\d{2})\b', re.I)
 
 _CAP_CACHE: OrderedDict[tuple, tuple[float, Any]] = OrderedDict()
+_BRIDGE_ERROR_SINKS: WeakKeyDictionary = WeakKeyDictionary()
+
+
+def _attach_bridge_error_sink(client, sink: dict | None) -> None:
+    if client is None or sink is None:
+        return
+    try:
+        client._ucheba_bridge_error = sink
+    except AttributeError:
+        try:
+            _BRIDGE_ERROR_SINKS[client] = sink
+        except TypeError:
+            pass
+
+
+def _get_bridge_error_sink(client) -> dict | None:
+    if client is None:
+        return None
+    sink = getattr(client, '_ucheba_bridge_error', None)
+    if isinstance(sink, dict):
+        return sink
+    try:
+        sink = _BRIDGE_ERROR_SINKS.get(client)
+    except TypeError:
+        sink = None
+    return sink if isinstance(sink, dict) else None
 
 
 @dataclass(frozen=True)
@@ -634,7 +661,7 @@ def build_codex_config(
             '-c', f'model_providers.{ANTIGRAVITY_PROVIDER_ID}.wire_api="responses"',
             '-c', f'model_providers.{ANTIGRAVITY_PROVIDER_ID}.requires_openai_auth=false',
             '-c', f'model_providers.{ANTIGRAVITY_PROVIDER_ID}.stream_idle_timeout_ms=180000',
-            '-c', f'model_providers.{ANTIGRAVITY_PROVIDER_ID}.stream_max_retries=2',
+            '-c', f'model_providers.{ANTIGRAVITY_PROVIDER_ID}.stream_max_retries=0',
         ])
         if token:
             args.extend(['-c', f'model_providers.{ANTIGRAVITY_PROVIDER_ID}.env_key={json.dumps(token_env)}'])
@@ -743,9 +770,11 @@ async def open_codex(
     async with AsyncExitStack() as stack:
         eff_key = api_key
         eff_url = base_url
+        bridge_error: dict | None = None
         if auth_mode == 'antigravity':
+            bridge_error = {}
             eff_url, eff_key = await stack.enter_async_context(
-                antigravity_responses_bridge(label=label, cloudcode_url=base_url)
+                antigravity_responses_bridge(label=label, cloudcode_url=base_url, error_sink=bridge_error)
             )
         config, thread_provider = build_codex_config(
             auth_mode,
@@ -756,6 +785,7 @@ async def open_codex(
             cwd=cwd,
         )
         client = AsyncCodex(config)
+        _attach_bridge_error_sink(client, bridge_error)
         try:
             async with asyncio.timeout(TURN_START_TIMEOUT):
                 await client.__aenter__()
@@ -1125,6 +1155,28 @@ def _is_generic_turn_error(label: str, detail: str | None) -> bool:
     return not detail or detail == f'{label}: агент не завершил работу'
 
 
+def _enrich_with_bridge_error(label: str, formatted: str | None, details: dict, client) -> str | None:
+    sink = _get_bridge_error_sink(client)
+    if not sink or not isinstance(sink.get('message'), str) or not sink['message'].strip():
+        return formatted
+    bridge_msg = _sanitize_error_message(sink['message'])
+    if not bridge_msg:
+        return formatted
+    raw_msg = (details.get('message') or '').lower()
+    is_opaque_codex = (
+        'exceeded retry limit' in raw_msg
+        or 'too many failed attempts' in raw_msg
+        or _is_generic_turn_error(label, formatted)
+        or (details.get('status_code') is not None and details.get('status_code') == sink.get('status_code'))
+    )
+    if not is_opaque_codex:
+        return formatted
+    prefix = f'{label}:'
+    if bridge_msg.startswith(prefix):
+        return bridge_msg
+    return f'{label}: {bridge_msg}'
+
+
 def format_turn_error(label: str, turn_obj) -> str:
     error_obj = getattr(turn_obj, 'error', None)
     details = _extract_error_details(error_obj)
@@ -1203,6 +1255,9 @@ async def run_codex_turn(
     capability_scope: tuple[str, str, str] | None = None,
 ) -> TurnOutcome:
     progress.begin_response()
+    bridge_sink = _get_bridge_error_sink(client)
+    if bridge_sink is not None:
+        bridge_sink.clear()
     active_model = _safe_str(_field(thread, 'model')) or (
         _safe_str(capability_scope[2]) if capability_scope and len(capability_scope) >= 3 else ''
     )
@@ -1397,7 +1452,7 @@ async def run_codex_turn(
                         '%s: stage=codex_error model=%s type=%s kind=%s http=%s code=%s retry=%s',
                         label, active_model or '-', 'stream_error', kind or '-', status_code or '-', err_code or '-', will_retry,
                     )
-                    formatted = format_turn_error(label, data)
+                    formatted = _enrich_with_bridge_error(label, format_turn_error(label, data), details, client)
                     if will_retry is False:
                         if _is_generic_turn_error(label, first_error_detail) and not _is_generic_turn_error(label, formatted):
                             first_error_detail = formatted
@@ -1414,7 +1469,7 @@ async def run_codex_turn(
                     completed = turn_status == 'completed'
                     if not completed:
                         turn_details = _extract_error_details(getattr(data.turn, 'error', None))
-                        turn_formatted = format_turn_error(label, data.turn)
+                        turn_formatted = _enrich_with_bridge_error(label, format_turn_error(label, data.turn), turn_details, client)
                         turn_kind = turn_details['kind']
                         # Сохраняем первую содержательную ошибку; не затираем её общим fallback из turn/completed.
                         candidates = [
@@ -1434,14 +1489,16 @@ async def run_codex_turn(
                             chosen_kind = first_error_kind or turn_kind or last_retry_error_kind
                         error_detail = chosen_detail
                         error_kind = chosen_kind if chosen_kind not in (None, 'other') else (first_error_kind or turn_kind or last_retry_error_kind)
+                        sink = _get_bridge_error_sink(client) or {}
                         logging.getLogger('uvicorn.error').warning(
-                            '%s: stage=agent_turn_finished model=%s status=%s kind=%s http=%s code=%s tools_called=%d',
+                            '%s: stage=agent_turn_finished model=%s status=%s kind=%s http=%s code=%s bridge_code=%s tools_called=%d',
                             label,
                             active_model or '-',
                             turn_status or '-',
                             error_kind or '-',
-                            turn_details['status_code'] or '-',
+                            turn_details['status_code'] or sink.get('status_code') or '-',
                             turn_details['code'] or '-',
+                            sink.get('code') or '-',
                             tool_calls_count,
                         )
                     else:

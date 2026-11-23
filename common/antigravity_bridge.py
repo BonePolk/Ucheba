@@ -157,7 +157,7 @@ def _append_part(contents: list[dict], role: str, part: dict) -> None:
 class AntigravityBridgeSession:
     """Хранит контекст вызовов, thoughtSignature и сессию токена для одного пользователя."""
 
-    def __init__(self, *, owner_id: int, cloudcode_url: str = '', state_path: Path | None = None):
+    def __init__(self, *, owner_id: int, cloudcode_url: str = '', state_path: Path | None = None, error_sink: dict | None = None):
         self.owner_id = owner_id
         self.cloudcode_url_override = (cloudcode_url or '').strip()
         self.access_token: str = ''
@@ -171,7 +171,26 @@ class AntigravityBridgeSession:
         self.responses_history: dict[str, list] = {}
         self.state_path = state_path or _bridge_state_file(owner_id)
         self.session_lock = asyncio.Lock()
+        self.error_sink = error_sink
+        self.last_error: dict | None = None
         self._load_persisted_state()
+
+    def clear_error(self) -> None:
+        self.last_error = None
+        if isinstance(self.error_sink, dict):
+            self.error_sink.clear()
+
+    def record_error(self, exc: AntigravityError) -> None:
+        info = {
+            'status_code': exc.status_code,
+            'code': exc.error_status or str(exc.status_code or 'error'),
+            'message': exc.user_message,
+            'retryable': bool(exc.retryable),
+        }
+        self.last_error = info
+        if isinstance(self.error_sink, dict):
+            self.error_sink.clear()
+            self.error_sink.update(info)
 
     def _load_persisted_state(self) -> None:
         try:
@@ -817,6 +836,7 @@ def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, labe
                     yield chunk
                 return
             except AntigravityAuthError as exc:
+                session.record_error(exc)
                 bridge_log.warning(
                     '%s stage=cloudcode_response model=%s status=error http=%s code=%s retryable=%s decls=%d',
                     label, meta['model'], exc.status_code, exc.error_status or '-', not emitted_any and not refreshed, decls_count,
@@ -826,22 +846,27 @@ def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, labe
                     continue
                 raise
             except AntigravityError as exc:
+                session.record_error(exc)
                 bridge_log.warning(
                     '%s stage=cloudcode_response model=%s status=error http=%s code=%s retryable=%s decls=%d',
                     label, meta['model'], exc.status_code, exc.error_status or '-', bool(exc.retryable), decls_count,
                 )
-                if emitted_any or not exc.retryable or attempt >= max_attempts - 1:
+                retry_limit = 1 if exc.status_code == 429 else (max_attempts - 1)
+                if emitted_any or not exc.retryable or attempt >= retry_limit:
+                    raise
+                if exc.status_code == 429 and exc.retry_after is not None and exc.retry_after > 5.0:
                     raise
                 attempt += 1
                 delay = exc.retry_after if exc.retry_after is not None else min(8.0, 0.8 * (2 ** (attempt - 1)))
                 bridge_log.warning(
-                    '%s antigravity retry %d/%d (%s)', label, attempt, max_attempts, exc.status_code or exc.error_status or 'transient'
+                    '%s antigravity retry %d/%d (%s)', label, attempt, retry_limit, exc.status_code or exc.error_status or 'transient'
                 )
                 await asyncio.sleep(delay)
 
     async def _responses(request: Request):
         if (denied := _check_auth(request)) is not None:
             return denied
+        session.clear_error()
         try:
             body = await request.json()
         except ValueError:
@@ -1362,11 +1387,11 @@ def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, labe
 
 
 @asynccontextmanager
-async def antigravity_responses_bridge(label: str = 'Agent', *, cloudcode_url: str = ''):
+async def antigravity_responses_bridge(label: str = 'Agent', *, cloudcode_url: str = '', error_sink: dict | None = None):
     """Запускает изолированный per-run loopback Responses API мост в текущем event loop."""
     owner_id = user_id()
     bridge_token = secrets.token_urlsafe(32)
-    session = AntigravityBridgeSession(owner_id=owner_id, cloudcode_url=cloudcode_url)
+    session = AntigravityBridgeSession(owner_id=owner_id, cloudcode_url=cloudcode_url, error_sink=error_sink)
     app = create_bridge_app(session, bridge_token, label=label)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
