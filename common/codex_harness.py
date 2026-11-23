@@ -26,13 +26,14 @@ from common.browser_client import browser_agent, browser_run_id, browser_task_id
 from common.browser_tools import BROWSER_NAMES
 from common.identity import current_user_id, user_id
 from common.progress import timestamp
-from common.provider import provider_url
+from common.provider import gateway_url, provider_url
 
 HOME = Path('/home/codex')
 WORKER_BIN = '/usr/local/bin/codex-worker'
 MCP_STDIO_SCRIPT = '/app/common/mcp_stdio.py'
 CONTAINER_SANDBOX = os.environ.get('ARRODES_SANDBOX', '').strip().lower() == 'container'
 API_PROVIDER_ID = 'ucheba_api'
+ANTIGRAVITY_PROVIDER_ID = 'ucheba_antigravity'
 CLIENT_CLOSE_TIMEOUT = 10
 MCP_SHUTDOWN_TIMEOUT = 5
 TURN_START_TIMEOUT = 60
@@ -121,7 +122,7 @@ def _normalize_provider_base_url(base_url: str) -> str:
 
 def _capability_scope(auth_mode: str, base_url: str = '') -> tuple[str, str]:
     mode = (auth_mode or 'api_key').strip().lower()
-    if mode == 'api_key':
+    if mode in ('api_key', 'antigravity_gateway'):
         return mode, _normalize_provider_base_url(base_url)
     return mode, ''
 
@@ -242,29 +243,37 @@ def cache_provider_models(
         _cache_put(('probed', owner, source_kind, mode, scope), 'ok', MODEL_CAP_TTL if has_any else MODEL_CAP_MISS_TTL)
 
 
-async def fetch_provider_model_metadata(base_url: str, api_key: str, model: str) -> dict | None:
+async def fetch_provider_model_metadata(
+    base_url: str,
+    api_key: str,
+    model: str,
+    *,
+    auth_mode: str = 'api_key',
+) -> dict | None:
     owner = user_id()
-    mode, scope = _capability_scope('api_key', base_url)
-    if not scope or not api_key:
+    mode, scope = _capability_scope(auth_mode, base_url)
+    source_kind = 'antigravity_gateway' if mode == 'antigravity_gateway' else 'api_key'
+    if not scope or (mode == 'api_key' and not api_key):
         return None
+    headers = {'Authorization': f'Bearer {api_key}'} if api_key else {}
     try:
         async with httpx.AsyncClient(timeout=MODEL_PROBE_TIMEOUT) as client:
             response = await client.get(
                 f'{scope}/models',
-                headers={'Authorization': f'Bearer {api_key}'},
+                headers=headers,
             )
         if response.is_success:
             payload = response.json()
             items = payload.get('data') if isinstance(payload, dict) else (payload if isinstance(payload, list) else None)
             if isinstance(items, list):
-                cache_provider_models(scope, items, source_kind='api_key', auth_mode=mode)
-                return _lookup_cached_model(owner, 'api_key', mode, scope, model)
+                cache_provider_models(scope, items, source_kind=source_kind, auth_mode=mode)
+                return _lookup_cached_model(owner, source_kind, mode, scope, model)
             logging.getLogger('uvicorn.error').warning('Provider /models metadata probe returned unexpected payload')
         else:
             logging.getLogger('uvicorn.error').warning('Provider /models metadata probe returned HTTP %s', response.status_code)
     except Exception as exc:
         logging.getLogger('uvicorn.error').warning('Provider /models metadata probe failed: %s', type(exc).__name__)
-    _cache_put(('probed', owner, 'api_key', mode, scope), 'failed', MODEL_CAP_MISS_TTL)
+    _cache_put(('probed', owner, source_kind, mode, scope), 'failed', MODEL_CAP_MISS_TTL)
     return None
 
 
@@ -310,7 +319,7 @@ async def _probe_codex_models(client, active_model: str, auth_mode: str, base_ur
                 page = await asyncio.wait_for(res, timeout=MODEL_PROBE_TIMEOUT) if inspect.isawaitable(res) else res
                 data = getattr(page, 'data', None)
                 if isinstance(data, (list, tuple)):
-                    cache_provider_models(scope if mode == 'api_key' else 'oauth', data, source_kind='codex', auth_mode=mode)
+                    cache_provider_models(scope if mode in ('api_key', 'antigravity_gateway') else 'oauth', data, source_kind='codex', auth_mode=mode)
                     if not active_model:
                         default_item = next(
                             (m for m in data if _field(m, 'is_default', 'isDefault') is True),
@@ -350,12 +359,13 @@ async def detect_model_capabilities(
     codex_probe_state = _fresh_get(('probed', owner, 'codex', mode, scope))
     provider_cap = {}
     provider_probe_state = None
-    if mode == 'api_key' and scope:
-        provider_cap = _lookup_cached_model(owner, 'api_key', mode, scope, active_model) or {}
-        provider_probe_state = _fresh_get(('probed', owner, 'api_key', mode, scope))
-        if not provider_cap and api_key and provider_probe_state is None:
-            provider_cap = await fetch_provider_model_metadata(scope, api_key, active_model) or {}
-            provider_probe_state = _fresh_get(('probed', owner, 'api_key', mode, scope))
+    if mode in ('api_key', 'antigravity_gateway') and scope:
+        provider_source = 'antigravity_gateway' if mode == 'antigravity_gateway' else 'api_key'
+        provider_cap = _lookup_cached_model(owner, provider_source, mode, scope, active_model) or {}
+        provider_probe_state = _fresh_get(('probed', owner, provider_source, mode, scope))
+        if not provider_cap and provider_probe_state is None and (api_key or mode == 'antigravity_gateway'):
+            provider_cap = await fetch_provider_model_metadata(scope, api_key, active_model, auth_mode=mode) or {}
+            provider_probe_state = _fresh_get(('probed', owner, provider_source, mode, scope))
 
     rt_entry = _fresh_get(('runtime', owner, mode, scope, active_model))
     if rt_entry is None and active_model != _safe_str(model):
@@ -400,7 +410,7 @@ async def detect_model_capabilities(
     else:
         final_ctx, final_source = None, 'unknown'
 
-    provider_failed = mode == 'api_key' and provider_probe_state == 'failed'
+    provider_failed = mode in ('api_key', 'antigravity_gateway') and provider_probe_state == 'failed'
     codex_failed = codex_probe_state == 'failed' or (
         mode == 'oauth' and client is None and thread is None and codex_probe_state != 'ok'
     )
@@ -466,8 +476,10 @@ def prepare_codex_root(migrate_legacy: bool = False) -> None:
     owner_home.mkdir(exist_ok=True, mode=0o700)
     oauth_home = owner_home / '.codex'
     api_home = owner_home / '.codex-api'
+    ag_home = owner_home / '.codex-antigravity'
     oauth_home.mkdir(exist_ok=True, mode=0o700)
     api_home.mkdir(exist_ok=True, mode=0o700)
+    ag_home.mkdir(exist_ok=True, mode=0o700)
     if migrate_legacy:
         for item in root.iterdir():
             if item.name in ('users', 'arrodes-state'):
@@ -478,7 +490,7 @@ def prepare_codex_root(migrate_legacy: bool = False) -> None:
                     shutil.move(str(item), target)
             except (FileNotFoundError, shutil.Error):
                 pass
-    for item in (owner_home, oauth_home, api_home):
+    for item in (owner_home, oauth_home, api_home, ag_home):
         os.chown(item, 10001, 10001)
         item.chmod(0o700)
     for item in (HOME, root, users):
@@ -495,7 +507,7 @@ def prepare_codex_user() -> None:
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chown(root, uid, uid)
     root.chmod(0o700)
-    for sub in ('.codex', '.codex-api'):
+    for sub in ('.codex', '.codex-api', '.codex-antigravity'):
         folder = root / sub
         folder.mkdir(exist_ok=True, mode=0o700)
         os.chown(folder, uid, uid)
@@ -505,7 +517,7 @@ def prepare_codex_user() -> None:
 def normalize_auth(config: dict | None, api_key: str = '', *, default_mode: str = 'api_key', label: str = 'Агент'):
     cfg = config or {}
     auth_mode = (cfg.get('auth_mode') or default_mode).strip()
-    if auth_mode not in ('oauth', 'api_key'):
+    if auth_mode not in ('oauth', 'api_key', 'antigravity_gateway'):
         raise HTTPException(422, 'Неизвестный режим авторизации')
     model = (cfg.get('model') or '').strip()
     if auth_mode == 'api_key':
@@ -519,6 +531,17 @@ def normalize_auth(config: dict | None, api_key: str = '', *, default_mode: str 
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
         return 'api_key', key, base_url, model
+    if auth_mode == 'antigravity_gateway':
+        raw_url = (cfg.get('base_url') or '').strip()
+        if not raw_url:
+            raise HTTPException(400, f'Для {label} в режиме Antigravity Gateway укажите адрес шлюза в разделе «Подключения AI»')
+        if not model:
+            raise HTTPException(400, f'Для {label} в режиме Antigravity Gateway укажите модель в профиле')
+        try:
+            base_url = gateway_url(raw_url)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        return 'antigravity_gateway', (api_key or '').strip(), base_url, model
     return 'oauth', '', '', model
 
 
@@ -533,6 +556,13 @@ def append_custom_instructions(base: str, custom: str | None) -> str:
     return base + '\n\nДополнительные указания владельца (не отменяют правила безопасности и формат ответа):\n' + text
 
 
+def _worker_supports_antigravity() -> bool:
+    try:
+        return 'antigravity)' in Path(WORKER_BIN).read_text(encoding='utf-8', errors='ignore')
+    except OSError:
+        return False
+
+
 def build_codex_config(
     auth_mode: str,
     *,
@@ -542,7 +572,12 @@ def build_codex_config(
     web_search: str = 'disabled',
     cwd: str | Path | None = None,
 ) -> tuple[CodexConfig, str | None]:
-    mode_arg = 'api' if auth_mode == 'api_key' else 'oauth'
+    if auth_mode == 'api_key':
+        mode_arg = 'api'
+    elif auth_mode == 'antigravity_gateway':
+        mode_arg = 'antigravity' if _worker_supports_antigravity() else 'api'
+    else:
+        mode_arg = 'oauth'
     web_search = web_search if web_search in ('disabled', 'cached', 'live') else 'disabled'
     args = [
         WORKER_BIN,
@@ -568,6 +603,24 @@ def build_codex_config(
         ])
         env = {'UCHEBA_API_KEY': api_key}
         thread_provider = API_PROVIDER_ID
+    elif auth_mode == 'antigravity_gateway':
+        token = (api_key or '').strip()
+        token_env = 'UCHEBA_ANTIGRAVITY_TOKEN' if mode_arg == 'antigravity' else 'UCHEBA_API_KEY'
+        args.extend([
+            '-c', f'model_provider={json.dumps(ANTIGRAVITY_PROVIDER_ID)}',
+            '-c', f'model_providers.{ANTIGRAVITY_PROVIDER_ID}.name="Antigravity Gateway"',
+            '-c', f'model_providers.{ANTIGRAVITY_PROVIDER_ID}.base_url={json.dumps(base_url)}',
+            '-c', f'model_providers.{ANTIGRAVITY_PROVIDER_ID}.wire_api="responses"',
+            '-c', f'model_providers.{ANTIGRAVITY_PROVIDER_ID}.requires_openai_auth=false',
+            '-c', f'model_providers.{ANTIGRAVITY_PROVIDER_ID}.stream_idle_timeout_ms=180000',
+            '-c', f'model_providers.{ANTIGRAVITY_PROVIDER_ID}.stream_max_retries=2',
+        ])
+        if token:
+            args.extend(['-c', f'model_providers.{ANTIGRAVITY_PROVIDER_ID}.env_key={json.dumps(token_env)}'])
+            env = {token_env: token}
+        else:
+            env = None
+        thread_provider = ANTIGRAVITY_PROVIDER_ID
     else:
         env = None
         thread_provider = None
@@ -977,6 +1030,8 @@ def format_turn_error(label: str, turn_obj) -> str:
         return f'{label}: шлюз не нашёл модель или Responses API (HTTP 404)'
     if status_code == 429 or kind == 'usageLimitExceeded':
         return f'{label}: превышен лимит запросов или квота шлюза (HTTP 429)'
+    if status_code == 503:
+        return f'{label}: модельный шлюз временно недоступен или не готов (HTTP 503)'
     if kind in ('httpConnectionFailed', 'responseStreamConnectionFailed', 'responseStreamDisconnected'):
         return f'{label}: ошибка соединения с модельным шлюзом'
     if kind == 'contextWindowExceeded':

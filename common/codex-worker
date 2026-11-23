@@ -22,6 +22,17 @@ case "$mode" in
       /usr/bin/env -i HOME="$user_home" CODEX_HOME="$user_home/.codex-api" \
       PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 /usr/local/bin/codex-native "$@"
     ;;
+  antigravity)
+    if [ -n "${UCHEBA_ANTIGRAVITY_TOKEN:-}" ]; then
+      exec /usr/bin/setpriv --reuid="$user_uid" --regid="$user_uid" --clear-groups \
+        /usr/bin/env -i HOME="$user_home" CODEX_HOME="$user_home/.codex-antigravity" \
+        UCHEBA_ANTIGRAVITY_TOKEN="$UCHEBA_ANTIGRAVITY_TOKEN" \
+        PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 /usr/local/bin/codex-native "$@"
+    fi
+    exec /usr/bin/setpriv --reuid="$user_uid" --regid="$user_uid" --clear-groups \
+      /usr/bin/env -i HOME="$user_home" CODEX_HOME="$user_home/.codex-antigravity" \
+      PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 /usr/local/bin/codex-native "$@"
+    ;;
   *)
     exit 1
     ;;

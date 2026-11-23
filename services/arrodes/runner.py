@@ -234,7 +234,7 @@ async def check(body=None):
 
         async with scratch_env(writable=False) as (work_dir, shell_policy), open_codex(
             'Arrodes',
-            auth_mode='api_key',
+            auth_mode=auth_mode,
             api_key=api_key,
             base_url=base_url,
             allow_shell=False,
@@ -254,7 +254,7 @@ async def check(body=None):
             )
             caps = await resolve_session_capabilities(
                 'Arrodes',
-                auth_mode='api_key',
+                auth_mode=auth_mode,
                 base_url=base_url,
                 api_key=api_key,
                 model=model,
@@ -383,7 +383,7 @@ async def execute(run_id, payload, progress, auth=None, options=None):
             can_resume = bool(
                 previous.get('thread_id')
                 and previous.get('auth_mode', 'oauth') == auth_mode
-                and (auth_mode != 'api_key' or previous.get('base_url') == base_url)
+                and (auth_mode == 'oauth' or previous.get('base_url') == base_url)
             )
 
             async with scratch_env(writable=True) as (_, shell_policy), serve_mcp(adapter) as mcp_config, open_codex(

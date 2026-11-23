@@ -53,11 +53,20 @@ const INSTRUCTION_PLACEHOLDERS = {
   arrodes: 'Например: оформлять отчёты в Markdown и прикладывать проверку…',
 };
 
-export default function AgentSettings({ name, title, data, provider, oauthState, onOpenProvider }) {
+export default function AgentSettings({
+  name,
+  title,
+  data,
+  provider,
+  oauthState,
+  antigravityData,
+  antigravityState,
+  onOpenProvider,
+}) {
   const client = useQueryClient();
   const defaultMode = name === 'arrodes' ? 'oauth' : 'api_key';
   const savedAuthMode = data.auth_mode || defaultMode;
-  const savedModel = data.model ?? (savedAuthMode === 'oauth' ? '' : 'gpt-6-luna');
+  const savedModel = data.model ?? (savedAuthMode === 'api_key' ? 'gpt-6-luna' : '');
   const savedContextWindow = data.context_window != null ? String(data.context_window) : '';
 
   const [enabled, setEnabled] = useState(data.enabled);
@@ -107,7 +116,7 @@ export default function AgentSettings({ name, title, data, provider, oauthState,
     setAuthMode(nextMode);
     if (nextMode === savedAuthMode) {
       setModel(savedModel);
-    } else if (model === savedModel) {
+    } else {
       setModel('');
     }
   }
@@ -178,13 +187,21 @@ export default function AgentSettings({ name, title, data, provider, oauthState,
 
   const oauthAuthorized = Boolean(oauthState?.data?.authorized);
   const apiKeyReady = Boolean(provider?.configured?.api_key);
-  const selectedReady = authMode === 'oauth' ? oauthAuthorized : apiKeyReady;
+  const antigravityConfigured = Boolean(antigravityData?.base_url?.trim());
+  const antigravityStatus = antigravityState?.data;
+  const antigravityReachable = Boolean(antigravityConfigured && antigravityStatus?.reachable);
+  const antigravityChecking = Boolean(antigravityConfigured && antigravityState?.isFetching && !antigravityStatus);
+  const selectedReady = authMode === 'oauth'
+    ? oauthAuthorized
+    : authMode === 'antigravity_gateway'
+      ? antigravityReachable
+      : apiKeyReady;
   const capQueryKey = [
     'integrations',
     'agent-capabilities',
     name,
     authMode,
-    provider?.base_url || '',
+    authMode === 'antigravity_gateway' ? (antigravityData?.base_url || '') : (provider?.base_url || ''),
     model.trim(),
     parsedContextWindow ?? 'auto',
     selectedReady,
@@ -211,7 +228,11 @@ export default function AgentSettings({ name, title, data, provider, oauthState,
   const effectiveCtx = capData?.effective_limit ?? (capabilities.isError ? parsedContextWindow : null);
   const capSource = capData?.source || (effectiveCtx != null ? 'manual' : 'unknown');
   const hasUnsavedAuthOrModel = authMode !== savedAuthMode || model.trim() !== savedModel.trim();
-  const savedAuthReady = savedAuthMode === 'oauth' ? oauthAuthorized : Boolean(apiKeyReady && savedModel.trim());
+  const savedAuthReady = savedAuthMode === 'oauth'
+    ? oauthAuthorized
+    : savedAuthMode === 'antigravity_gateway'
+      ? Boolean(antigravityConfigured && savedModel.trim())
+      : Boolean(apiKeyReady && savedModel.trim());
   const actionError = save.error || toggle.error || check.error;
 
   return (
@@ -238,12 +259,12 @@ export default function AgentSettings({ name, title, data, provider, oauthState,
       {/* Connection Mode Selection */}
       <div className="flex flex-col gap-2">
         <Field label="Режим подключения">
-          <div className="grid grid-cols-2 border border-[#303030] bg-[#0D0D0D]">
+          <div className="grid grid-cols-1 sm:grid-cols-3 border border-[#303030] bg-[#0D0D0D]">
             <button
               type="button"
               onClick={() => switchAuthMode('api_key')}
               className={cn(
-                'px-3 py-1.5 text-[12px] font-medium transition-colors cursor-pointer border-r border-[#303030]',
+                'px-3 py-1.5 text-[12px] font-medium transition-colors cursor-pointer border-b sm:border-b-0 sm:border-r border-[#303030]',
                 authMode === 'api_key'
                   ? 'bg-[#7F49B4]/20 text-[#EAEAEA] border-b-2 border-b-[#7F49B4]'
                   : 'text-[#929292] hover:text-[#EAEAEA] hover:bg-[#161616]',
@@ -255,7 +276,7 @@ export default function AgentSettings({ name, title, data, provider, oauthState,
               type="button"
               onClick={() => switchAuthMode('oauth')}
               className={cn(
-                'px-3 py-1.5 text-[12px] font-medium transition-colors cursor-pointer',
+                'px-3 py-1.5 text-[12px] font-medium transition-colors cursor-pointer border-b sm:border-b-0 sm:border-r border-[#303030]',
                 authMode === 'oauth'
                   ? 'bg-[#7F49B4]/20 text-[#EAEAEA] border-b-2 border-b-[#7F49B4]'
                   : 'text-[#929292] hover:text-[#EAEAEA] hover:bg-[#161616]',
@@ -263,19 +284,50 @@ export default function AgentSettings({ name, title, data, provider, oauthState,
             >
               OpenAI OAuth
             </button>
+            <button
+              type="button"
+              onClick={() => switchAuthMode('antigravity_gateway')}
+              className={cn(
+                'px-3 py-1.5 text-[12px] font-medium transition-colors cursor-pointer',
+                authMode === 'antigravity_gateway'
+                  ? 'bg-[#7F49B4]/20 text-[#EAEAEA] border-b-2 border-b-[#7F49B4]'
+                  : 'text-[#929292] hover:text-[#EAEAEA] hover:bg-[#161616]',
+              )}
+            >
+              Antigravity Gateway
+            </button>
           </div>
         </Field>
 
         <div className="flex flex-wrap items-center justify-between gap-2 border border-[#262626] bg-[#0D0D0D] px-2.5 py-2 text-[12px]">
           <div className="flex flex-wrap items-center gap-2 min-w-0">
-            <Badge variant={selectedReady ? 'success' : 'warning'}>
+            <Badge
+              variant={
+                authMode === 'antigravity_gateway'
+                  ? (!antigravityConfigured || antigravityChecking ? 'outline' : antigravityReachable ? 'success' : 'warning')
+                  : (selectedReady ? 'success' : 'warning')
+              }
+            >
               {authMode === 'oauth'
                 ? (selectedReady ? 'Вход выполнен' : 'Нет входа')
-                : (selectedReady ? 'Ключ настроен' : 'Нет ключа')}
+                : authMode === 'antigravity_gateway'
+                  ? (!antigravityConfigured
+                    ? 'Шлюз не настроен'
+                    : antigravityChecking
+                      ? 'Проверка шлюза…'
+                      : antigravityReachable
+                        ? 'Шлюз доступен'
+                        : 'Шлюз недоступен')
+                  : (selectedReady ? 'Ключ настроен' : 'Нет ключа')}
             </Badge>
-            {authMode !== 'oauth' && (
+            {authMode === 'api_key' && (
               <span className="text-[11px] text-[#929292] truncate">
                 {provider?.base_url || 'https://lenec.tech/v1'}
+              </span>
+            )}
+            {authMode === 'antigravity_gateway' && antigravityConfigured && (
+              <span className="text-[11px] text-[#929292] truncate">
+                {antigravityData.base_url}
               </span>
             )}
           </div>
@@ -285,6 +337,9 @@ export default function AgentSettings({ name, title, data, provider, oauthState,
             </Button>
           )}
         </div>
+        {authMode === 'antigravity_gateway' && antigravityConfigured && !antigravityReachable && (antigravityStatus?.error || antigravityState?.error) && (
+          <Notice tone="warning">{antigravityStatus?.error || antigravityState?.error?.message}</Notice>
+        )}
       </div>
 
       {/* Model Selection */}
@@ -293,6 +348,8 @@ export default function AgentSettings({ name, title, data, provider, oauthState,
         authMode={authMode}
         providerConfigured={apiKeyReady}
         oauthAuthorized={oauthAuthorized}
+        antigravityConfigured={antigravityConfigured}
+        gatewayUrl={antigravityData?.base_url || ''}
         value={model}
         onChange={setModel}
         onModelsLoaded={() => client.invalidateQueries({ queryKey: ['integrations', 'agent-capabilities', name] })}
@@ -506,7 +563,7 @@ export default function AgentSettings({ name, title, data, provider, oauthState,
         <Button
           variant="primary"
           loading={save.isPending}
-          disabled={toggle.isPending || Boolean(contextWindowError) || (authMode === 'api_key' && !model.trim())}
+          disabled={toggle.isPending || Boolean(contextWindowError) || ((authMode === 'api_key' || authMode === 'antigravity_gateway') && !model.trim())}
           onClick={() => save.mutate()}
         >
           Сохранить

@@ -17,6 +17,8 @@ export default function ModelPicker({
   chatgpt = false,
   authMode = chatgpt ? 'oauth' : 'api_key',
   oauthAuthorized = true,
+  antigravityConfigured = false,
+  gatewayUrl = '',
 }) {
   const [items, setItems] = useState([]);
   const [manual, setManual] = useState(false);
@@ -25,6 +27,7 @@ export default function ModelPicker({
   const [error, setError] = useState('');
   const active = useRef(null);
   const isOauth = authMode === 'oauth';
+  const isAntigravity = authMode === 'antigravity_gateway';
 
   useEffect(() => {
     setItems([]);
@@ -32,7 +35,7 @@ export default function ModelPicker({
     setError('');
     setLoading(false);
     return () => active.current?.abort();
-  }, [path, authMode, endpoint, apiKey]);
+  }, [path, authMode, endpoint, apiKey, gatewayUrl]);
 
   async function load() {
     active.current?.abort();
@@ -41,18 +44,19 @@ export default function ModelPicker({
     setLoading(true);
     setError('');
     try {
+      const body = isOauth
+        ? { auth_mode: 'oauth' }
+        : isAntigravity
+          ? { auth_mode: 'antigravity_gateway' }
+          : {
+              auth_mode: 'api_key',
+              ...(endpoint.trim() ? { base_url: endpoint.trim() } : {}),
+              ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}),
+            };
       const result = await request(path, {
         method: 'POST',
         signal: controller.signal,
-        body: JSON.stringify(
-          isOauth
-            ? { auth_mode: 'oauth' }
-            : {
-                auth_mode: 'api_key',
-                ...(endpoint.trim() ? { base_url: endpoint.trim() } : {}),
-                ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}),
-              },
-        ),
+        body: JSON.stringify(body),
       });
       if (controller.signal.aborted) return;
       setItems([...new Set(result.filter((item) => typeof item === 'string' && item.trim()))]);
@@ -65,7 +69,18 @@ export default function ModelPicker({
     }
   }
 
-  const canLoad = isOauth ? Boolean(oauthAuthorized) : Boolean(providerConfigured || (endpoint.trim() && apiKey.trim()));
+  const canLoad = isOauth
+    ? Boolean(oauthAuthorized)
+    : isAntigravity
+      ? Boolean(antigravityConfigured)
+      : Boolean(providerConfigured || (endpoint.trim() && apiKey.trim()));
+
+  useEffect(() => {
+    if (isAntigravity && canLoad && !loaded && !loading && !error) {
+      load();
+    }
+  }, [isAntigravity, canLoad, loaded, error, path, gatewayUrl]);
+
   const options = [...new Set([value, ...items].filter(Boolean))];
 
   return (

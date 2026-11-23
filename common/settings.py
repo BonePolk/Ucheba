@@ -15,6 +15,7 @@ DEFAULTS = {
     'collector': {'enabled': False, 'chat_ids': []},
     'telegram': {'enabled': False, 'chat_ids': []},
     'ai_provider': {'base_url': 'https://lenec.tech/v1'},
+    'antigravity_gateway': {'base_url': ''},
     'monocle': {
         'enabled': True,
         'auth_mode': 'api_key',
@@ -66,6 +67,7 @@ SECRET_FIELDS = {
     'collector': {'bot_token'},
     'telegram': {'api_id', 'api_hash', 'phone', 'session'},
     'ai_provider': {'api_key'},
+    'antigravity_gateway': {'gateway_token'},
     'monocle': set(),
     'ameba': set(),
     'straus': set(),
@@ -239,6 +241,17 @@ def resolve_agent_auth(name, *, require_enabled=False, require_credentials=True)
     if require_enabled and not config.get('enabled'):
         raise HTTPException(400, f'Включите {label} в настройках')
     auth_mode = (config.get('auth_mode') or ('oauth' if name == 'arrodes' else 'api_key')).strip()
+    if auth_mode == 'antigravity_gateway':
+        gw_cfg, gw_secrets = read_settings('antigravity_gateway', apply_feature=False)
+        base_url = (gw_cfg.get('base_url') or '').strip()
+        token = (gw_secrets.get('gateway_token') or '').strip()
+        effective = dict(config, auth_mode=auth_mode, base_url=base_url)
+        if require_credentials:
+            if not base_url:
+                raise HTTPException(400, 'Укажите адрес Antigravity Gateway в разделе «Подключения AI»')
+            if not config.get('model', '').strip():
+                raise HTTPException(400, f'Выберите модель для {label} в настройках агента')
+        return effective, token
     effective = dict(config, auth_mode=auth_mode, base_url=provider_cfg['base_url'])
     if auth_mode == 'api_key':
         api_key = (provider_secrets.get('api_key') or '').strip()

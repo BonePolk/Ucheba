@@ -294,7 +294,10 @@ def _build_signature(session, state, include_ameba_facts: bool = True, adjustmen
     if adjustments is None:
         adjustments = read_adjustments(session)
     ameba_cfg = read_config('ameba')
-    provider_base = read_settings('ai_provider', apply_feature=False)[0].get('base_url')
+    if ameba_cfg.get('auth_mode') == 'antigravity_gateway':
+        provider_base = read_settings('antigravity_gateway', apply_feature=False)[0].get('base_url')
+    else:
+        provider_base = read_settings('ai_provider', apply_feature=False)[0].get('base_url')
     allowed_agents = ('Владелец', 'user', 'Ameba') if include_ameba_facts else ('Владелец', 'user')
     return json.dumps({
         'version': 46,

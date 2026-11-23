@@ -219,10 +219,16 @@ export default function ArrodesWorkspace({ task: fixedTask = null, features = {}
   const browserActive = isBrowserActiveInRun(liveEntry);
 
   const authMode = integrations.data?.arrodes?.auth_mode || 'oauth';
-  const apiKeyReady = Boolean(integrations.data?.ai_provider?.configured?.api_key && (integrations.data?.arrodes?.model || '').trim());
+  const modelConfigured = Boolean((integrations.data?.arrodes?.model || '').trim());
+  const apiKeyReady = Boolean(integrations.data?.ai_provider?.configured?.api_key && modelConfigured);
+  const antigravityReady = Boolean(integrations.data?.antigravity_gateway?.base_url?.trim() && modelConfigured);
   const oauthReady = Boolean(arrodesStatus.data?.authorized);
-  const authReady = authMode === 'api_key' ? apiKeyReady : oauthReady;
-  const notAuthorized = authMode === 'api_key' ? Boolean(integrations.data && !apiKeyReady) : Boolean(arrodesStatus.data && !oauthReady);
+  const authReady = authMode === 'api_key' ? apiKeyReady : authMode === 'antigravity_gateway' ? antigravityReady : oauthReady;
+  const notAuthorized = authMode === 'api_key'
+    ? Boolean(integrations.data && !apiKeyReady)
+    : authMode === 'antigravity_gateway'
+      ? Boolean(integrations.data && !antigravityReady)
+      : Boolean(arrodesStatus.data && !oauthReady);
   const sandboxBlocked = arrodesStatus.data && !arrodesStatus.data.sandbox_available;
   const configuredModel = integrations.data?.arrodes?.model;
   const liveActiveCard = Boolean(
@@ -251,9 +257,13 @@ export default function ArrodesWorkspace({ task: fixedTask = null, features = {}
           <div className="flex items-center gap-2 min-w-0">
             {!compact && <Terminal className="h-4 w-4 text-[#B98CE8] shrink-0" aria-hidden="true" />}
             {!compact && <span className="text-[14px] font-semibold text-[#EAEAEA]">Arrodes</span>}
-            {(authMode === 'api_key' ? integrations.data : arrodesStatus.data) && (
+            {(authMode === 'oauth' ? arrodesStatus.data : integrations.data) && (
               <Badge variant={authReady ? 'success' : 'warning'}>
-                {authMode === 'api_key' ? (authReady ? 'API-ключ' : 'Нет ключа') : (authReady ? 'Подключён' : 'Нет входа')}
+                {authMode === 'api_key'
+                  ? (authReady ? 'API-ключ' : 'Нет ключа')
+                  : authMode === 'antigravity_gateway'
+                    ? (authReady ? 'Antigravity Gateway' : 'Нет шлюза')
+                    : (authReady ? 'Подключён' : 'Нет входа')}
               </Badge>
             )}
             {configuredModel && <Badge variant="outline">{configuredModel}</Badge>}
@@ -294,7 +304,9 @@ export default function ArrodesWorkspace({ task: fixedTask = null, features = {}
           <Notice tone="warning" action={<Button size="xs" asChild><a href="/profile?tab=agents">Настроить</a></Button>}>
             {authMode === 'api_key'
               ? 'Сохраните API-ключ и модель Arrodes в настройках агентов.'
-              : 'Нужна авторизация OpenAI OAuth в настройках агентов.'}
+              : authMode === 'antigravity_gateway'
+                ? 'Укажите адрес Antigravity Gateway и модель Arrodes в настройках агентов.'
+                : 'Нужна авторизация OpenAI OAuth в настройках агентов.'}
           </Notice>
         )}
 
