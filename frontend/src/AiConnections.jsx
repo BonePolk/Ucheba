@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { ChevronDown, ChevronUp, ExternalLink, RefreshCw } from 'lucide-react';
+import { CheckCircle2, ExternalLink, RefreshCw } from 'lucide-react';
 import { request } from './api';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/controls';
@@ -16,51 +16,43 @@ export default function AiConnections({ data, oauthState, antigravityData, antig
   const [endpoint, setEndpoint] = useState(data?.base_url || 'https://lenec.tech/v1');
   const [apiKey, setApiKey] = useState('');
 
-  // Google Antigravity OAuth & client config state
+  // Пользовательская OAuth-сессия Google Antigravity (без системных OAuth-настроек)
   const [agPending, setAgPending] = useState(null);
   const [agCallbackInput, setAgCallbackInput] = useState('');
-  const [agConfigOpen, setAgConfigOpen] = useState(false);
-  const [agClientId, setAgClientId] = useState(antigravityData?.client_id || '');
-  const [agClientSecret, setAgClientSecret] = useState('');
-  const [agRedirectUri, setAgRedirectUri] = useState(antigravityData?.redirect_uri || 'https://antigravity.google/oauth-callback');
-  const [agCloudcodeUrl, setAgCloudcodeUrl] = useState(antigravityData?.cloudcode_url || 'https://daily-cloudcode-pa.googleapis.com');
-  const [agProjectId, setAgProjectId] = useState(antigravityData?.project_id || '');
-  const [agUserAgent, setAgUserAgent] = useState(antigravityData?.user_agent || '');
-  const [agIncludeInternal, setAgIncludeInternal] = useState(Boolean(antigravityData?.include_internal));
-
-  useEffect(() => {
-    setAgClientId(antigravityData?.client_id || '');
-    setAgRedirectUri(antigravityData?.redirect_uri || 'https://antigravity.google/oauth-callback');
-    setAgCloudcodeUrl(antigravityData?.cloudcode_url || 'https://daily-cloudcode-pa.googleapis.com');
-    setAgProjectId(antigravityData?.project_id || '');
-    setAgUserAgent(antigravityData?.user_agent || '');
-    setAgIncludeInternal(Boolean(antigravityData?.include_internal));
-  }, [
-    antigravityData?.client_id,
-    antigravityData?.redirect_uri,
-    antigravityData?.cloudcode_url,
-    antigravityData?.project_id,
-    antigravityData?.user_agent,
-    antigravityData?.include_internal,
-  ]);
+  const [agTestModel, setAgTestModel] = useState('');
 
   const keyConfigured = Boolean(data?.configured?.api_key);
   const oauthAuthorized = Boolean(oauthState?.data?.authorized);
   const device = oauthState?.data?.device;
 
   const agStatus = antigravityState?.data;
+  const agSystemEnabled = (agStatus?.system_enabled ?? antigravityData?.system_enabled) !== false;
+  const agSystemConfigured = (agStatus?.system_configured ?? antigravityData?.system_configured) !== false;
   const agAuthorized = Boolean(
-    agStatus?.authorized
+    agStatus?.oauth_authorized
+    ?? agStatus?.authorized
     ?? (antigravityData?.configured?.access_token || antigravityData?.configured?.refresh_token),
   );
   const agEmail = agStatus?.account_email || antigravityData?.account_email || '';
   const agName = agStatus?.account_name || antigravityData?.account_name || '';
-  const agEffectiveProject = agStatus?.project_id || antigravityData?.project_id || antigravityData?.discovered_project_id || '';
+  const agEffectiveProject = agStatus?.project_id || antigravityData?.discovered_project_id || '';
   const agTier = agStatus?.subscription_tier || antigravityData?.subscription_tier || '';
-  const agSecretConfigured = Boolean(agStatus?.client_secret_configured ?? antigravityData?.configured?.client_secret);
-  const agModels = Array.isArray(agStatus?.models) ? agStatus.models : [];
+  const agModels = Array.isArray(agStatus?.models)
+    ? agStatus.models
+    : (Array.isArray(antigravityData?.cached_models) ? antigravityData.cached_models : []);
   const agTokenExpired = Boolean(agStatus?.token_expired);
-  const agSubscribed = agStatus?.subscription_verified;
+  const agCatalogAccessible = Boolean(agStatus?.catalog_accessible ?? antigravityData?.catalog_accessible);
+  const agGenerationVerified = Boolean(agStatus?.generation_verified ?? antigravityData?.generation_verified);
+  const agVerifiedModel = agStatus?.generation_verified_model || antigravityData?.generation_verified_model || '';
+  const agVerifiedAt = agStatus?.generation_verified_at || antigravityData?.generation_verified_at || null;
+  const agIncludeInternal = Boolean(agStatus?.include_internal ?? antigravityData?.include_internal);
+
+  useEffect(() => {
+    if (!agTestModel && agModels.length > 0) {
+      const firstAvail = agModels.find((m) => m.available !== false) || agModels[0];
+      if (firstAvail?.id) setAgTestModel(firstAvail.id);
+    }
+  }, [agModels, agTestModel]);
 
   const invalidateAllAi = () => Promise.all([
     client.invalidateQueries({ queryKey: ['integrations'], exact: true }),
@@ -145,7 +137,7 @@ export default function AiConnections({ data, oauthState, antigravityData, antig
     mutationFn: () => request('/integrations/antigravity/login/complete', {
       method: 'POST',
       body: JSON.stringify({
-        callback_url_or_code: agCallbackInput.trim(),
+        callback_url: agCallbackInput.trim(),
         ...(agPending?.state ? { state: agPending.state } : {}),
       }),
     }),
@@ -165,6 +157,29 @@ export default function AiConnections({ data, oauthState, antigravityData, antig
     },
   });
 
+  const agTestGeneration = useMutation({
+    mutationFn: () => request('/integrations/antigravity/test-generation', {
+      method: 'POST',
+      body: JSON.stringify({ model: agTestModel.trim() }),
+    }),
+    onSuccess: async (res) => {
+      if (res?.status) {
+        client.setQueriesData({ queryKey: ['integrations', 'antigravity'] }, res.status);
+      }
+      await invalidateAllAi();
+    },
+  });
+
+  const agToggleInternal = useMutation({
+    mutationFn: (include_internal) => request('/integrations/antigravity/preferences', {
+      method: 'PATCH',
+      body: JSON.stringify({ include_internal }),
+    }),
+    onSuccess: async () => {
+      await invalidateAllAi();
+    },
+  });
+
   const agLogout = useMutation({
     mutationFn: () => request('/integrations/antigravity/logout', { method: 'POST' }),
     onSuccess: async () => {
@@ -174,49 +189,49 @@ export default function AiConnections({ data, oauthState, antigravityData, antig
     },
   });
 
-  const agSaveConfig = useMutation({
-    mutationFn: (mode = 'save') => request('/integrations/antigravity', {
-      method: 'PATCH',
-      body: JSON.stringify(
-        mode === 'remove_secret'
-          ? { client_secret: null }
-          : {
-              client_id: agClientId.trim(),
-              redirect_uri: agRedirectUri.trim(),
-              cloudcode_url: agCloudcodeUrl.trim(),
-              project_id: agProjectId.trim(),
-              user_agent: agUserAgent.trim(),
-              include_internal: agIncludeInternal,
-              ...(agClientSecret.trim() ? { client_secret: agClientSecret.trim() } : {}),
-            },
-      ),
-    }),
-    onSuccess: async () => {
-      setAgClientSecret('');
-      await invalidateAllAi();
-    },
-  });
-
   const oauthBusy = oauthConnect.isPending || oauthDisconnect.isPending;
   const providerBusy = saveProvider.isPending || checkProvider.isPending;
-  const agBusy = agStartLogin.isPending || agCompleteLogin.isPending || agRefresh.isPending || agLogout.isPending || agSaveConfig.isPending;
+  const agBusy = (
+    agStartLogin.isPending
+    || agCompleteLogin.isPending
+    || agRefresh.isPending
+    || agTestGeneration.isPending
+    || agToggleInternal.isPending
+    || agLogout.isPending
+  );
   const oauthError = oauthConnect.error || oauthDisconnect.error;
   const providerError = saveProvider.error || checkProvider.error;
-  const agActionError = agStartLogin.error || agCompleteLogin.error || agRefresh.error || agLogout.error || agSaveConfig.error;
-  const agServerError = agStatus?.error || antigravityData?.last_error;
+  const agActionError = agStartLogin.error || agCompleteLogin.error || agRefresh.error || agTestGeneration.error || agLogout.error;
+  const agOAuthError = agStatus?.oauth_error || null;
+  const agQuotaError = agStatus?.quota_error || null;
+  const agServerError = !agOAuthError && !agQuotaError ? (agStatus?.error || antigravityData?.last_error) : null;
 
-  const agBadgeVariant = !agAuthorized
-    ? 'outline'
-    : agServerError || agSubscribed === false || agTokenExpired
-      ? 'warning'
-      : 'success';
-  const agBadgeText = !agAuthorized
-    ? 'Не подключён'
-    : agTokenExpired
-      ? 'Токен истёк'
-      : agServerError || agSubscribed === false
-        ? 'Ошибка доступа'
-        : 'Подключён';
+  const agBadgeVariant = !agSystemEnabled || !agSystemConfigured
+    ? 'warning'
+    : !agAuthorized
+      ? 'outline'
+      : agOAuthError || agTokenExpired
+        ? 'warning'
+        : agQuotaError || !agCatalogAccessible
+          ? 'warning'
+          : agGenerationVerified
+            ? 'success'
+            : 'outline';
+  const agBadgeText = !agSystemEnabled
+    ? 'Отключён админом'
+    : !agSystemConfigured
+      ? 'Не настроен админом'
+      : !agAuthorized
+        ? 'Не подключён'
+        : agTokenExpired
+          ? 'Токен истёк'
+          : agOAuthError
+            ? 'Ошибка OAuth'
+            : !agCatalogAccessible
+              ? 'Нет доступа к каталогу'
+              : agGenerationVerified
+                ? 'Подтверждён'
+                : 'Каталог доступен';
 
   return (
     <div className="flex flex-col gap-4">
@@ -224,7 +239,7 @@ export default function AiConnections({ data, oauthState, antigravityData, antig
         <SectionHeader title="Подключения AI" />
       </div>
 
-      {/* Google Antigravity (Native OAuth + Cloud Code) */}
+      {/* Google Antigravity (Пользовательская OAuth-сессия) */}
       <section className="border border-[#262626] bg-[#0D0D0D] p-3 flex flex-col gap-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <span className="text-[13px] font-medium text-[#EAEAEA]">Google Antigravity</span>
@@ -232,11 +247,20 @@ export default function AiConnections({ data, oauthState, antigravityData, antig
         </div>
 
         <div className="text-[11px] text-[#929292]">
-          Прямое подключение к Cloud Code API через Google OAuth 2.0 (PKCE) для моделей Gemini и Claude с учётом квот аккаунта.
+          Подключение вашего Google-аккаунта к Cloud Code API (настраивается администратором Ucheba).
         </div>
 
+        {!agSystemEnabled && (
+          <Notice tone="warning">Google Antigravity отключён администратором.</Notice>
+        )}
+        {agSystemEnabled && !agSystemConfigured && (
+          <Notice tone="warning">
+            Google Antigravity пока не настроен администратором (укажите OAuth Client ID и Client Secret в админ-панели).
+          </Notice>
+        )}
+
         {agAuthorized && (
-          <div className="border border-[#242424] bg-[#111111] px-2.5 py-2 text-[12px] flex flex-col gap-1">
+          <div className="border border-[#242424] bg-[#111111] px-2.5 py-2 text-[12px] flex flex-col gap-1.5">
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
               <span className="text-[#929292]">Аккаунт:</span>
               <span className="text-[#EAEAEA] font-medium break-all">
@@ -251,10 +275,28 @@ export default function AiConnections({ data, oauthState, antigravityData, antig
                 {agTier && <Badge variant="outline">{agTier}</Badge>}
               </div>
             )}
+            <div className="flex flex-wrap gap-1.5 pt-0.5">
+              <Badge variant={agTokenExpired ? 'warning' : 'success'}>
+                {agTokenExpired ? 'OAuth: требуется обновление' : 'OAuth: авторизован'}
+              </Badge>
+              <Badge variant={agCatalogAccessible ? 'success' : 'warning'}>
+                {agCatalogAccessible ? 'Каталог Cloud Code: доступен' : 'Каталог Cloud Code: не подтверждён'}
+              </Badge>
+              <Badge variant={agGenerationVerified ? 'success' : 'outline'}>
+                {agGenerationVerified
+                  ? `Генерация: подтверждена (${agVerifiedModel || 'OK'})`
+                  : 'Генерация: не проверялась'}
+              </Badge>
+            </div>
             {agStatus?.token_expires_at && (
               <div className="text-[11px] text-[#929292]">
                 Токен действует до: {new Date(agStatus.token_expires_at).toLocaleString()}
                 {agStatus.has_refresh_token ? ' · автообновление активно' : ' · без refresh_token'}
+              </div>
+            )}
+            {agVerifiedAt && (
+              <div className="text-[11px] text-[#929292]">
+                Тест генерации пройден: {new Date(agVerifiedAt).toLocaleString()}
               </div>
             )}
           </div>
@@ -265,7 +307,7 @@ export default function AiConnections({ data, oauthState, antigravityData, antig
             size="sm"
             variant="primary"
             loading={agStartLogin.isPending}
-            disabled={agBusy}
+            disabled={agBusy || !agSystemEnabled || !agSystemConfigured}
             onClick={() => agStartLogin.mutate()}
           >
             {agAuthorized ? 'Переподключить Google' : 'Войти через Google'}
@@ -276,10 +318,10 @@ export default function AiConnections({ data, oauthState, antigravityData, antig
               variant="default"
               leftIcon={<RefreshCw className={`h-3 w-3 ${agRefresh.isPending ? 'animate-spin' : ''}`} />}
               loading={agRefresh.isPending}
-              disabled={agBusy}
+              disabled={agBusy || !agSystemEnabled || !agSystemConfigured}
               onClick={() => agRefresh.mutate()}
             >
-              Обновить токен и модели
+              Обновить токен и каталог
             </Button>
           )}
           {agAuthorized && (
@@ -297,21 +339,49 @@ export default function AiConnections({ data, oauthState, antigravityData, antig
               Выйти
             </Button>
           )}
-          <Button
-            size="sm"
-            variant="subtle"
-            rightIcon={agConfigOpen ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
-            onClick={() => setAgConfigOpen((prev) => !prev)}
-          >
-            Параметры OAuth
-          </Button>
         </div>
+
+        {agAuthorized && agSystemEnabled && agSystemConfigured && (
+          <div className="border border-[#242424] bg-[#111111] p-2.5 flex flex-col gap-2">
+            <div className="flex flex-wrap items-end gap-2">
+              <Field label="Модель для проверки реальной генерации" className="w-full sm:flex-1 sm:min-w-[220px]">
+                <Input
+                  placeholder="Например, gemini-2.5-flash"
+                  value={agTestModel}
+                  maxLength={200}
+                  onChange={(event) => setAgTestModel(event.currentTarget.value)}
+                />
+              </Field>
+              <Button
+                size="sm"
+                variant="default"
+                leftIcon={<CheckCircle2 className="h-3.5 w-3.5" />}
+                loading={agTestGeneration.isPending}
+                disabled={agBusy || !agTestModel.trim()}
+                onClick={() => agTestGeneration.mutate()}
+              >
+                Проверить генерацию
+              </Button>
+            </div>
+            <Switch
+              label="Показывать внутренние / экспериментальные модели без displayName"
+              checked={agIncludeInternal}
+              disabled={agBusy}
+              onCheckedChange={(checked) => agToggleInternal.mutate(checked)}
+            />
+            {agTestGeneration.data?.ok && (
+              <Notice tone="success">
+                Генерация подтверждена ({agTestGeneration.data.model}): {agTestGeneration.data.sample_text}
+              </Notice>
+            )}
+          </div>
+        )}
 
         {agPending && (
           <Notice tone="accent" title="Завершите вход через Google">
             <div className="flex flex-col gap-2 mt-1">
               <div className="text-[11px] text-[#DCDCDC]">
-                Откройте страницу авторизации Google, подтвердите доступ и вставьте итоговый URL перенаправления (или код авторизации).
+                Откройте страницу авторизации Google, подтвердите доступ и вставьте <strong>полный URL перенаправления</strong> из адресной строки браузера, содержащий параметры <span className="font-mono">state</span> и <span className="font-mono">code</span>.
               </div>
               <a
                 href={agPending.auth_url}
@@ -321,12 +391,7 @@ export default function AiConnections({ data, oauthState, antigravityData, antig
               >
                 Открыть страницу Google OAuth <ExternalLink className="h-3 w-3" />
               </a>
-              {!agPending.client_secret_configured && (
-                <div className="text-[11px] text-[#D4A24C]">
-                  Client Secret не задан: если выбранный OAuth-клиент конфиденциальный, укажите Client Secret в «Параметрах OAuth» перед входом.
-                </div>
-              )}
-              <Field label="URL перенаправления или код авторизации">
+              <Field label="Полный URL перенаправления">
                 <Input
                   placeholder="https://antigravity.google/oauth-callback?state=...&code=..."
                   value={agCallbackInput}
@@ -359,87 +424,13 @@ export default function AiConnections({ data, oauthState, antigravityData, antig
           </Notice>
         )}
 
-        {agConfigOpen && (
-          <div className="border border-[#242424] bg-[#111111] p-2.5 flex flex-col gap-2.5">
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-              <Field label="OAuth Client ID">
-                <Input
-                  value={agClientId}
-                  maxLength={300}
-                  onChange={(event) => setAgClientId(event.currentTarget.value)}
-                />
-              </Field>
-              <Field label="OAuth Client Secret">
-                <PasswordField
-                  placeholder={agSecretConfigured ? 'Сохранён' : 'Не задан'}
-                  value={agClientSecret}
-                  autoComplete="new-password"
-                  onChange={(event) => setAgClientSecret(event.currentTarget.value)}
-                />
-              </Field>
-              <Field label="Redirect URI">
-                <Input
-                  value={agRedirectUri}
-                  maxLength={500}
-                  onChange={(event) => setAgRedirectUri(event.currentTarget.value)}
-                />
-              </Field>
-              <Field label="Cloud Code Endpoint">
-                <Input
-                  value={agCloudcodeUrl}
-                  maxLength={2000}
-                  onChange={(event) => setAgCloudcodeUrl(event.currentTarget.value)}
-                />
-              </Field>
-              <Field label="Cloud Code Project ID (опционально)" hint="Пусто — автоопределение через loadCodeAssist">
-                <Input
-                  placeholder="Автоопределение"
-                  value={agProjectId}
-                  maxLength={200}
-                  onChange={(event) => setAgProjectId(event.currentTarget.value)}
-                />
-              </Field>
-              <Field label="User-Agent (опционально)" hint="Пусто — стандартный CLI User-Agent">
-                <Input
-                  placeholder="antigravity/cli/1.5.15 ..."
-                  value={agUserAgent}
-                  maxLength={300}
-                  onChange={(event) => setAgUserAgent(event.currentTarget.value)}
-                />
-              </Field>
-            </div>
-            <Switch
-              label="Показывать внутренние / экспериментальные модели без displayName"
-              checked={agIncludeInternal}
-              onCheckedChange={setAgIncludeInternal}
-            />
-            <div className="flex flex-wrap gap-2">
-              <Button
-                size="sm"
-                variant="primary"
-                loading={agSaveConfig.isPending && agSaveConfig.variables === 'save'}
-                disabled={agBusy || !agClientId.trim()}
-                onClick={() => agSaveConfig.mutate('save')}
-              >
-                Сохранить параметры
-              </Button>
-              {agSecretConfigured && (
-                <Button
-                  size="sm"
-                  variant="danger-ghost"
-                  loading={agSaveConfig.isPending && agSaveConfig.variables === 'remove_secret'}
-                  disabled={agBusy}
-                  onClick={() => agSaveConfig.mutate('remove_secret')}
-                >
-                  Удалить Client Secret
-                </Button>
-              )}
-            </div>
-            {agSaveConfig.isSuccess && <Notice tone="success">Параметры Google Antigravity сохранены.</Notice>}
-          </div>
-        )}
-
         {agActionError && <Notice tone="error">{agActionError.message}</Notice>}
+        {agOAuthError && !agActionError && (
+          <Notice tone="error" title="Ошибка OAuth Google">{agOAuthError}</Notice>
+        )}
+        {agQuotaError && !agActionError && (
+          <Notice tone="warning" title="Проблема доступа или квоты Cloud Code">{agQuotaError}</Notice>
+        )}
         {agServerError && !agActionError && (
           <Notice tone="warning" title="Ошибка Google Antigravity">{agServerError}</Notice>
         )}
@@ -593,28 +584,26 @@ export default function AiConnections({ data, oauthState, antigravityData, antig
           >
             Проверить шлюз
           </Button>
-          {keyConfigured && (
-            <Button
-              variant="danger-ghost"
-              disabled={providerBusy}
-              onClick={() => saveProvider.mutate(true)}
-            >
-              Удалить ключ
-            </Button>
-          )}
+          <Button
+            variant="danger-ghost"
+            loading={saveProvider.isPending}
+            disabled={providerBusy || !keyConfigured}
+            onClick={() => {
+              if (window.confirm('Удалить сохранённый API-ключ?')) saveProvider.mutate(true);
+            }}
+          >
+            Удалить ключ
+          </Button>
         </div>
 
         {providerError && <Notice tone="error">{providerError.message}</Notice>}
-        {saveProvider.isSuccess && <Notice tone="success">Настройки шлюза сохранены.</Notice>}
+        {saveProvider.isSuccess && <Notice tone="success">Сохранено.</Notice>}
         {checkProvider.isSuccess && (
-          <Notice tone="success">
-            Шлюз доступен, моделей: {checkProvider.data?.models_count ?? 0}.
-          </Notice>
+          <Notice tone="success">Соединение работает. Доступных моделей: {checkProvider.data.models_count}.</Notice>
         )}
-        {data?.last_error && <Notice tone="warning" title="Ошибка">{data.last_error}</Notice>}
         {data?.last_success && (
           <div className="text-[11px] text-[#929292]">
-            Успешно: {new Date(data.last_success).toLocaleString()}
+            Последняя проверка: {new Date(data.last_success).toLocaleString()}
           </div>
         )}
       </section>

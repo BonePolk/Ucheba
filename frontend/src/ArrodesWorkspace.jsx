@@ -222,7 +222,11 @@ export default function ArrodesWorkspace({ task: fixedTask = null, features = {}
   const authMode = rawAuthMode === 'antigravity_gateway' ? 'antigravity' : rawAuthMode;
   const modelConfigured = Boolean((integrations.data?.arrodes?.model || '').trim());
   const apiKeyReady = Boolean(integrations.data?.ai_provider?.configured?.api_key && modelConfigured);
-  const antigravitySession = Boolean(integrations.data?.antigravity?.configured?.access_token || integrations.data?.antigravity?.configured?.refresh_token);
+  const antigravitySession = Boolean(
+    integrations.data?.antigravity?.system_enabled !== false
+    && integrations.data?.antigravity?.system_configured !== false
+    && (integrations.data?.antigravity?.configured?.access_token || integrations.data?.antigravity?.configured?.refresh_token),
+  );
   const antigravityReady = Boolean(antigravitySession && modelConfigured);
   const oauthReady = Boolean(arrodesStatus.data?.authorized);
   const authReady = authMode === 'api_key' ? apiKeyReady : authMode === 'antigravity' ? antigravityReady : oauthReady;

@@ -189,14 +189,23 @@ export default function AgentSettings({
   const oauthAuthorized = Boolean(oauthState?.data?.authorized);
   const apiKeyReady = Boolean(provider?.configured?.api_key);
   const agStatus = antigravityState?.data;
+  const agSystemEnabled = (agStatus?.system_enabled ?? antigravityData?.system_enabled) !== false;
+  const agSystemConfigured = (agStatus?.system_configured ?? antigravityData?.system_configured) !== false;
   const agSessionPresent = Boolean(
-    agStatus?.authorized
+    agStatus?.oauth_authorized
+    ?? agStatus?.authorized
     ?? (antigravityData?.configured?.access_token || antigravityData?.configured?.refresh_token),
   );
   const agEmail = agStatus?.account_email || antigravityData?.account_email || '';
-  const agError = agStatus?.error || antigravityData?.last_error || antigravityState?.error?.message || null;
+  const agError = agStatus?.oauth_error || agStatus?.quota_error || agStatus?.error || antigravityData?.last_error || antigravityState?.error?.message || null;
   const agChecking = Boolean(agSessionPresent && antigravityState?.isFetching && !agStatus);
-  const agReady = Boolean(agSessionPresent && agStatus?.subscription_verified !== false && !agStatus?.token_expired);
+  const agReady = Boolean(
+    agSystemEnabled
+    && agSystemConfigured
+    && agSessionPresent
+    && (agStatus?.catalog_accessible ?? agStatus?.subscription_verified) !== false
+    && !agStatus?.token_expired,
+  );
   const selectedReady = authMode === 'oauth'
     ? oauthAuthorized
     : authMode === 'antigravity'
@@ -207,7 +216,7 @@ export default function AgentSettings({
     'agent-capabilities',
     name,
     authMode,
-    authMode === 'antigravity' ? (antigravityData?.cloudcode_url || '') : (provider?.base_url || ''),
+    authMode === 'antigravity' ? (antigravityData?.discovered_project_id || agEmail || '') : (provider?.base_url || ''),
     model.trim(),
     parsedContextWindow ?? 'auto',
     selectedReady,
@@ -354,8 +363,8 @@ export default function AgentSettings({
         authMode={authMode}
         providerConfigured={apiKeyReady}
         oauthAuthorized={oauthAuthorized}
-        antigravityAuthorized={agSessionPresent}
-        gatewayUrl={antigravityData?.cloudcode_url || ''}
+        antigravityAuthorized={agReady}
+        gatewayUrl={antigravityData?.discovered_project_id || ''}
         value={model}
         onChange={setModel}
         onModelsLoaded={() => client.invalidateQueries({ queryKey: ['integrations', 'agent-capabilities', name] })}

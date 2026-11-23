@@ -5,11 +5,12 @@ from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session
 
-from common.antigravity import DEFAULT_CLOUDCODE_URL, DEFAULT_PUBLIC_CLIENT_ID, DEFAULT_REDIRECT_URI
-from common.database import get_engine
+from common.antigravity import DEFAULT_CLOUDCODE_URL
+from common.database import engine, get_engine
 from common.rpc import service_name
 from common.security import decrypt, encrypt
 from common.models.integration import IntegrationSetting
+from common.models.user import SystemSetting
 
 DEFAULTS = {
     'notifications': {'enabled': False, 'owner_id': None, 'lead_minutes': 30},
@@ -17,18 +18,19 @@ DEFAULTS = {
     'telegram': {'enabled': False, 'chat_ids': []},
     'ai_provider': {'base_url': 'https://lenec.tech/v1'},
     'antigravity': {
-        'client_id': DEFAULT_PUBLIC_CLIENT_ID,
-        'redirect_uri': DEFAULT_REDIRECT_URI,
-        'cloudcode_url': DEFAULT_CLOUDCODE_URL,
-        'project_id': '',
-        'user_agent': '',
-        'include_internal': False,
         'account_email': '',
         'account_name': '',
         'discovered_project_id': '',
         'subscription_tier': '',
         'token_expires_at': None,
         'scopes': '',
+        'include_internal': False,
+        'catalog_accessible': False,
+        'catalog_checked_at': None,
+        'cached_models': [],
+        'generation_verified': False,
+        'generation_verified_at': None,
+        'generation_verified_model': '',
     },
     'monocle': {
         'enabled': True,
@@ -81,7 +83,7 @@ SECRET_FIELDS = {
     'collector': {'bot_token'},
     'telegram': {'api_id', 'api_hash', 'phone', 'session'},
     'ai_provider': {'api_key'},
-    'antigravity': {'client_secret', 'access_token', 'refresh_token'},
+    'antigravity': {'access_token', 'refresh_token'},
     'monocle': set(),
     'ameba': set(),
     'straus': set(),
@@ -93,6 +95,57 @@ AGENT_LABELS = {
     'straus': 'Straus',
     'arrodes': 'Arrodes',
 }
+
+SYSTEM_DEFAULTS = {
+    'antigravity': {
+        'enabled': True,
+        'client_id': '',
+        'redirect_uri': '',
+        'cloudcode_url': DEFAULT_CLOUDCODE_URL,
+        'user_agent': '',
+        'allowed_scopes': [],
+        'diagnostic_mode': False,
+    },
+}
+SYSTEM_SECRET_FIELDS = {
+    'antigravity': {'client_secret'},
+}
+
+
+def read_system_setting(name: str) -> tuple[dict, dict]:
+    if name not in SYSTEM_DEFAULTS:
+        raise HTTPException(404, 'Неизвестная системная настройка')
+    with Session(engine) as session:
+        row = session.get(SystemSetting, name)
+        stored = json.loads(row.config) if row and row.config else {}
+        config = {key: stored.get(key, default) for key, default in SYSTEM_DEFAULTS[name].items()}
+        secrets = json.loads(decrypt(row.secrets)) if row and row.secrets else {}
+        return config, secrets
+
+
+def save_system_setting(name: str, config: dict | None = None, secrets: dict | None = None) -> tuple[dict, dict]:
+    if name not in SYSTEM_DEFAULTS:
+        raise HTTPException(404, 'Неизвестная системная настройка')
+    current, private = read_system_setting(name)
+    for key, val in (config or {}).items():
+        if key in SYSTEM_DEFAULTS[name]:
+            current[key] = val
+    for key, val in (secrets or {}).items():
+        if key not in SYSTEM_SECRET_FIELDS[name]:
+            continue
+        if val is None or val == '':
+            private.pop(key, None)
+        else:
+            private[key] = val
+    with Session(engine) as session:
+        row = session.get(SystemSetting, name) or SystemSetting(name=name)
+        row.config = json.dumps(current)
+        if secrets is not None:
+            row.secrets = encrypt(json.dumps(private)) if private else ''
+        row.updated_at = datetime.now(timezone.utc)
+        session.add(row)
+        session.commit()
+    return current, private
 
 
 def normalize_auth_mode(value: str | None, default: str = 'api_key') -> str:
@@ -274,14 +327,23 @@ def resolve_agent_auth(name, *, require_enabled=False, require_credentials=True)
     default_mode = 'oauth' if name == 'arrodes' else 'api_key'
     auth_mode = normalize_auth_mode(config.get('auth_mode'), default_mode)
     if auth_mode == 'antigravity':
+        sys_cfg, sys_secrets = read_system_setting('antigravity')
         ag_cfg, ag_secrets = read_settings('antigravity', apply_feature=False)
-        cloudcode_url = (ag_cfg.get('cloudcode_url') or DEFAULT_CLOUDCODE_URL).strip()
+        from common.antigravity import DEFAULT_PUBLIC_CLIENT_ID, env_client_id, env_client_secret, validate_cloudcode_url
+        if not sys_cfg.get('enabled', True):
+            raise HTTPException(403, 'Google Antigravity отключён администратором')
+        client_id = (sys_cfg.get('client_id') or env_client_id() or DEFAULT_PUBLIC_CLIENT_ID).strip()
+        client_secret = (sys_secrets.get('client_secret') or env_client_secret() or '').strip()
+        if require_credentials and not (client_id and client_secret):
+            raise HTTPException(400, 'Google Antigravity OAuth не настроен администратором')
+        cloudcode_url = validate_cloudcode_url(sys_cfg.get('cloudcode_url') or DEFAULT_CLOUDCODE_URL)
         effective = dict(
             config,
             auth_mode='antigravity',
             base_url=cloudcode_url,
             cloudcode_url=cloudcode_url,
-            project_id=(ag_cfg.get('project_id') or ag_cfg.get('discovered_project_id') or '').strip(),
+            project_id=(ag_cfg.get('discovered_project_id') or '').strip(),
+            user_agent=str(sys_cfg.get('user_agent') or ''),
             include_internal=bool(ag_cfg.get('include_internal', False)),
         )
         if require_credentials:

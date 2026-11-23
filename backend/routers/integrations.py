@@ -17,7 +17,6 @@ import httpx
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from sqlmodel import Session, select
 
-from common.antigravity import validate_cloudcode_url, validate_redirect_uri
 from common.provider import provider_url
 from common.database import get_engine
 from common.rpc import call, internal_token, service_name
@@ -130,8 +129,25 @@ async def check_ai_provider(body: dict | None = None):
 
 
 class AntigravityLoginComplete(BaseModel):
-    callback_url_or_code: str = Field(min_length=1, max_length=4000)
+    callback_url: str | None = Field(default=None, max_length=4000)
+    callback_url_or_code: str | None = Field(default=None, max_length=4000)
     state: str | None = Field(default=None, max_length=200)
+
+    @model_validator(mode='after')
+    def check_callback(self):
+        val = (self.callback_url or self.callback_url_or_code or '').strip()
+        if not val:
+            raise ValueError('callback_url')
+        self.callback_url = val
+        return self
+
+
+class AntigravityTestGeneration(BaseModel):
+    model: str = Field(min_length=1, max_length=200)
+
+
+class AntigravityPreferences(BaseModel):
+    include_internal: bool = False
 
 
 @router.get('/antigravity/status')
@@ -149,13 +165,31 @@ def antigravity_login_start():
 @router.post('/antigravity/login/complete')
 async def antigravity_login_complete(body: AntigravityLoginComplete):
     check_any_agent_feature()
-    return await antigravity.complete_login(body.callback_url_or_code, body.state)
+    return await antigravity.complete_login(body.callback_url, body.state)
 
 
 @router.post('/antigravity/refresh')
 async def antigravity_refresh():
     check_any_agent_feature()
     return await antigravity.status(live=True, force_refresh=True)
+
+
+@router.post('/antigravity/test-generation')
+async def antigravity_test_generation(body: AntigravityTestGeneration):
+    check_any_agent_feature()
+    return await antigravity.test_generation(body.model)
+
+
+@router.patch('/antigravity/preferences')
+def antigravity_preferences(body: AntigravityPreferences):
+    check_any_agent_feature()
+    save_settings('antigravity', config={'include_internal': body.include_internal})
+    return {'ok': True, 'include_internal': body.include_internal}
+
+
+@router.patch('/antigravity')
+def antigravity_forbid_user_config():
+    raise HTTPException(403, 'Системная конфигурация Google Antigravity настраивается только администратором')
 
 
 @router.post('/antigravity/logout')
@@ -226,9 +260,9 @@ async def agent_capabilities(
         effective['base_url'] = provider_cfg['base_url']
         api_key = (provider_secrets.get('api_key') or '').strip()
     elif auth_mode == 'antigravity':
-        ag_cfg, _ = read_settings('antigravity', apply_feature=False)
-        effective['base_url'] = (ag_cfg.get('cloudcode_url') or '').strip()
-        effective['cloudcode_url'] = effective['base_url']
+        g_cfg = antigravity.read_global_config()
+        effective['base_url'] = g_cfg['cloudcode_url']
+        effective['cloudcode_url'] = g_cfg['cloudcode_url']
     target = 'arrodes' if auth_mode == 'oauth' else name
     try:
         return await call(target, '/capabilities', {'config': effective, 'api_key': api_key}, timeout=10)
@@ -541,30 +575,6 @@ class AiProviderConfig(ProviderConfig):
     pass
 
 
-class AntigravityConfig(BaseModel):
-    client_id: str = Field(default='1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com', min_length=1, max_length=300)
-    redirect_uri: str = Field(default='https://antigravity.google/oauth-callback', max_length=500)
-    cloudcode_url: str = Field(default='https://daily-cloudcode-pa.googleapis.com', max_length=2000)
-    project_id: str = Field(default='', max_length=200)
-    user_agent: str = Field(default='', max_length=300)
-    include_internal: bool = False
-
-    @field_validator('cloudcode_url')
-    @classmethod
-    def valid_cloudcode_url(cls, value):
-        return validate_cloudcode_url(value)
-
-    @field_validator('redirect_uri')
-    @classmethod
-    def valid_redirect_uri(cls, value):
-        return validate_redirect_uri(value)
-
-    @field_validator('client_id', 'project_id', 'user_agent')
-    @classmethod
-    def strip_text(cls, value):
-        return (value or '').strip()
-
-
 class BaseAgentConfig(BaseModel):
     auth_mode: Literal['api_key', 'oauth', 'antigravity', 'antigravity_gateway'] = 'api_key'
     model: str = Field(default='gpt-6-luna', max_length=200)
@@ -631,7 +641,6 @@ class StrausConfig(BaseAgentConfig):
 
 CONFIG_MODELS = {
     'ai_provider': AiProviderConfig,
-    'antigravity': AntigravityConfig,
     'monocle': ContextConfig,
     'ameba': AmebaConfig,
     'straus': StrausConfig,
@@ -648,23 +657,30 @@ async def settings():
         state = await telegram.status()
     except (HTTPException, httpx.HTTPError):
         state = {'connected': False, 'analyzing': False}
-    return {**public_settings(), 'telegram_connected': state['connected'], 'analyzing': state['analyzing']}
+    pub = public_settings()
+    g_ag = antigravity.read_global_config()
+    pub['antigravity'] = {
+        **pub['antigravity'],
+        'system_enabled': bool(g_ag['enabled']),
+        'system_configured': bool(g_ag['configured']),
+    }
+    return {**pub, 'telegram_connected': state['connected'], 'analyzing': state['analyzing']}
 
 
 @router.patch('/{name}')
 async def configure(
     name: Literal[
         'telegram', 'arrodes', 'collector', 'notifications',
-        'monocle', 'ameba', 'straus', 'ai_provider', 'antigravity',
+        'monocle', 'ameba', 'straus', 'ai_provider',
     ],
     body: dict,
 ):
     name = service_name(name)
-    if name in ('ai_provider', 'antigravity'):
+    if name == 'ai_provider':
         check_any_agent_feature()
     elif body.get('enabled'):
         check_feature(name)
-    patchable_secrets = {'client_secret'} if name == 'antigravity' else (SECRET_FIELDS[name] - {'session'})
+    patchable_secrets = SECRET_FIELDS[name] - {'session'}
     allowed = set(CONFIG_MODELS[name].model_fields) | patchable_secrets
     if set(body) - allowed:
         raise HTTPException(422, 'Неизвестное поле настроек')
@@ -693,12 +709,6 @@ async def configure(
         save_settings(name, config=config, secrets=secrets if secrets else None)
         if name == 'ai_provider' and current.get('base_url') != config.get('base_url'):
             if read_config('monocle').get('auth_mode') == 'api_key':
-                context.invalidate_file_contexts()
-        if name == 'antigravity' and (
-            current.get('cloudcode_url') != config.get('cloudcode_url')
-            or current.get('project_id') != config.get('project_id')
-        ):
-            if read_config('monocle').get('auth_mode') == 'antigravity':
                 context.invalidate_file_contexts()
         if name == 'monocle' and (current.get('model') != config.get('model') or current.get('auth_mode') != config.get('auth_mode')):
             context.invalidate_file_contexts()

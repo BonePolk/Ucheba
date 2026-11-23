@@ -125,6 +125,41 @@ def feature_update(name: str, body: FeatureUpdate):
     return {'ok': True}
 
 
+class AntigravityAdminUpdate(BaseModel):
+    enabled: bool | None = None
+    client_id: str | None = Field(default=None, max_length=300)
+    client_secret: str | None = Field(default=None, max_length=1000)
+    redirect_uri: str | None = Field(default=None, max_length=500)
+    cloudcode_url: str | None = Field(default=None, max_length=2000)
+    user_agent: str | None = Field(default=None, max_length=300)
+    allowed_scopes: list[str] | str | None = None
+    diagnostic_mode: bool | None = None
+
+
+@admin.get('/antigravity')
+def admin_antigravity_get():
+    from integrations import antigravity
+    return antigravity.public_global_config()
+
+
+@admin.patch('/antigravity')
+def admin_antigravity_patch(body: AntigravityAdminUpdate):
+    from integrations import antigravity
+    return antigravity.save_global_config(body.model_dump(exclude_unset=True))
+
+
+@admin.post('/antigravity/reset-secret')
+def admin_antigravity_reset_secret():
+    from integrations import antigravity
+    return antigravity.reset_global_secret()
+
+
+@admin.post('/antigravity/validate')
+def admin_antigravity_validate():
+    from integrations import antigravity
+    return antigravity.validate_global_config()
+
+
 @router.get('/agent-history')
 def agent_history_list(request: Request, before: int | None = None):
     require_user(request)

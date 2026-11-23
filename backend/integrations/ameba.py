@@ -295,7 +295,8 @@ def _build_signature(session, state, include_ameba_facts: bool = True, adjustmen
         adjustments = read_adjustments(session)
     ameba_cfg = read_config('ameba')
     if ameba_cfg.get('auth_mode') == 'antigravity':
-        provider_base = read_settings('antigravity', apply_feature=False)[0].get('cloudcode_url')
+        from integrations import antigravity
+        provider_base = antigravity.read_global_config()['cloudcode_url']
     else:
         provider_base = read_settings('ai_provider', apply_feature=False)[0].get('base_url')
     allowed_agents = ('Владелец', 'user', 'Ameba') if include_ameba_facts else ('Владелец', 'user')

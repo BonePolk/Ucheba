@@ -1,7 +1,9 @@
+import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { request, agentName } from './api';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/controls';
+import { Field, Input, PasswordField } from '@/components/ui/input';
 import { Badge, EmptyState, Notice, PageLoader, SectionHeader } from '@/components/ui/surface';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow, TableContainer } from '@/components/ui/table';
 
@@ -30,7 +32,68 @@ const categoryLabels = {
 export default function Admin() {
   const client = useQueryClient();
   const state = useQuery({ queryKey: ['admin'], queryFn: () => request('/admin'), refetchInterval: 15000 });
+  const agAdmin = useQuery({ queryKey: ['admin', 'antigravity'], queryFn: () => request('/admin/antigravity') });
   const issues = useQuery({ queryKey: ['agent-issues'], queryFn: () => request('/admin/agent-issues'), refetchInterval: 15000 });
+
+  const [agEnabled, setAgEnabled] = useState(true);
+  const [agClientId, setAgClientId] = useState('');
+  const [agClientSecret, setAgClientSecret] = useState('');
+  const [agRedirectUri, setAgRedirectUri] = useState('https://antigravity.google/oauth-callback');
+  const [agCloudcodeUrl, setAgCloudcodeUrl] = useState('https://daily-cloudcode-pa.googleapis.com');
+  const [agUserAgent, setAgUserAgent] = useState('');
+  const [agScopes, setAgScopes] = useState('');
+  const [agDiagnostic, setAgDiagnostic] = useState(false);
+
+  useEffect(() => {
+    if (!agAdmin.data) return;
+    setAgEnabled(Boolean(agAdmin.data.enabled));
+    setAgClientId(agAdmin.data.client_id || '');
+    setAgRedirectUri(agAdmin.data.redirect_uri || 'https://antigravity.google/oauth-callback');
+    setAgCloudcodeUrl(agAdmin.data.cloudcode_url || 'https://daily-cloudcode-pa.googleapis.com');
+    setAgUserAgent(agAdmin.data.user_agent || '');
+    setAgScopes(agAdmin.data.custom_scopes && Array.isArray(agAdmin.data.allowed_scopes) ? agAdmin.data.allowed_scopes.join(' ') : '');
+    setAgDiagnostic(Boolean(agAdmin.data.diagnostic_mode));
+  }, [agAdmin.data]);
+
+  const agSave = useMutation({
+    mutationFn: () => request('/admin/antigravity', {
+      method: 'PATCH',
+      body: JSON.stringify({
+        enabled: agEnabled,
+        client_id: agClientId.trim(),
+        ...(agClientSecret.trim() ? { client_secret: agClientSecret.trim() } : {}),
+        redirect_uri: agRedirectUri.trim(),
+        cloudcode_url: agCloudcodeUrl.trim(),
+        user_agent: agUserAgent.trim(),
+        allowed_scopes: agScopes.trim(),
+        diagnostic_mode: agDiagnostic,
+      }),
+    }),
+    onSuccess: async () => {
+      setAgClientSecret('');
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ['admin', 'antigravity'] }),
+        client.invalidateQueries({ queryKey: ['integrations'] }),
+        client.invalidateQueries({ queryKey: ['integrations', 'antigravity'] }),
+      ]);
+    },
+  });
+
+  const agValidate = useMutation({
+    mutationFn: () => request('/admin/antigravity/validate', { method: 'POST' }),
+  });
+
+  const agResetSecret = useMutation({
+    mutationFn: () => request('/admin/antigravity/reset-secret', { method: 'POST' }),
+    onSuccess: async () => {
+      setAgClientSecret('');
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ['admin', 'antigravity'] }),
+        client.invalidateQueries({ queryKey: ['integrations'] }),
+        client.invalidateQueries({ queryKey: ['integrations', 'antigravity'] }),
+      ]);
+    },
+  });
   const resolve = useMutation({
     mutationFn: (id) => request(`/admin/agent-issues/${id}/resolve`, { method: 'POST' }),
     onSuccess: () => client.invalidateQueries({ queryKey: ['agent-issues'] }),
@@ -69,6 +132,131 @@ export default function Admin() {
           ))}
         </div>
         {update.error && <Notice tone="error">{update.error.message}</Notice>}
+      </section>
+
+      <section className="flex flex-col gap-2">
+        <SectionHeader title="Google Antigravity — системная конфигурация" />
+        <div className="border border-[#303030] bg-[#111111] p-3 flex flex-col gap-3">
+          {agAdmin.error && <Notice tone="error">{agAdmin.error.message}</Notice>}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <Switch
+              label="Google Antigravity включён для всех пользователей"
+              checked={agEnabled}
+              onCheckedChange={setAgEnabled}
+            />
+            <div className="flex flex-wrap gap-1.5">
+              <Badge variant={agAdmin.data?.configured ? 'success' : 'warning'}>
+                {agAdmin.data?.configured ? 'OAuth настроен' : 'Требует настройки'}
+              </Badge>
+              <Badge variant={agAdmin.data?.client_secret_configured ? 'success' : 'outline'}>
+                {agAdmin.data?.client_secret_configured
+                  ? `Secret сохранён (${agAdmin.data.client_secret_source === 'admin' ? 'админка' : 'env'})`
+                  : 'Secret не задан'}
+              </Badge>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            <Field label="OAuth Client ID">
+              <Input
+                value={agClientId}
+                maxLength={300}
+                onChange={(event) => setAgClientId(event.currentTarget.value)}
+              />
+            </Field>
+            <Field label="OAuth Client Secret" hint="Не возвращается в API после сохранения; оставьте пустым, чтобы не менять.">
+              <PasswordField
+                placeholder={agAdmin.data?.client_secret_configured ? 'Сохранён (введите для замены)' : 'Не задан'}
+                value={agClientSecret}
+                autoComplete="new-password"
+                onChange={(event) => setAgClientSecret(event.currentTarget.value)}
+              />
+            </Field>
+            <Field label="Redirect URI">
+              <Input
+                value={agRedirectUri}
+                maxLength={500}
+                onChange={(event) => setAgRedirectUri(event.currentTarget.value)}
+              />
+            </Field>
+            <Field label="Cloud Code Endpoint" hint="Разрешены только официальные HTTPS-хосты *.googleapis.com">
+              <Input
+                value={agCloudcodeUrl}
+                maxLength={2000}
+                onChange={(event) => setAgCloudcodeUrl(event.currentTarget.value)}
+              />
+            </Field>
+            <Field label="User-Agent (опционально)">
+              <Input
+                placeholder="antigravity/cli/1.5.15 ..."
+                value={agUserAgent}
+                maxLength={300}
+                onChange={(event) => setAgUserAgent(event.currentTarget.value)}
+              />
+            </Field>
+            <Field label="Разрешённые OAuth scopes (через пробел)" hint="Пусто — стандартный набор Antigravity">
+              <Input
+                placeholder="По умолчанию (cloud-platform, openid, userinfo...)"
+                value={agScopes}
+                onChange={(event) => setAgScopes(event.currentTarget.value)}
+              />
+            </Field>
+          </div>
+
+          <Switch
+            label="Диагностический режим (расширенные диагностические сведения без вывода секретов)"
+            checked={agDiagnostic}
+            onCheckedChange={setAgDiagnostic}
+          />
+
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              variant="primary"
+              loading={agSave.isPending}
+              disabled={agSave.isPending || agValidate.isPending || agResetSecret.isPending}
+              onClick={() => agSave.mutate()}
+            >
+              Сохранить системные параметры
+            </Button>
+            <Button
+              size="sm"
+              variant="default"
+              loading={agValidate.isPending}
+              disabled={agSave.isPending || agValidate.isPending || agResetSecret.isPending}
+              onClick={() => agValidate.mutate()}
+            >
+              Проверить конфигурацию
+            </Button>
+            {agAdmin.data?.client_secret_configured && (
+              <Button
+                size="sm"
+                variant="danger-ghost"
+                loading={agResetSecret.isPending}
+                disabled={agSave.isPending || agValidate.isPending || agResetSecret.isPending}
+                onClick={() => {
+                  if (window.confirm('Удалить сохранённый OAuth Client Secret из системной конфигурации?')) {
+                    agResetSecret.mutate();
+                  }
+                }}
+              >
+                Сбросить Client Secret
+              </Button>
+            )}
+          </div>
+
+          {agSave.error && <Notice tone="error">{agSave.error.message}</Notice>}
+          {agValidate.error && <Notice tone="error">{agValidate.error.message}</Notice>}
+          {agResetSecret.error && <Notice tone="error">{agResetSecret.error.message}</Notice>}
+          {agSave.isSuccess && <Notice tone="success">Системная конфигурация Google Antigravity сохранена.</Notice>}
+          {agValidate.data && (
+            <Notice tone={agValidate.data.ok ? 'success' : 'warning'}>
+              {agValidate.data.ok
+                ? 'Все проверки пройдены: OAuth Client ID, Client Secret, Redirect URI, Cloud Code Endpoint и scopes корректны.'
+                : `Проверка выявила проблемы: ${Object.entries(agValidate.data.checks || {}).filter(([, ok]) => !ok).map(([k]) => k).join(', ')}`}
+            </Notice>
+          )}
+        </div>
       </section>
 
       <section className="flex flex-col gap-2">

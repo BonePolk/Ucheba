@@ -21,3 +21,10 @@ class BotTokenClaim(SQLModel, table=True):
     token_hash: str = Field(primary_key=True)
     user_id: int
     provider: str
+
+
+class SystemSetting(SQLModel, table=True):
+    name: str = Field(primary_key=True)
+    config: str = '{}'
+    secrets: str = ''
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

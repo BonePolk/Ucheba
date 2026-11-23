@@ -76,14 +76,20 @@ function IntegrationForms({ data, features }) {
   });
 
   const antigravityConfigured = Boolean(
-    data.antigravity?.configured?.access_token
-    || data.antigravity?.configured?.refresh_token
-    || data.antigravity?.account_email,
+    data.antigravity?.system_enabled !== false
+    && data.antigravity?.system_configured !== false
+    && (
+      data.antigravity?.configured?.access_token
+      || data.antigravity?.configured?.refresh_token
+      || data.antigravity?.account_email
+    ),
   );
   const antigravityState = useQuery({
     queryKey: [
       'integrations',
       'antigravity',
+      Boolean(data.antigravity?.system_enabled !== false),
+      Boolean(data.antigravity?.system_configured !== false),
       Boolean(data.antigravity?.configured?.access_token),
       Boolean(data.antigravity?.configured?.refresh_token),
       data.antigravity?.account_email || '',
@@ -97,7 +103,12 @@ function IntegrationForms({ data, features }) {
   const aiReady = Boolean(
     oauthState.data?.authorized
     || data.ai_provider?.configured?.api_key
-    || (antigravityState.data?.authorized && antigravityState.data?.subscription_verified !== false),
+    || (
+      antigravityState.data?.system_enabled !== false
+      && antigravityState.data?.system_configured !== false
+      && (antigravityState.data?.oauth_authorized ?? antigravityState.data?.authorized)
+      && (antigravityState.data?.catalog_accessible ?? antigravityState.data?.subscription_verified) !== false
+    ),
   );
   const aiError = Boolean(
     data.ai_provider?.last_error

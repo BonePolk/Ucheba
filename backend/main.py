@@ -29,6 +29,8 @@ async def lifespan(app):
         root.chmod(0o700)
     init_db()
     bootstrap()
+    from integrations import antigravity
+    antigravity.migrate_legacy_antigravity_config()
     background = asyncio.create_task(for_users(worker.run))
     try:
         yield

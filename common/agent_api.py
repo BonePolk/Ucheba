@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 from openai import AsyncOpenAI, APIConnectionError, APIStatusError
 
-from common.antigravity import AntigravityError, fetch_live_catalog
+from common.antigravity import AntigravityError, fetch_live_catalog, test_generation_direct
 from common.codex_harness import cache_provider_models, detect_model_capabilities
 
 
@@ -80,6 +80,18 @@ def agent_routes(app, label, *, oauth_client_getter=None):
             status = 400 if exc.status_code == 400 else 401 if exc.status_code == 401 else 502
             raise HTTPException(status, exc.user_message) from None
 
+    @app.post('/antigravity/test-generation')
+    async def antigravity_test_generation(body: dict | None = None):
+        data = body or {}
+        model = str(data.get('model') or '').strip()
+        if not model:
+            raise HTTPException(422, 'Укажите модель для проверки генерации')
+        try:
+            return await test_generation_direct(model=model)
+        except AntigravityError as exc:
+            status = exc.status_code if exc.status_code in (400, 401, 403, 404, 429) else 502
+            raise HTTPException(status, exc.user_message) from None
+
     @app.post('/capabilities')
     async def capabilities(body: dict | None = None):
         data = body or {}
@@ -108,81 +120,6 @@ def agent_routes(app, label, *, oauth_client_getter=None):
             client=client,
         )
         return caps.to_dict()
-
-
-def response_text(response) -> str:
-    """Извлекает текстовый итог из output_text, message.content или буфера потока."""
-    direct = getattr(response, 'output_text', None)
-    if isinstance(direct, str) and direct.strip():
-        return direct
-    parts = []
-    for item in getattr(response, 'output', None) or ():
-        item_type = item.get('type') if isinstance(item, dict) else getattr(item, 'type', None)
-        if item_type in ('output_text', 'text'):
-            text = item.get('text') if isinstance(item, dict) else getattr(item, 'text', None)
-            if isinstance(text, str) and text:
-                parts.append(text)
-        elif item_type == 'message':
-            content = item.get('content') if isinstance(item, dict) else getattr(item, 'content', None)
-            for part in content or ():
-                part_type = part.get('type') if isinstance(part, dict) else getattr(part, 'type', None)
-                if part_type in ('output_text', 'text'):
-                    text = part.get('text') if isinstance(part, dict) else getattr(part, 'text', None)
-                    if isinstance(text, str) and text:
-                        parts.append(text)
-    if parts and ''.join(parts).strip():
-        return ''.join(parts)
-    streamed = getattr(response, '_streamed_output_text', '')
-    return streamed if isinstance(streamed, str) and streamed.strip() else ''
-
-
-async def stream_model_response(client, progress, **arguments):
-    """Первые данные и паузы потока — до 3 минут; временные сбои повторяются до ответа."""
-    retryable = (APIConnectionError, httpx.TransportError, TimeoutError)
-    attempt = 0
-    while True:
-        received_data = False
-        text_chunks = []
-        done_chunks = []
-        try:
-            async with asyncio.timeout(MODEL_FIRST_DATA_TIMEOUT) as idle:
-                async with client.responses.stream(**arguments) as stream:
-                    async for event in stream:
-                        progress.model_event(event)
-                        if event.type == 'response.output_text.delta' and getattr(event, 'delta', None):
-                            text_chunks.append(event.delta)
-                        elif event.type == 'response.output_text.done' and getattr(event, 'text', None):
-                            done_chunks.append(event.text)
-                        if event.type in ('response.completed', 'response.incomplete'):
-                            response = event.response
-                            idle.reschedule(None)
-                            break
-                        if event.type.endswith('.delta') and getattr(event, 'delta', None):
-                            received_data = True
-                            idle.reschedule(asyncio.get_running_loop().time() + MODEL_IDLE_TIMEOUT)
-                    else:
-                        response = await stream.get_final_response()
-            streamed = ''.join(text_chunks) if text_chunks else ''.join(done_chunks)
-            if streamed:
-                try:
-                    object.__setattr__(response, '_streamed_output_text', streamed)
-                except Exception:
-                    pass
-            progress.finish_response(response)
-            return response
-        except (APIConnectionError, APIStatusError, httpx.TransportError, TimeoutError) as exc:
-            transient = isinstance(exc, retryable) or getattr(exc, 'status_code', None) in (408, 429, 500, 502, 503, 504)
-            if not transient:
-                raise
-            attempt += 1
-            timeout_reason = ('Модель не передавала новые данные 3 минуты' if received_data
-                              else 'Модель не начала ответ за 3 минуты')
-            logging.getLogger('uvicorn.error').warning('model stream retry: %s', type(exc).__name__)
-            progress.update(model_waiting=False)
-            progress.add((timeout_reason if isinstance(exc, TimeoutError) else 'Соединение с моделью оборвалось')
-                         + f'; повторяет запрос (попытка {attempt + 1})')
-            await asyncio.sleep(min(30, 0.5 * 2 ** min(attempt - 1, 6)))
-            progress.begin_response()
 
 
 def response_text(response) -> str:

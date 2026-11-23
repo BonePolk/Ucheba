@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import hashlib
 import hmac
 import json
+import ipaddress
 import os
 import platform
 import re
@@ -18,7 +19,6 @@ import uuid
 import httpx
 
 from common.identity import user_id
-from common.provider import gateway_url
 from common.rpc import internal_token
 
 OAUTH_AUTH_URL = 'https://accounts.google.com/o/oauth2/auth'
@@ -27,6 +27,11 @@ OAUTH_USERINFO_URL = 'https://openidconnect.googleapis.com/v1/userinfo'
 OAUTH_REVOKE_URL = 'https://oauth2.googleapis.com/revoke'
 DEFAULT_REDIRECT_URI = 'https://antigravity.google/oauth-callback'
 DEFAULT_CLOUDCODE_URL = 'https://daily-cloudcode-pa.googleapis.com'
+ALLOWED_CLOUDCODE_HOSTS = frozenset({
+    'daily-cloudcode-pa.googleapis.com',
+    'cloudcode-pa.googleapis.com',
+    'autopush-cloudcode-pa.googleapis.com',
+})
 DEFAULT_CLI_VERSION = '1.5.15'
 DEFAULT_PUBLIC_CLIENT_ID = '1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com'
 OAUTH_SCOPES = (
@@ -98,7 +103,29 @@ def validate_cloudcode_url(value: str | None) -> str:
     raw = (value or '').strip()
     if not raw:
         return DEFAULT_CLOUDCODE_URL
-    return gateway_url(raw)
+    parsed = urlsplit(raw)
+    host = (parsed.hostname or '').lower()
+    if parsed.scheme != 'https' or not host or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError('Укажите HTTPS-адрес подтверждённого Google Cloud Code endpoint без логина, query и fragment')
+    try:
+        port = parsed.port
+    except ValueError:
+        raise ValueError('Некорректный порт в адресе Cloud Code endpoint') from None
+    if port not in (None, 443):
+        raise ValueError('Для Cloud Code endpoint разрешён только стандартный порт HTTPS (443)')
+    if parsed.path not in ('', '/'):
+        raise ValueError('Cloud Code endpoint не должен содержать путь')
+    try:
+        ipaddress.ip_address(host)
+        raise ValueError('IP-адреса запрещены для Cloud Code endpoint')
+    except ValueError as exc:
+        if 'IP-адреса запрещены' in str(exc):
+            raise
+    if host not in ALLOWED_CLOUDCODE_HOSTS:
+        raise ValueError(
+            'Неподтверждённый хост Cloud Code. Разрешены только: ' + ', '.join(sorted(ALLOWED_CLOUDCODE_HOSTS))
+        )
+    return f'https://{host}'
 
 
 def validate_redirect_uri(value: str | None) -> str:
@@ -137,12 +164,14 @@ def build_oauth_url(
     challenge: str,
     *,
     redirect_uri: str = DEFAULT_REDIRECT_URI,
+    scopes: tuple[str, ...] | list[str] | None = None,
 ) -> str:
+    scope_list = [s.strip() for s in (scopes or OAUTH_SCOPES) if isinstance(s, str) and s.strip()] or list(OAUTH_SCOPES)
     params = {
         'client_id': client_id.strip(),
         'response_type': 'code',
         'redirect_uri': redirect_uri,
-        'scope': ' '.join(OAUTH_SCOPES),
+        'scope': ' '.join(scope_list),
         'access_type': 'offline',
         'prompt': 'consent',
         'state': state,
@@ -158,32 +187,29 @@ def parse_oauth_callback(
     *,
     expected_redirect_uri: str = DEFAULT_REDIRECT_URI,
 ) -> str:
+    """Строго требует полный URL обратного вызова с обязательной проверкой origin, path, state и code."""
     raw = (value or '').strip()
-    if not raw:
-        raise ValueError('Вставьте полный URL перенаправления или код авторизации')
-    if raw.startswith(('http://', 'https://')):
-        parsed = urlsplit(raw)
-        expected = urlsplit(expected_redirect_uri)
-        if (
-            parsed.scheme.lower() != expected.scheme.lower()
-            or parsed.netloc.lower() != expected.netloc.lower()
-            or (parsed.path.rstrip('/') or '/') != (expected.path.rstrip('/') or '/')
-        ):
-            raise ValueError('URL перенаправления не соответствует настроенному redirect_uri')
-        q = parse_qs(parsed.query)
-        got_state = (q.get('state') or [''])[0]
-        if not got_state or not hmac.compare_digest(got_state, expected_state):
-            raise ValueError('Несовпадение OAuth state. Начните вход заново.')
-        if 'error' in q:
-            err_code = re.sub(r'[^a-zA-Z0-9_.-]', '', str(q['error'][0]))[:64] or 'oauth_error'
-            raise ValueError(f'Google OAuth вернул ошибку: {err_code}')
-        code = (q.get('code') or [''])[0].strip()
-        if not code:
-            raise ValueError('В URL перенаправления отсутствует параметр code')
-        return code
-    if any(ch.isspace() for ch in raw):
-        raise ValueError('Вставьте корректный URL перенаправления или код авторизации без пробелов')
-    return raw
+    if not raw or not raw.startswith(('http://', 'https://')):
+        raise ValueError('Вставьте полный URL перенаправления из браузера, содержащий параметры state и code')
+    parsed = urlsplit(raw)
+    expected = urlsplit(expected_redirect_uri)
+    if (
+        parsed.scheme.lower() != expected.scheme.lower()
+        or parsed.netloc.lower() != expected.netloc.lower()
+        or (parsed.path.rstrip('/') or '/') != (expected.path.rstrip('/') or '/')
+    ):
+        raise ValueError('URL перенаправления не соответствует настроенному redirect_uri')
+    q = parse_qs(parsed.query)
+    got_state = (q.get('state') or [''])[0].strip()
+    if not got_state or not expected_state or not hmac.compare_digest(got_state, expected_state):
+        raise ValueError('Несовпадение или отсутствие OAuth state. Начните вход заново.')
+    if 'error' in q:
+        err_code = re.sub(r'[^a-zA-Z0-9_.-]', '', str(q['error'][0]))[:64] or 'oauth_error'
+        raise ValueError(f'Google OAuth вернул ошибку: {err_code}')
+    code = (q.get('code') or [''])[0].strip()
+    if not code or any(ch.isspace() for ch in code):
+        raise ValueError('В URL перенаправления отсутствует корректный параметр code')
+    return code
 
 
 def safe_oauth_error(status_code: int, payload, *, is_refresh: bool = False) -> tuple[str, str, bool]:
@@ -198,7 +224,7 @@ def safe_oauth_error(status_code: int, payload, *, is_refresh: bool = False) -> 
         if field and _PARAM_MISSING_RE.search(desc):
             missing = field.group(1).lower()
             if missing == 'client_secret':
-                detail = 'OAuth-клиент требует Client Secret. Укажите Client Secret в настройках Google Antigravity.'
+                detail = 'OAuth-клиент требует Client Secret. Администратор должен указать Client Secret в системных настройках Google Antigravity.'
             else:
                 detail = f'Отсутствует обязательный OAuth-параметр: {missing}.'
     revoked = is_refresh and error in ('invalid_grant', 'unauthorized_client')
@@ -223,7 +249,7 @@ def extract_id_token_claims(id_token: str | None) -> dict:
 
 async def _post_oauth_form(url: str, data: dict, *, is_refresh: bool = False, timeout: float = 30.0) -> dict:
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
             response = await client.post(
                 url,
                 data=data,
@@ -233,6 +259,8 @@ async def _post_oauth_form(url: str, data: dict, *, is_refresh: bool = False, ti
         raise AntigravityError('Google OAuth не ответил вовремя', retryable=True) from None
     except httpx.HTTPError:
         raise AntigravityError('Не удалось подключиться к Google OAuth', retryable=True) from None
+    if 300 <= response.status_code < 400:
+        raise AntigravityError('Google OAuth вернул неожиданное перенаправление', status_code=502)
     if response.is_success:
         try:
             payload = response.json()
@@ -304,7 +332,7 @@ async def fetch_userinfo(access_token: str, *, timeout: float = 15.0) -> dict:
     if not access_token:
         return {}
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
             resp = await client.get(
                 OAUTH_USERINFO_URL,
                 headers={'Authorization': f'Bearer {access_token}', 'Accept': 'application/json'},
@@ -322,7 +350,7 @@ async def revoke_oauth_token(token: str, *, timeout: float = 5.0) -> None:
     if not clean:
         return
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
             await client.post(
                 OAUTH_REVOKE_URL,
                 data={'token': clean},
@@ -423,7 +451,7 @@ async def cloudcode_post(
     base = validate_cloudcode_url(cloudcode_url)
     url = f'{base}{path}'
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
             response = await client.post(
                 url,
                 json=data,
@@ -433,6 +461,8 @@ async def cloudcode_post(
         raise AntigravityError(f'Google Antigravity не ответил вовремя ({path})', retryable=True) from None
     except httpx.HTTPError:
         raise AntigravityError(f'Ошибка соединения с Google Antigravity ({path})', retryable=True) from None
+    if 300 <= response.status_code < 400:
+        raise AntigravityError(f'Google Antigravity вернул неожиданный редирект ({response.status_code})', status_code=502)
     if not response.is_success:
         raise _cloudcode_http_error(response.status_code, response.content, path, response.headers)
     try:
@@ -782,7 +812,7 @@ async def stream_generate_content(
     headers = cloudcode_headers(access_token, user_agent, accept='text/event-stream')
     timeout = httpx.Timeout(connect=connect_timeout, read=idle_timeout, write=30.0, pool=30.0)
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
         try:
             async with asyncio.timeout(first_byte_timeout):
                 cm = client.stream('POST', f'{base}{stream_path}', params={'alt': 'sse'}, json=envelope, headers=headers)
@@ -795,6 +825,11 @@ async def stream_generate_content(
             raise AntigravityError('Ошибка соединения с Google Antigravity', retryable=True) from None
 
         try:
+            if 300 <= response.status_code < 400:
+                raise AntigravityError(
+                    f'Google Antigravity вернул неожиданный редирект ({response.status_code})',
+                    status_code=502,
+                )
             if response.status_code in (404, 405, 501):
                 await cm.__aexit__(None, None, None)
                 single = await cloudcode_post(
@@ -935,8 +970,11 @@ async def fetch_live_catalog(*, force_refresh: bool = False, include_internal: b
     models = normalize_models(raw_catalog, include_internal=show_internal)
 
     # Обновляем общий кэш лимитов моделей для resolve_session_capabilities.
-    from common.codex_harness import cache_provider_models
-    cache_provider_models(cloudcode_url, models, source_kind='antigravity', auth_mode='antigravity')
+    try:
+        from common.codex_harness import cache_provider_models
+        cache_provider_models(cloudcode_url, models, source_kind='antigravity', auth_mode='antigravity')
+    except ImportError:
+        pass
 
     return {
         'project_id': pid,
@@ -945,3 +983,81 @@ async def fetch_live_catalog(*, force_refresh: bool = False, include_internal: b
         'checked_at': datetime.now(timezone.utc).isoformat(),
         'cloudcode_url': cloudcode_url,
     }
+
+
+async def test_generation_direct(model: str) -> dict:
+    """Явная проверка реальной генерации через Cloud Code для подтверждения работоспособности квоты и модели."""
+    target_model = (model or '').strip()
+    if not target_model:
+        raise AntigravityError('Укажите модель для проверки генерации Google Antigravity', status_code=400)
+
+    session = await fetch_backend_session(force_refresh=False)
+    cloudcode_url = validate_cloudcode_url(session.get('cloudcode_url'))
+    user_agent = str(session.get('user_agent') or '')
+    project_id = str(session.get('project_id') or '').strip()
+    subscription_tier = str(session.get('subscription_tier') or '').strip()
+
+    async def _run_once(tok: str) -> dict:
+        pid = project_id
+        tier = subscription_tier
+        if not pid:
+            info = await load_code_assist(tok, cloudcode_url=cloudcode_url, user_agent=user_agent)
+            pid = info['project_id']
+            tier = info.get('subscription_tier', '') or tier
+            await save_backend_project(pid, tier)
+
+        envelope = build_cloudcode_envelope(
+            project_id=pid,
+            model=target_model,
+            contents=[{'role': 'user', 'parts': [{'text': 'Reply with one word: OK'}]}],
+            generation_config={'maxOutputTokens': 32, 'temperature': 0},
+        )
+        chunks: list[str] = []
+        finish_reason = ''
+        block_reason = ''
+        async for event in stream_generate_content(
+            tok,
+            envelope,
+            cloudcode_url=cloudcode_url,
+            user_agent=user_agent,
+            first_byte_timeout=45.0,
+            idle_timeout=45.0,
+        ):
+            fb = event.get('promptFeedback') or {}
+            if isinstance(fb, dict) and fb.get('blockReason'):
+                block_reason = str(fb['blockReason'])
+            candidates = event.get('candidates') or []
+            if not candidates or not isinstance(candidates[0], dict):
+                continue
+            cand = candidates[0]
+            if cand.get('finishReason'):
+                finish_reason = str(cand['finishReason'])
+            parts = ((cand.get('content') or {}).get('parts') or [])
+            for part in parts:
+                if isinstance(part, dict) and not part.get('thought') and isinstance(part.get('text'), str):
+                    chunks.append(part['text'])
+
+        if block_reason:
+            raise AntigravityError(f'Google Antigravity заблокировал тестовый запрос ({block_reason})', status_code=400)
+        text = ''.join(chunks).strip()
+        if finish_reason != 'STOP' or not text:
+            reason_label = finish_reason or 'EMPTY_RESPONSE'
+            raise AntigravityError(
+                f'Google Antigravity не подтвердил генерацию для модели {target_model} ({reason_label})',
+                status_code=502,
+            )
+        return {
+            'ok': True,
+            'model': target_model,
+            'project_id': pid,
+            'subscription_tier': tier,
+            'finish_reason': finish_reason,
+            'sample_text': text[:120],
+            'checked_at': datetime.now(timezone.utc).isoformat(),
+        }
+
+    try:
+        return await _run_once(session['access_token'])
+    except AntigravityAuthError:
+        refreshed = await fetch_backend_session(force_refresh=True)
+        return await _run_once(refreshed['access_token'])
