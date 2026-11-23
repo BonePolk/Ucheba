@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+import fcntl
 import hashlib
 import hmac
 import json
@@ -24,7 +25,6 @@ import uvicorn
 from common.antigravity import (
     AntigravityAuthError,
     AntigravityError,
-    alternate_cloudcode_url,
     build_cloudcode_envelope,
     fetch_backend_session,
     fetch_live_catalog,
@@ -41,6 +41,7 @@ _DATA_URI_RE = re.compile(r'^data:([^;,]+);base64,(.+)$', re.S)
 _EPHEMERAL_KEY_SEED = secrets.token_bytes(32)
 _MAX_PERSISTED_RESPONSES = 24
 _MAX_PERSISTED_BYTES = 512 * 1024
+_BRIDGE_LOG = logging.getLogger('uvicorn.error')
 
 _CODEX_HARNESS_TOOLS = frozenset({
     'list_mcp_resources',
@@ -53,15 +54,51 @@ _CODEX_HARNESS_TOOLS = frozenset({
     'update_goal',
 })
 _CODEX_HARNESS_NAMESPACES = frozenset({'multi_agent_v1'})
-_HARNESS_XML_BLOCK_RE = re.compile(
-    r'<(skills_instructions|permissions instructions|collaboration_mode|apps_instructions|system-conventions)\b[^>]*>.*?</\1>',
-    re.S | re.I,
-)
+_HARNESS_STRIP_TAGS_BASE = ('skills_instructions', 'collaboration_mode', 'apps_instructions', 'system-conventions')
 _ENV_CONTEXT_BLOCK_RE = re.compile(r'<environment_context\b[^>]*>.*?</environment_context>', re.S | re.I)
 _CODEX_PREAMBLE_PREFIX = 'You are a coding agent running in the Codex CLI'
 
 
-def _sanitize_system_text(text: str, *, has_custom_agent_prompt: bool) -> str:
+def _strip_exact_xml_blocks(text: str, tags: tuple[str, ...]) -> str:
+    """Структурно удаляет только заданные корневые XML-секции Codex harness по точным парам тегов."""
+    if not text or not tags:
+        return text
+    lines = text.splitlines(keepends=True)
+    tag_set = {t.lower() for t in tags}
+    open_re = re.compile(r'^\s*<([a-zA-Z0-9_-]+(?:\s+instructions)?)(?:\s[^>]*)?>\s*$')
+    inline_res = [
+        re.compile(rf'^\s*<{re.escape(t)}(?:\s[^>]*)?>.*</{re.escape(t)}>\s*$', re.I)
+        for t in tags
+    ]
+    out: list[str] = []
+    idx = 0
+    while idx < len(lines):
+        line = lines[idx]
+        if any(rx.match(line) for rx in inline_res):
+            idx += 1
+            continue
+        m = open_re.match(line)
+        if m and m.group(1).lower() in tag_set:
+            expected_close = f'</{m.group(1).lower()}>'
+            close_idx = None
+            for scan in range(idx + 1, len(lines)):
+                if lines[scan].strip().lower() == expected_close:
+                    close_idx = scan
+                    break
+            if close_idx is not None:
+                idx = close_idx + 1
+                continue
+        out.append(line)
+        idx += 1
+    return ''.join(out)
+
+
+def _sanitize_system_text(
+    text: str,
+    *,
+    has_custom_agent_prompt: bool,
+    preserve_permissions: bool = False,
+) -> str:
     raw = (text or '').strip()
     if not raw:
         return ''
@@ -70,7 +107,8 @@ def _sanitize_system_text(text: str, *, has_custom_agent_prompt: bool) -> str:
             return ''
         parts = raw.split('\n\n', 1)
         raw = ('You are a helpful engineering assistant.\n\n' + parts[1]) if len(parts) > 1 else 'You are a helpful engineering assistant.'
-    cleaned = _HARNESS_XML_BLOCK_RE.sub('', raw)
+    tags = _HARNESS_STRIP_TAGS_BASE if preserve_permissions else (*_HARNESS_STRIP_TAGS_BASE, 'permissions instructions')
+    cleaned = _strip_exact_xml_blocks(raw, tags)
     cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
     return cleaned
 
@@ -88,38 +126,42 @@ _FAILED_FINISH_REASONS = frozenset({
 })
 
 
-def _bridge_fernet(owner_id: int) -> Fernet:
-    """Персональный ключ Fernet для защищённых служебных метаданных моста."""
+def _bridge_fernet(owner_id: int, connection_id: str = '') -> Fernet:
+    """Персональный ключ Fernet для защищённых метаданных моста, изолированный по владельцу и OAuth-сессии."""
     import base64
     secret = (os.getenv('INTERNAL_SECRET') or os.getenv('INTEGRATION_ENCRYPTION_KEY') or '').encode('utf-8')
     if not secret:
         secret = _EPHEMERAL_KEY_SEED
-    digest = hashlib.sha256(secret + f':antigravity-bridge-v1:{owner_id}'.encode('utf-8')).digest()
+    scope_cid = (connection_id or '').strip()
+    digest = hashlib.sha256(secret + f':antigravity-bridge-v2:{owner_id}:{scope_cid}'.encode('utf-8')).digest()
     return Fernet(base64.urlsafe_b64encode(digest))
 
 
-def _encode_encrypted_meta(payload: dict, *, owner_id: int) -> str:
-    data = dict(payload, uid=owner_id)
+def _encode_encrypted_meta(payload: dict, *, owner_id: int, connection_id: str = '') -> str:
+    data = dict(payload, uid=owner_id, cid=(connection_id or '').strip())
     raw = json.dumps(data, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
-    return _bridge_fernet(owner_id).encrypt(raw).decode('ascii')
+    return _bridge_fernet(owner_id, connection_id).encrypt(raw).decode('ascii')
 
 
-def _decode_encrypted_meta(token: str | None, *, owner_id: int) -> dict:
+def _decode_encrypted_meta(token: str | None, *, owner_id: int, connection_id: str = '') -> dict:
     if not isinstance(token, str) or not token.strip():
         return {}
+    expected_cid = (connection_id or '').strip()
     try:
-        raw = _bridge_fernet(owner_id).decrypt(token.strip().encode('ascii'))
+        raw = _bridge_fernet(owner_id, expected_cid).decrypt(token.strip().encode('ascii'))
         obj = json.loads(raw.decode('utf-8'))
         if not isinstance(obj, dict) or obj.get('uid') != owner_id:
+            return {}
+        if str(obj.get('cid') or '') != expected_cid:
             return {}
         return obj
     except (InvalidToken, ValueError, UnicodeError):
         return {}
 
 
-def decode_thought_signature(token: str | None, *, owner_id: int) -> str:
-    """Расшифровывает первую thoughtSignature, привязанную к owner_id."""
-    meta = _decode_encrypted_meta(token, owner_id=owner_id)
+def decode_thought_signature(token: str | None, *, owner_id: int, connection_id: str = '') -> str:
+    """Расшифровывает первую thoughtSignature, привязанную к owner_id и connection_id."""
+    meta = _decode_encrypted_meta(token, owner_id=owner_id, connection_id=connection_id)
     for bucket in ('call_sigs', 'item_sigs'):
         sigs = meta.get(bucket)
         if isinstance(sigs, dict):
@@ -129,27 +171,81 @@ def decode_thought_signature(token: str | None, *, owner_id: int) -> str:
     return ''
 
 
-def _bridge_state_file(owner_id: int) -> Path:
-    codex_root = Path('/home/codex/.codex')
-    base = codex_root / 'bridge-state' if codex_root.is_dir() else Path(tempfile.gettempdir()) / 'ucheba-bridge-state'
-    return base / str(owner_id) / 'responses.enc'
+def _sanitize_scope_slug(agent_scope: str) -> str:
+    slug = re.sub(r'[^a-z0-9_-]+', '_', (agent_scope or 'default').strip().lower()).strip('_')
+    return slug[:48] or 'default'
 
 
-def _strip_heavy_blobs(item):
-    """Удаляет сырые base64-данные изображений перед сохранением контекста на диск."""
+def _bridge_state_file(owner_id: int, *, agent_scope: str = 'default', connection_id: str = '') -> Path:
+    env_dir = (os.getenv('UCHEBA_BRIDGE_STATE_DIR') or '').strip()
+    if env_dir:
+        base = Path(env_dir)
+    else:
+        codex_root = Path('/home/codex/.codex')
+        base = codex_root / 'bridge-state' if codex_root.is_dir() else Path(tempfile.gettempdir()) / 'ucheba-bridge-state'
+    slug = _sanitize_scope_slug(agent_scope)
+    cid = (connection_id or '').strip()
+    file_tag = f'conn_{hashlib.sha256(cid.encode("utf-8")).hexdigest()[:24]}.enc' if cid else 'default.enc'
+    return base / str(owner_id) / slug / file_tag
+
+
+def _truncate_text(val: str, limit: int) -> str:
+    if len(val) <= limit:
+        return val
+    suffix = ' ... [обрезано]'
+    return val[: max(32, limit - len(suffix))] + suffix
+
+
+def _strip_heavy_blobs(item, *, max_text_chars: int = 16384):
+    """Удаляет сырые base64-изображения и ограничивает слишком длинные поля перед сохранением на диск."""
     if not isinstance(item, dict):
         return item
     copy = dict(item)
-    if copy.get('type') in ('message', None) and isinstance(copy.get('content'), list):
-        copy['content'] = [
-            ({'type': 'input_text', 'text': '[изображение]'} if isinstance(b, dict) and b.get('type') == 'input_image' else b)
-            for b in copy['content']
-        ]
-    elif copy.get('type') in ('function_call_output', 'custom_tool_call_output') and isinstance(copy.get('output'), list):
-        copy['output'] = [
-            ({'type': 'input_text', 'text': '[изображение]'} if isinstance(b, dict) and b.get('type') == 'input_image' else b)
-            for b in copy['output']
-        ]
+    itype = copy.get('type')
+    if itype in ('message', None):
+        content = copy.get('content')
+        if isinstance(content, str):
+            copy['content'] = _truncate_text(content, max_text_chars)
+        elif isinstance(content, list):
+            cleaned_blocks = []
+            for b in content:
+                if not isinstance(b, dict):
+                    cleaned_blocks.append(b)
+                elif b.get('type') == 'input_image':
+                    cleaned_blocks.append({'type': 'input_text', 'text': '[изображение]'})
+                elif isinstance(b.get('text'), str):
+                    nb = dict(b)
+                    nb['text'] = _truncate_text(b['text'], max_text_chars)
+                    cleaned_blocks.append(nb)
+                else:
+                    cleaned_blocks.append(b)
+            copy['content'] = cleaned_blocks
+    elif itype in ('function_call_output', 'custom_tool_call_output'):
+        out = copy.get('output')
+        if isinstance(out, str):
+            copy['output'] = _truncate_text(out, max_text_chars)
+        elif isinstance(out, dict):
+            dumped = json.dumps(out, ensure_ascii=False, separators=(',', ':'))
+            if len(dumped) > max_text_chars:
+                copy['output'] = _truncate_text(dumped, max_text_chars)
+        elif isinstance(out, list):
+            cleaned_out = []
+            for b in out:
+                if not isinstance(b, dict):
+                    cleaned_out.append(b)
+                elif b.get('type') == 'input_image':
+                    cleaned_out.append({'type': 'input_text', 'text': '[изображение]'})
+                elif isinstance(b.get('text'), str):
+                    nb = dict(b)
+                    nb['text'] = _truncate_text(b['text'], max_text_chars)
+                    cleaned_out.append(nb)
+                else:
+                    cleaned_out.append(b)
+            copy['output'] = cleaned_out
+    elif itype == 'function_call' and isinstance(copy.get('arguments'), str):
+        copy['arguments'] = _truncate_text(copy['arguments'], max_text_chars)
+    elif itype == 'custom_tool_call' and isinstance(copy.get('input'), str):
+        copy['input'] = _truncate_text(copy['input'], max_text_chars)
     return copy
 
 
@@ -188,10 +284,22 @@ def _append_part(contents: list[dict], role: str, part: dict) -> None:
 
 
 class AntigravityBridgeSession:
-    """Хранит контекст вызовов, thoughtSignature и сессию токена для одного пользователя."""
+    """Хранит контекст вызовов, thoughtSignature и сессию токена для одного пользователя, агента и OAuth-сессии."""
 
-    def __init__(self, *, owner_id: int, cloudcode_url: str = '', state_path: Path | None = None, error_sink: dict | None = None):
+    def __init__(
+        self,
+        *,
+        owner_id: int,
+        cloudcode_url: str = '',
+        state_path: Path | None = None,
+        error_sink: dict | None = None,
+        agent_scope: str = 'default',
+        connection_id: str = '',
+    ):
         self.owner_id = owner_id
+        self.agent_scope = _sanitize_scope_slug(agent_scope)
+        self.connection_id = (connection_id or '').strip()
+        self.explicit_state_path = state_path
         self.cloudcode_url_override = (cloudcode_url or '').strip()
         self.access_token: str = ''
         self.token_expires_at: float = 0.0
@@ -202,11 +310,16 @@ class AntigravityBridgeSession:
         self.call_meta: dict[str, dict] = {}
         self.item_signatures: dict[str, str] = {}
         self.responses_history: dict[str, list] = {}
-        self.state_path = state_path or _bridge_state_file(owner_id)
+        self.state_path = state_path or _bridge_state_file(
+            owner_id,
+            agent_scope=self.agent_scope,
+            connection_id=self.connection_id,
+        )
         self.session_lock = asyncio.Lock()
         self.session_id: str = str(uuid.uuid4())
         self.error_sink = error_sink
         self.last_error: dict | None = None
+        self.last_persistence_error: str | None = None
         self._load_persisted_state()
 
     def clear_error(self) -> None:
@@ -226,16 +339,51 @@ class AntigravityBridgeSession:
             self.error_sink.clear()
             self.error_sink.update(info)
 
+    def bind_connection(self, connection_id: str) -> None:
+        clean_cid = (connection_id or '').strip()
+        if not clean_cid or clean_cid == self.connection_id:
+            return
+        self.connection_id = clean_cid
+        self.call_meta.clear()
+        self.item_signatures.clear()
+        self.responses_history.clear()
+        if self.explicit_state_path is None:
+            self.state_path = _bridge_state_file(
+                self.owner_id,
+                agent_scope=self.agent_scope,
+                connection_id=self.connection_id,
+            )
+        self._load_persisted_state()
+
+    def _decrypt_state_blob(self, raw_token: str) -> dict | None:
+        raw = _bridge_fernet(self.owner_id, self.connection_id).decrypt(raw_token.encode('ascii'))
+        data = json.loads(raw.decode('utf-8'))
+        if not isinstance(data, dict) or data.get('uid') != self.owner_id:
+            return None
+        if str(data.get('cid') or '') != self.connection_id:
+            return None
+        return data
+
     def _load_persisted_state(self) -> None:
         try:
             if not self.state_path.is_file():
                 return
-            raw_token = self.state_path.read_text(encoding='ascii').strip()
+            lock_path = Path(f'{self.state_path}.lock')
+            lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_SH)
+                if not self.state_path.is_file():
+                    return
+                raw_token = self.state_path.read_text(encoding='ascii').strip()
+            finally:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(lock_fd)
             if not raw_token:
                 return
-            raw = _bridge_fernet(self.owner_id).decrypt(raw_token.encode('ascii'))
-            data = json.loads(raw.decode('utf-8'))
-            if not isinstance(data, dict) or data.get('uid') != self.owner_id:
+            data = self._decrypt_state_blob(raw_token)
+            if data is None:
                 return
             entries = data.get('responses')
             if isinstance(entries, dict):
@@ -245,46 +393,162 @@ class AntigravityBridgeSession:
                         for cid, cmeta in (entry.get('call_meta') or {}).items():
                             if isinstance(cid, str) and isinstance(cmeta, dict):
                                 self.call_meta.setdefault(cid, cmeta)
-        except (OSError, InvalidToken, ValueError, UnicodeError):
-            pass
+            self.last_persistence_error = None
+        except InvalidToken:
+            self.last_persistence_error = 'history_invalid_token_or_account_changed'
+        except (OSError, ValueError, UnicodeError) as exc:
+            self.last_persistence_error = f'history_read_failed:{type(exc).__name__}'
+            _BRIDGE_LOG.warning(
+                'Antigravity bridge history load failed (owner=%s agent=%s err=%s)',
+                self.owner_id, self.agent_scope, type(exc).__name__,
+            )
 
-    def _save_persisted_state(self) -> None:
-        try:
-            parent = self.state_path.parent
-            parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            os.chmod(parent, 0o700)
-            items = list(self.responses_history.items())[-_MAX_PERSISTED_RESPONSES:]
-            while items:
+    def _pack_persisted_payload(self, merged_responses: dict[str, dict], merged_call_meta: dict[str, dict]) -> bytes | None:
+        items = list(merged_responses.items())[-_MAX_PERSISTED_RESPONSES:]
+        while items:
+            for max_chars in (16384, 4096, 1024, 256):
                 packed_entries = {}
-                for rid, hist in items:
-                    clean_hist = [_strip_heavy_blobs(h) for h in hist]
+                for rid, rec in items:
+                    hist = rec.get('history') if isinstance(rec, dict) else rec
+                    clean_hist = [_strip_heavy_blobs(h, max_text_chars=max_chars) for h in (hist or [])]
                     used_cids = {
                         str(h.get('call_id') or h.get('id') or '')
                         for h in clean_hist
                         if isinstance(h, dict) and h.get('type') in ('function_call', 'custom_tool_call')
                     }
+                    entry_cmeta = dict(rec.get('call_meta') or {}) if isinstance(rec, dict) else {}
+                    for cid in used_cids:
+                        if cid in merged_call_meta:
+                            entry_cmeta[cid] = merged_call_meta[cid]
                     packed_entries[rid] = {
                         'history': clean_hist,
-                        'call_meta': {cid: self.call_meta[cid] for cid in used_cids if cid in self.call_meta},
+                        'call_meta': {cid: entry_cmeta[cid] for cid in used_cids if cid in entry_cmeta},
                     }
-                raw = json.dumps({'uid': self.owner_id, 'responses': packed_entries}, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
-                if len(raw) <= _MAX_PERSISTED_BYTES or len(items) == 1:
-                    token = _bridge_fernet(self.owner_id).encrypt(raw).decode('ascii')
-                    tmp = self.state_path.with_suffix('.tmp')
-                    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-                    with os.fdopen(fd, 'w', encoding='ascii') as f:
-                        f.write(token)
-                    os.replace(tmp, self.state_path)
-                    return
+                raw = json.dumps(
+                    {'uid': self.owner_id, 'cid': self.connection_id, 'responses': packed_entries},
+                    ensure_ascii=False,
+                    separators=(',', ':'),
+                ).encode('utf-8')
+                if len(raw) <= _MAX_PERSISTED_BYTES:
+                    return raw
+            if len(items) > 1:
                 items = items[1:]
-        except OSError:
-            pass
+                continue
+            # Единственная запись все равно слишком велика: урезаем старейшие элементы её истории.
+            rid, rec = items[0]
+            hist = list((rec.get('history') if isinstance(rec, dict) else rec) or [])
+            while len(hist) > 1:
+                hist = hist[1:]
+                clean_hist = [_strip_heavy_blobs(h, max_text_chars=256) for h in hist]
+                used_cids = {
+                    str(h.get('call_id') or h.get('id') or '')
+                    for h in clean_hist
+                    if isinstance(h, dict) and h.get('type') in ('function_call', 'custom_tool_call')
+                }
+                entry_cmeta = dict(rec.get('call_meta') or {}) if isinstance(rec, dict) else {}
+                for cid in used_cids:
+                    if cid in merged_call_meta:
+                        entry_cmeta[cid] = merged_call_meta[cid]
+                raw = json.dumps(
+                    {
+                        'uid': self.owner_id,
+                        'cid': self.connection_id,
+                        'responses': {rid: {'history': clean_hist, 'call_meta': {cid: entry_cmeta[cid] for cid in used_cids if cid in entry_cmeta}}},
+                    },
+                    ensure_ascii=False,
+                    separators=(',', ':'),
+                ).encode('utf-8')
+                if len(raw) <= _MAX_PERSISTED_BYTES:
+                    return raw
+            return None
+        return json.dumps(
+            {'uid': self.owner_id, 'cid': self.connection_id, 'responses': {}},
+            ensure_ascii=False,
+            separators=(',', ':'),
+        ).encode('utf-8')
+
+    def _save_persisted_state(self) -> bool:
+        tmp_path: Path | None = None
+        try:
+            parent = self.state_path.parent
+            parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(parent, 0o700)
+            owner_dir = parent.parent
+            if owner_dir.name == str(self.owner_id):
+                os.chmod(owner_dir, 0o700)
+
+            lock_path = Path(f'{self.state_path}.lock')
+            lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                merged_responses: dict[str, dict] = {}
+                merged_call_meta: dict[str, dict] = dict(self.call_meta)
+                if self.state_path.is_file():
+                    try:
+                        existing_token = self.state_path.read_text(encoding='ascii').strip()
+                        if existing_token:
+                            existing = self._decrypt_state_blob(existing_token)
+                            if existing and isinstance(existing.get('responses'), dict):
+                                for rid, entry in existing['responses'].items():
+                                    if isinstance(rid, str) and isinstance(entry, dict) and isinstance(entry.get('history'), list):
+                                        merged_responses[rid] = entry
+                                        for cid, cmeta in (entry.get('call_meta') or {}).items():
+                                            if isinstance(cid, str) and isinstance(cmeta, dict):
+                                                merged_call_meta.setdefault(cid, cmeta)
+                    except (OSError, InvalidToken, ValueError, UnicodeError):
+                        pass
+
+                for rid, hist in self.responses_history.items():
+                    merged_responses.pop(rid, None)
+                    merged_responses[rid] = {'history': hist, 'call_meta': {}}
+
+                raw = self._pack_persisted_payload(merged_responses, merged_call_meta)
+                if raw is None or len(raw) > _MAX_PERSISTED_BYTES:
+                    self.last_persistence_error = 'history_size_limit_exceeded'
+                    _BRIDGE_LOG.warning(
+                        'Antigravity bridge history exceeded max persisted bytes (owner=%s agent=%s limit=%d)',
+                        self.owner_id, self.agent_scope, _MAX_PERSISTED_BYTES,
+                    )
+                    return False
+
+                token = _bridge_fernet(self.owner_id, self.connection_id).encrypt(raw).decode('ascii')
+                tmp_path = parent / f'{self.state_path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}'
+                fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, 'w', encoding='ascii') as f:
+                    f.write(token)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, self.state_path)
+                os.chmod(self.state_path, 0o600)
+                tmp_path = None
+                self.last_persistence_error = None
+                return True
+            finally:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(lock_fd)
+        except OSError as exc:
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            self.last_persistence_error = f'history_write_failed:{type(exc).__name__}'
+            _BRIDGE_LOG.warning(
+                'Antigravity bridge history save failed (owner=%s agent=%s err=%s)',
+                self.owner_id, self.agent_scope, type(exc).__name__,
+            )
+            return False
 
     async def ensure_credentials(self, *, force_refresh: bool = False) -> tuple[str, str, str, str]:
         async with self.session_lock:
             now = time.time()
             if force_refresh or not self.access_token or now >= self.token_expires_at - 60:
                 session = await fetch_backend_session(force_refresh=force_refresh)
+                new_cid = str(session.get('connection_id') or '').strip()
+                if new_cid and new_cid != self.connection_id:
+                    self.bind_connection(new_cid)
                 self.access_token = session['access_token']
                 self.token_expires_at = float(session.get('expires_at') or (now + 3000))
                 self.user_agent = str(session.get('user_agent') or '')
@@ -425,6 +689,10 @@ class AntigravityBridgeSession:
         tools_payload, safe_to_target, target_to_safe, custom_names = self.translate_tools(body.get('tools'))
         namespaces = sorted({info['namespace'] for info in safe_to_target.values() if info.get('namespace')})
         has_ucheba_mcp = any(ns.startswith('mcp__ucheba') for ns in namespaces)
+        has_shell_tool = any(
+            isinstance(t, dict) and str(t.get('name') or '') in ('shell', 'exec_command', 'local_shell', 'apply_patch')
+            for t in (body.get('tools') or ())
+        )
         safe_to_orig = {
             safe: (f"{info['namespace']}__{info['name']}" if info.get('namespace') else info['name'])
             for safe, info in safe_to_target.items()
@@ -444,7 +712,7 @@ class AntigravityBridgeSession:
         if isinstance(body.get('instructions'), str) and body['instructions'].strip():
             inst_txt = body['instructions'].strip()
             raw_system_parts.append(inst_txt)
-            if _sanitize_system_text(inst_txt, has_custom_agent_prompt=True):
+            if _sanitize_system_text(inst_txt, has_custom_agent_prompt=True, preserve_permissions=has_shell_tool):
                 has_custom_agent_prompt = True
 
         raw_input = body.get('input')
@@ -478,7 +746,8 @@ class AntigravityBridgeSession:
                 for chunk in chunks:
                     if isinstance(chunk, str) and chunk.strip():
                         stripped = chunk.strip()
-                        if not stripped.startswith(_CODEX_PREAMBLE_PREFIX) and _HARNESS_XML_BLOCK_RE.sub('', stripped).strip():
+                        tags = _HARNESS_STRIP_TAGS_BASE if has_shell_tool else (*_HARNESS_STRIP_TAGS_BASE, 'permissions instructions')
+                        if not stripped.startswith(_CODEX_PREAMBLE_PREFIX) and _strip_exact_xml_blocks(stripped, tags).strip():
                             has_custom_agent_prompt = True
 
         # Предварительно индексируем вызовы инструментов из истории запроса на случай полного реплея без кэша.
@@ -503,7 +772,11 @@ class AntigravityBridgeSession:
             role = item.get('role')
 
             if item_type == 'reasoning':
-                meta = _decode_encrypted_meta(item.get('encrypted_content'), owner_id=self.owner_id)
+                meta = _decode_encrypted_meta(
+                    item.get('encrypted_content'),
+                    owner_id=self.owner_id,
+                    connection_id=self.connection_id,
+                )
                 for k, v in (meta.get('call_sigs') or {}).items():
                     if isinstance(k, str) and isinstance(v, str) and v:
                         self.call_meta.setdefault(k, {})['thought_signature'] = v
@@ -515,13 +788,21 @@ class AntigravityBridgeSession:
             if item_type in ('message', None) and role in ('system', 'developer'):
                 content = item.get('content')
                 if isinstance(content, str) and content.strip():
-                    cleaned_sys = _sanitize_system_text(content, has_custom_agent_prompt=has_custom_agent_prompt)
+                    cleaned_sys = _sanitize_system_text(
+                        content,
+                        has_custom_agent_prompt=has_custom_agent_prompt,
+                        preserve_permissions=has_shell_tool,
+                    )
                     if cleaned_sys:
                         raw_system_parts.append(cleaned_sys)
                 elif isinstance(content, list):
                     for part in content:
                         if isinstance(part, dict) and isinstance(part.get('text'), str) and part['text'].strip():
-                            cleaned_sys = _sanitize_system_text(part['text'], has_custom_agent_prompt=has_custom_agent_prompt)
+                            cleaned_sys = _sanitize_system_text(
+                                part['text'],
+                                has_custom_agent_prompt=has_custom_agent_prompt,
+                                preserve_permissions=has_shell_tool,
+                            )
                             if cleaned_sys:
                                 raw_system_parts.append(cleaned_sys)
                 continue
@@ -631,6 +912,18 @@ class AntigravityBridgeSession:
                                 images.append(parsed_img)
 
                 if not is_matching_call:
+                    raw_tool_name = str(item.get('name') or meta.get('original_name') or '').strip()
+                    is_external_task_manager = (
+                        raw_tool_name == 'task_manager'
+                        and call_id not in self.call_meta
+                        and call_id not in inline_call_names
+                    )
+                    if not is_external_task_manager:
+                        raise AntigravityError(
+                            f'Некорректная последовательность вызовов инструментов: неожиданный function_call_output для call_id={call_id or "empty"} ({raw_tool_name or "unknown"})',
+                            status_code=400,
+                            error_status='invalid_tool_sequence',
+                        )
                     pending_model_call_ids.clear()
                     if isinstance(raw_out, str):
                         text_payload = raw_out
@@ -840,17 +1133,17 @@ def _evaluate_terminal_outcome(
             None,
             {'code': 'unexpected_finish_reason', 'message': f'Неизвестная причина завершения генерации: {finish_reason}'},
         )
+    if not finish_reason:
+        return (
+            'failed',
+            None,
+            {'code': 'premature_stream_close', 'message': 'Поток генерации завершился без подтверждения окончания (отсутствует finishReason)'},
+        )
     if not has_text and not has_tool_calls:
         return (
             'failed',
             None,
             {'code': 'empty_response', 'message': 'Модель не вернула ни текста, ни вызовов инструментов'},
-        )
-    if not finish_reason and not has_tool_calls:
-        return (
-            'failed',
-            None,
-            {'code': 'premature_stream_close', 'message': 'Поток генерации завершился без подтверждения окончания'},
         )
     return 'completed', None, None
 
@@ -904,19 +1197,16 @@ def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, labe
     app.add_api_route('/models', _list_models, methods=['GET'])
 
     async def _run_generation(meta: dict):
-        """Открывает поток Cloud Code с обработкой 401 refresh, bare 429 fallback и ретраем временных сбоев."""
+        """Открывает поток Cloud Code с обработкой 401 refresh и ограниченным ретраем кратковременных сбоев без смены endpoint."""
         max_attempts = 3
         refreshed = False
         attempt = 0
-        tried_alt_host = False
-        active_url_override = ''
         decls_count = len(meta['tools_payload'][0].get('functionDeclarations', [])) if meta['tools_payload'] else 0
         sys_chars = sum(len(str(p.get('text') or '')) for p in (meta['system_instruction'] or {}).get('parts', []))
         while True:
             token_val, project_id, cc_url, ua = await _run_as_owner(
                 session.ensure_credentials(force_refresh=refreshed)
             )
-            effective_cc_url = active_url_override or cc_url
             envelope = build_cloudcode_envelope(
                 project_id=project_id,
                 model=meta['model'],
@@ -929,16 +1219,14 @@ def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, labe
             )
             bridge_log.info(
                 '%s stage=cloudcode_envelope_built model=%s decls=%d sys_chars=%d attempt=%d host=%s',
-                label, meta['model'], decls_count, sys_chars, attempt + 1, effective_cc_url,
+                label, meta['model'], decls_count, sys_chars, attempt + 1, cc_url,
             )
             t_start = time.monotonic()
             emitted_any = False
             try:
-                async for chunk in stream_generate_content(token_val, envelope, cloudcode_url=effective_cc_url, user_agent=ua):
+                async for chunk in stream_generate_content(token_val, envelope, cloudcode_url=cc_url, user_agent=ua):
                     if not emitted_any:
                         ttfb_ms = int((time.monotonic() - t_start) * 1000)
-                        if active_url_override:
-                            session.cloudcode_url = active_url_override
                         bridge_log.info(
                             '%s stage=cloudcode_response model=%s status=ok decls=%d',
                             label, meta['model'], decls_count,
@@ -950,6 +1238,8 @@ def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, labe
                         emitted_any = True
                     yield chunk
                 return
+            except asyncio.CancelledError:
+                raise
             except AntigravityAuthError as exc:
                 session.record_error(exc)
                 bridge_log.warning(
@@ -966,29 +1256,13 @@ def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, labe
                     '%s stage=cloudcode_response model=%s status=error http=%s code=%s retryable=%s decls=%d',
                     label, meta['model'], exc.status_code, exc.error_status or '-', bool(exc.retryable), decls_count,
                 )
-                is_bare_429 = (
-                    not emitted_any
-                    and exc.status_code == 429
-                    and exc.error_status == 'RESOURCE_EXHAUSTED'
-                    and bool(exc.retryable)
-                )
-                if is_bare_429 and not tried_alt_host:
-                    alt_url = alternate_cloudcode_url(effective_cc_url)
-                    if alt_url and alt_url != effective_cc_url:
-                        tried_alt_host = True
-                        active_url_override = alt_url
-                        bridge_log.warning(
-                            '%s stage=cloudcode_fallback model=%s from=%s to=%s reason=bare_429',
-                            label, meta['model'], effective_cc_url, alt_url,
-                        )
-                        continue
                 retry_limit = 1 if exc.status_code == 429 else (max_attempts - 1)
                 if emitted_any or not exc.retryable or attempt >= retry_limit:
                     raise
                 if exc.status_code == 429 and exc.retry_after is not None and exc.retry_after > 5.0:
                     raise
                 attempt += 1
-                delay = exc.retry_after if exc.retry_after is not None else min(8.0, 0.8 * (2 ** (attempt - 1)))
+                delay = min(5.0, max(0.2, exc.retry_after)) if exc.retry_after is not None else min(8.0, 0.8 * (2 ** (attempt - 1)))
                 bridge_log.warning(
                     '%s antigravity retry %d/%d (%s)', label, attempt, retry_limit, exc.status_code or exc.error_status or 'transient'
                 )
@@ -1359,7 +1633,11 @@ def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, labe
                         'id': rs_id,
                         'type': 'reasoning',
                         'summary': [],
-                        'encrypted_content': _encode_encrypted_meta({'call_sigs': call_sigs, 'item_sigs': item_sigs}, owner_id=session.owner_id),
+                        'encrypted_content': _encode_encrypted_meta(
+                            {'call_sigs': call_sigs, 'item_sigs': item_sigs},
+                            owner_id=session.owner_id,
+                            connection_id=session.connection_id,
+                        ),
                     }
                     rs_idx = len(output_items)
                     output_items.append(rs_item)
@@ -1522,11 +1800,24 @@ def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, labe
 
 
 @asynccontextmanager
-async def antigravity_responses_bridge(label: str = 'Agent', *, cloudcode_url: str = '', error_sink: dict | None = None):
+async def antigravity_responses_bridge(
+    label: str = 'Agent',
+    *,
+    cloudcode_url: str = '',
+    error_sink: dict | None = None,
+    agent_scope: str = '',
+    connection_id: str = '',
+):
     """Запускает изолированный per-run loopback Responses API мост в текущем event loop."""
     owner_id = user_id()
     bridge_token = secrets.token_urlsafe(32)
-    session = AntigravityBridgeSession(owner_id=owner_id, cloudcode_url=cloudcode_url, error_sink=error_sink)
+    session = AntigravityBridgeSession(
+        owner_id=owner_id,
+        cloudcode_url=cloudcode_url,
+        error_sink=error_sink,
+        agent_scope=agent_scope or label,
+        connection_id=connection_id,
+    )
     app = create_bridge_app(session, bridge_token, label=label)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

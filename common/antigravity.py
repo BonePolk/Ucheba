@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import hashlib
 import hmac
 import json
@@ -13,6 +14,7 @@ import platform
 import re
 import secrets
 import sys
+import time
 from urllib.parse import parse_qs, urlencode, urlsplit
 import uuid
 
@@ -132,16 +134,6 @@ def validate_cloudcode_url(value: str | None) -> str:
     return f'https://{host}'
 
 
-def alternate_cloudcode_url(current_url: str | None) -> str | None:
-    """Возвращает официальный резервный Cloud Code host из allowlist для обхода bare 429 маршрутизации."""
-    base = validate_cloudcode_url(current_url)
-    if base == 'https://daily-cloudcode-pa.googleapis.com':
-        return 'https://cloudcode-pa.googleapis.com'
-    if base == 'https://cloudcode-pa.googleapis.com':
-        return 'https://daily-cloudcode-pa.googleapis.com'
-    return None
-
-
 def validate_redirect_uri(value: str | None) -> str:
     raw = (value or '').strip()
     if not raw:
@@ -249,16 +241,45 @@ def safe_oauth_error(status_code: int, payload, *, is_refresh: bool = False) -> 
     return error, msg, revoked
 
 
-def extract_id_token_claims(id_token: str | None) -> dict:
-    if not isinstance(id_token, str) or id_token.count('.') < 2:
+_ALLOWED_ID_TOKEN_ALGS = frozenset({'RS256', 'ES256', 'PS256'})
+_GOOGLE_ISSUERS = frozenset({'https://accounts.google.com', 'accounts.google.com'})
+
+
+def extract_id_token_claims(id_token: str | None, *, expected_aud: str | None = None) -> dict:
+    """Базовый структурный разбор Google ID token (не заменяет fetch_userinfo без крипто-проверки подписи JWKS)."""
+    if not isinstance(id_token, str):
+        return {}
+    parts = id_token.strip().split('.')
+    if len(parts) != 3 or any(not p for p in parts):
         return {}
     try:
-        segment = id_token.split('.')[1]
-        padded = segment + '=' * (-len(segment) % 4)
-        payload = json.loads(base64.urlsafe_b64decode(padded.encode()).decode('utf-8'))
-        return payload if isinstance(payload, dict) else {}
+        hdr_raw = parts[0] + '=' * (-len(parts[0]) % 4)
+        header = json.loads(base64.urlsafe_b64decode(hdr_raw.encode('ascii')).decode('utf-8'))
+        if not isinstance(header, dict) or header.get('alg') not in _ALLOWED_ID_TOKEN_ALGS:
+            return {}
+        pay_raw = parts[1] + '=' * (-len(parts[1]) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(pay_raw.encode('ascii')).decode('utf-8'))
+        if not isinstance(payload, dict):
+            return {}
     except Exception:
         return {}
+
+    iss = str(payload.get('iss') or '').strip()
+    sub = str(payload.get('sub') or '').strip()
+    exp = payload.get('exp')
+    if iss not in _GOOGLE_ISSUERS or not sub:
+        return {}
+    if not isinstance(exp, (int, float)) or isinstance(exp, bool) or float(exp) <= time.time() - 60:
+        return {}
+    if expected_aud:
+        aud = payload.get('aud')
+        if isinstance(aud, list):
+            aud_ok = expected_aud in aud
+        else:
+            aud_ok = (aud == expected_aud)
+        if not aud_ok:
+            return {}
+    return payload
 
 
 async def _post_oauth_form(url: str, data: dict, *, is_refresh: bool = False, timeout: float = 30.0) -> dict:
@@ -353,7 +374,14 @@ async def fetch_userinfo(access_token: str, *, timeout: float = 15.0) -> dict:
             )
         if resp.is_success:
             data = resp.json()
-            return data if isinstance(data, dict) else {}
+            if not isinstance(data, dict):
+                return {}
+            return {
+                'sub': str(data.get('sub') or '').strip(),
+                'email': str(data.get('email') or '').strip(),
+                'name': str(data.get('name') or '').strip(),
+                'email_verified': bool(data.get('email_verified', False)),
+            }
     except (httpx.HTTPError, ValueError):
         pass
     return {}
@@ -389,10 +417,18 @@ def _parse_retry_after(headers: httpx.Headers | None) -> float | None:
     raw = headers.get('retry-after')
     if not raw:
         return None
+    text = raw.strip()
     try:
-        val = float(raw.strip())
-        return max(0.5, min(60.0, val))
+        val = float(text)
+        return max(0.0, val)
     except ValueError:
+        pass
+    try:
+        dt = parsedate_to_datetime(text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return max(0.0, (dt - datetime.now(timezone.utc)).total_seconds())
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -493,7 +529,7 @@ def _cloudcode_http_error(status_code: int, raw_bytes: bytes, path: str, headers
             or ('quota' in lower_msg and 'reset' in lower_msg)
         )
         effective_retryable = not is_quota_exhausted
-        effective_retry_after = min(5.0, max(0.2, delay_sec)) if (effective_retryable and delay_sec is not None) else None
+        effective_retry_after = float(delay_sec) if delay_sec is not None else None
         code_note = f' ({err_status})' if err_status and err_status != 'HTTP_ERROR' else ''
         msg = f'Превышен лимит запросов или квота Google Antigravity (HTTP 429{code_note})'
         if raw_msg:
@@ -502,6 +538,8 @@ def _cloudcode_http_error(status_code: int, raw_bytes: bytes, path: str, headers
             msg = f'{msg} (сброс через {quota_reset_delay})'
         elif quota_reset_at and quota_reset_at not in msg:
             msg = f'{msg} (сброс: {quota_reset_at})'
+        elif retry_after is not None and retry_after >= 1.0 and 'повтор' not in msg.lower():
+            msg = f'{msg} (повтор через {round(retry_after)} с)'
         return AntigravityError(
             msg,
             status_code=429,
@@ -680,7 +718,9 @@ def normalize_models(body: dict, *, include_internal: bool = False) -> list[dict
             reset_time = reset_time.strip()
 
         disabled_flag = bool(model.get('isDisabled') or model.get('disabled')) or model.get('available') is False
-        available = not disabled_flag and (remaining_fraction is None or remaining_fraction > 0)
+        quota_known = remaining_fraction is not None
+        available = not disabled_flag and (not quota_known or remaining_fraction > 0)
+        supports_tools = not (model.get('supportsTools') is False or model.get('supportsFunctionCalling') is False)
 
         max_tokens = _positive_int(model, _CTX_KEYS, minimum=256)
         max_input_tokens = _positive_int(model, _IN_KEYS, minimum=256)
@@ -691,6 +731,8 @@ def normalize_models(body: dict, *, include_internal: bool = False) -> list[dict
             'id': model_id,
             'name': name or model_id,
             'available': available,
+            'quota_known': quota_known,
+            'supports_tools': supports_tools,
             'remaining_fraction': remaining_fraction,
             'remaining_percent': remaining_percent,
             'reset_time': reset_time,
@@ -1012,12 +1054,23 @@ async def stream_generate_content(
             async with asyncio.timeout(first_byte_timeout):
                 cm = client.stream('POST', f'{base}{stream_path}', params={'alt': 'sse'}, json=envelope, headers=headers)
                 response = await cm.__aenter__()
+        except asyncio.CancelledError:
+            raise
         except TimeoutError:
             raise AntigravityError('Google Antigravity не начал ответ вовремя', retryable=True) from None
         except httpx.TimeoutException:
             raise AntigravityError('Истекло время ожидания Google Antigravity', retryable=True) from None
         except httpx.HTTPError:
             raise AntigravityError('Ошибка соединения с Google Antigravity', retryable=True) from None
+
+        cm_closed = False
+
+        async def _close_cm() -> None:
+            nonlocal cm_closed
+            if cm_closed:
+                return
+            cm_closed = True
+            await cm.__aexit__(None, None, None)
 
         try:
             if 300 <= response.status_code < 400:
@@ -1026,7 +1079,7 @@ async def stream_generate_content(
                     status_code=502,
                 )
             if response.status_code in (404, 405, 501):
-                await cm.__aexit__(None, None, None)
+                await _close_cm()
                 single = await cloudcode_post(
                     '/v1internal:generateContent',
                     envelope,
@@ -1038,26 +1091,26 @@ async def stream_generate_content(
                 yield single.get('response', single)
                 return
 
-            if response.status_code == 429:
-                raw = await response.aread()
-                err = _cloudcode_http_error(response.status_code, raw, stream_path, response.headers)
-                if err.error_status == 'RESOURCE_EXHAUSTED' and err.retryable:
-                    await cm.__aexit__(None, None, None)
-                    single = await cloudcode_post(
-                        '/v1internal:generateContent',
-                        envelope,
-                        access_token,
-                        cloudcode_url=base,
-                        user_agent=user_agent,
-                        timeout=first_byte_timeout,
-                    )
-                    yield single.get('response', single)
-                    return
-                raise err
-
             if not response.is_success:
                 raw = await response.aread()
                 raise _cloudcode_http_error(response.status_code, raw, stream_path, response.headers)
+
+            content_type = (response.headers.get('content-type') or '').split(';', 1)[0].strip().lower()
+            if content_type and content_type != 'text/event-stream':
+                raw = await response.aread()
+                if content_type == 'application/json':
+                    try:
+                        parsed = json.loads(raw.decode('utf-8'))
+                    except (UnicodeError, ValueError):
+                        parsed = None
+                    if isinstance(parsed, dict) and isinstance(parsed.get('error'), dict):
+                        err_code = parsed['error'].get('code') if isinstance(parsed['error'].get('code'), int) else 502
+                        raise _cloudcode_http_error(err_code, raw, stream_path, response.headers)
+                raise AntigravityError(
+                    f'Google Antigravity вернул неожиданный Content-Type ({content_type}) вместо text/event-stream',
+                    status_code=502,
+                    error_status='INVALID_SSE',
+                )
 
             data_lines: list[str] = []
             valid_events = 0
@@ -1128,12 +1181,14 @@ async def stream_generate_content(
                     status_code=502,
                     error_status='INVALID_SSE',
                 )
+        except asyncio.CancelledError:
+            raise
         except httpx.TimeoutException:
             raise AntigravityError('Поток Google Antigravity не передавал данные слишком долго', retryable=True) from None
         except httpx.HTTPError:
             raise AntigravityError('Поток ответа Google Antigravity оборвался', retryable=True) from None
         finally:
-            await cm.__aexit__(None, None, None)
+            await _close_cm()
 
 
 # --- Взаимодействие сервисов с backend (единый владелец БД и токенов) ---
@@ -1208,11 +1263,20 @@ async def fetch_live_catalog(*, force_refresh: bool = False, include_internal: b
         pid, tier, raw_catalog = await _discover_and_fetch(token)
 
     models = normalize_models(raw_catalog, include_internal=show_internal)
+    connection_id = str(session.get('connection_id') or '').strip()
+    config_version = session.get('config_version')
 
     # Обновляем общий кэш лимитов моделей для resolve_session_capabilities.
     try:
         from common.codex_harness import cache_provider_models
-        cache_provider_models(cloudcode_url, models, source_kind='antigravity', auth_mode='antigravity')
+        cache_provider_models(
+            cloudcode_url,
+            models,
+            source_kind='antigravity',
+            auth_mode='antigravity',
+            connection_id=connection_id,
+            config_version=config_version,
+        )
     except ImportError:
         pass
 
@@ -1222,6 +1286,8 @@ async def fetch_live_catalog(*, force_refresh: bool = False, include_internal: b
         'models': models,
         'checked_at': datetime.now(timezone.utc).isoformat(),
         'cloudcode_url': cloudcode_url,
+        'connection_id': connection_id,
+        'config_version': config_version,
     }
 
 

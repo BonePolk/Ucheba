@@ -1221,31 +1221,67 @@ class AntigravityStrausRegressionTests(unittest.TestCase):
         )
         self.assertEqual(env['request']['sessionId'], session.session_id)
 
-    def test_bare_429_falls_back_to_generate_content_and_alternate_cloudcode_host(self):
-        # 1. stream_generate_content при bare 429 RESOURCE_EXHAUSTED пробует /v1internal:generateContent.
+    def test_429_does_not_switch_endpoint_or_fallback_to_generate_content(self):
+        # 1. stream_generate_content при 429 не вызывает generateContent и закрывает stream ровно один раз.
+        exit_count = {'n': 0}
+
         class _Stream429:
             def __init__(self):
                 self.status_code = 429
                 self.is_success = False
-                self.headers = {}
+                self.headers = {'Retry-After': '12'}
             async def __aenter__(self): return self
-            async def __aexit__(self, *args): return False
+            async def __aexit__(self, *args):
+                exit_count['n'] += 1
+                return False
             async def aread(self):
-                return json.dumps({'error': {'code': 429, 'status': 'RESOURCE_EXHAUSTED', 'message': 'Resource has been exhausted (e.g. check quota).'}}).encode('utf-8')
+                return json.dumps({'error': {'code': 429, 'status': 'RESOURCE_EXHAUSTED', 'message': 'Rate limit exceeded'}}).encode('utf-8')
 
         class _Client429:
             async def __aenter__(self): return self
             async def __aexit__(self, *args): return False
             def stream(self, *args, **kwargs): return _Stream429()
 
+        cloudcode_post_mock = AsyncMock()
         with patch('common.antigravity.httpx.AsyncClient', return_value=_Client429()), \
-             patch('common.antigravity.cloudcode_post', AsyncMock(return_value={'response': {'candidates': [{'content': {'parts': [{'text': 'Через generateContent'}]}, 'finishReason': 'STOP'}]}})):
+             patch('common.antigravity.cloudcode_post', cloudcode_post_mock):
             async def _collect():
                 return [ev async for ev in antigravity.stream_generate_content('tok', {'request': {'contents': []}})]
-            chunks = asyncio.run(_collect())
-        self.assertEqual(chunks[0]['candidates'][0]['content']['parts'][0]['text'], 'Через generateContent')
+            with self.assertRaises(antigravity.AntigravityError) as exc:
+                asyncio.run(_collect())
+        self.assertEqual(exc.exception.status_code, 429)
+        self.assertEqual(exc.exception.retry_after, 12.0)
+        self.assertTrue(exc.exception.retryable)
+        self.assertEqual(exit_count['n'], 1)
+        cloudcode_post_mock.assert_not_called()
 
-        # 2. Мост при bare 429 на daily-cloudcode-pa переключается на cloudcode-pa.
+        # 2. 404 fallback на generateContent также закрывает stream ровно один раз.
+        exit_404 = {'n': 0}
+
+        class _Stream404:
+            status_code = 404
+            is_success = False
+            headers = {}
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args):
+                exit_404['n'] += 1
+                return False
+            async def aread(self): return b'{}'
+
+        class _Client404:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): return False
+            def stream(self, *args, **kwargs): return _Stream404()
+
+        with patch('common.antigravity.httpx.AsyncClient', return_value=_Client404()), \
+             patch('common.antigravity.cloudcode_post', AsyncMock(return_value={'response': {'candidates': [{'content': {'parts': [{'text': '404 fallback ok'}]}, 'finishReason': 'STOP'}]}})):
+            async def _collect_404():
+                return [ev async for ev in antigravity.stream_generate_content('tok', {'request': {'contents': []}})]
+            chunks_404 = asyncio.run(_collect_404())
+        self.assertEqual(exit_404['n'], 1)
+        self.assertEqual(chunks_404[0]['candidates'][0]['content']['parts'][0]['text'], '404 fallback ok')
+
+        # 3. Мост при transient 429 повторяет запрос на тот же cloudcode_url, не переключая хост.
         session = antigravity_bridge.AntigravityBridgeSession(owner_id=1)
         session.access_token = 'tok-1'
         session.token_expires_at = time.time() + 3600
@@ -1253,27 +1289,28 @@ class AntigravityStrausRegressionTests(unittest.TestCase):
         client = TestClient(antigravity_bridge.create_bridge_app(session, 'sec', label='Straus'))
         seen_urls = []
 
-        async def _host_fallback(tok, env, *, cloudcode_url='', **kwargs):
+        async def _same_host_retry(tok, env, *, cloudcode_url='', **kwargs):
             seen_urls.append(cloudcode_url)
-            if cloudcode_url == 'https://daily-cloudcode-pa.googleapis.com':
+            if len(seen_urls) == 1:
                 raise antigravity.AntigravityError(
-                    'Превышен лимит запросов или квота Google Antigravity (HTTP 429 (RESOURCE_EXHAUSTED)): Resource has been exhausted (e.g. check quota).',
+                    'Превышен лимит запросов (HTTP 429)',
                     status_code=429,
-                    error_status='RESOURCE_EXHAUSTED',
+                    error_status='RATE_LIMIT',
                     retryable=True,
                     quota_exceeded=True,
+                    retry_after=0.05,
                 )
-            yield {'candidates': [{'content': {'parts': [{'text': 'Ответ с backup-хоста'}]}, 'finishReason': 'STOP'}]}
+            yield {'candidates': [{'content': {'parts': [{'text': 'Успешно с того же хоста'}]}, 'finishReason': 'STOP'}]}
 
-        with patch('common.antigravity_bridge.stream_generate_content', side_effect=_host_fallback):
+        with patch('common.antigravity_bridge.stream_generate_content', side_effect=_same_host_retry):
             resp = client.post(
                 '/v1/responses',
                 headers={'Authorization': 'Bearer sec'},
                 json={'model': 'gemini-4-neon-xhigh', 'input': 'Привет', 'stream': False},
             )
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(seen_urls, ['https://daily-cloudcode-pa.googleapis.com', 'https://cloudcode-pa.googleapis.com'])
-        self.assertEqual(resp.json()['output'][0]['content'][0]['text'], 'Ответ с backup-хоста')
+        self.assertEqual(seen_urls, ['https://daily-cloudcode-pa.googleapis.com', 'https://daily-cloudcode-pa.googleapis.com'])
+        self.assertEqual(resp.json()['output'][0]['content'][0]['text'], 'Успешно с того же хоста')
 
     def test_orphan_external_message_function_call_output_becomes_user_text(self):
         session = antigravity_bridge.AntigravityBridgeSession(owner_id=1)
@@ -1312,6 +1349,136 @@ class AntigravityStrausRegressionTests(unittest.TestCase):
         self.assertIn('functionCall', meta2['contents'][1]['parts'][0])
         self.assertIn('functionResponse', meta2['contents'][2]['parts'][0])
         self.assertEqual(meta2['contents'][2]['parts'][0]['functionResponse']['name'], 'mcp__ucheba__calendar_list')
+
+        # 3. Неизвестный call_id обычного инструмента не превращается молча в текст, а даёт HTTP 400 invalid_tool_sequence.
+        with self.assertRaises(antigravity.AntigravityError) as unknown_exc:
+            session.translate_request({
+                'model': 'gemini-4-neon-xhigh',
+                'tools': tools_ns,
+                'input': [
+                    {'type': 'function_call_output', 'call_id': 'unknown_call_99', 'name': 'calendar_list', 'output': '{}'},
+                ],
+            })
+        self.assertEqual(unknown_exc.exception.status_code, 400)
+        self.assertEqual(unknown_exc.exception.error_status, 'invalid_tool_sequence')
+
+    def test_audit_regressions_isolation_size_limit_sse_and_sanitizer(self):
+        # 1. Изоляция истории 4 агентов и соблюдение UCHEBA_BRIDGE_STATE_DIR.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict('os.environ', {'UCHEBA_BRIDGE_STATE_DIR': tmpdir}):
+                paths = {}
+                for agent in ('Monocle', 'Ameba', 'Straus', 'Arrodes'):
+                    s = antigravity_bridge.AntigravityBridgeSession(
+                        owner_id=1, agent_scope=agent, connection_id='conn-a',
+                    )
+                    s.responses_history[f'resp_{agent}'] = [{'type': 'message', 'role': 'user', 'content': f'msg {agent}'}]
+                    self.assertTrue(s._save_persisted_state())
+                    paths[agent] = s.state_path
+                self.assertEqual(len(set(paths.values())), 4)
+                for agent, p in paths.items():
+                    self.assertTrue(str(p).startswith(tmpdir))
+                    reloaded = antigravity_bridge.AntigravityBridgeSession(
+                        owner_id=1, agent_scope=agent, connection_id='conn-a',
+                    )
+                    self.assertIn(f'resp_{agent}', reloaded.responses_history)
+                    for other in ('Monocle', 'Ameba', 'Straus', 'Arrodes'):
+                        if other != agent:
+                            self.assertNotIn(f'resp_{other}', reloaded.responses_history)
+
+                # 2. Смена Google-аккаунта (connection_id) полностью изолирует previous_response_id и encrypted_content.
+                reloaded_b = antigravity_bridge.AntigravityBridgeSession(
+                    owner_id=1, agent_scope='Arrodes', connection_id='conn-b',
+                )
+                self.assertNotIn('resp_Arrodes', reloaded_b.responses_history)
+                enc_a = antigravity_bridge._encode_encrypted_meta({'call_sigs': {'c1': 'sig-a'}}, owner_id=1, connection_id='conn-a')
+                self.assertEqual(antigravity_bridge.decode_thought_signature(enc_a, owner_id=1, connection_id='conn-a'), 'sig-a')
+                self.assertEqual(antigravity_bridge.decode_thought_signature(enc_a, owner_id=1, connection_id='conn-b'), '')
+
+                # 3. Конкурентное сохранение Responses history не теряет call_meta и записи.
+                s1 = antigravity_bridge.AntigravityBridgeSession(owner_id=1, agent_scope='Straus', connection_id='conn-c')
+                s2 = antigravity_bridge.AntigravityBridgeSession(owner_id=1, agent_scope='Straus', connection_id='conn-c')
+                s1.responses_history['r1'] = [{'type': 'function_call', 'call_id': 'c1', 'name': 'calendar_list', 'arguments': '{}'}]
+                s1.call_meta['c1'] = {'safe_name': 'mcp__ucheba__calendar_list', 'provider_id': 'p1'}
+                s2.responses_history['r2'] = [{'type': 'function_call', 'call_id': 'c2', 'name': 'calendar_finish', 'arguments': '{}'}]
+                s2.call_meta['c2'] = {'safe_name': 'mcp__ucheba__calendar_finish', 'provider_id': 'p2'}
+                self.assertTrue(s1._save_persisted_state())
+                self.assertTrue(s2._save_persisted_state())
+                s3 = antigravity_bridge.AntigravityBridgeSession(owner_id=1, agent_scope='Straus', connection_id='conn-c')
+                self.assertIn('r1', s3.responses_history)
+                self.assertIn('r2', s3.responses_history)
+                self.assertEqual(s3.call_meta.get('c1', {}).get('provider_id'), 'p1')
+                self.assertEqual(s3.call_meta.get('c2', {}).get('provider_id'), 'p2')
+
+                # 4. Строгий лимит _MAX_PERSISTED_BYTES соблюдается даже для 1 огромной записи.
+                huge_session = antigravity_bridge.AntigravityBridgeSession(owner_id=1, agent_scope='Monocle', connection_id='conn-huge')
+                huge_session.responses_history['resp_huge'] = [
+                    {'type': 'function_call', 'call_id': 'c_huge', 'name': 'search', 'arguments': '{}'},
+                    {'type': 'function_call_output', 'call_id': 'c_huge', 'output': 'X' * (800 * 1024)},
+                ]
+                self.assertTrue(huge_session._save_persisted_state())
+                self.assertLessEqual(huge_session.state_path.stat().st_size, antigravity_bridge._MAX_PERSISTED_BYTES * 2)
+
+                # 5. Диагностика ошибки записи истории вместо молчаливого pass.
+                err_session = antigravity_bridge.AntigravityBridgeSession(owner_id=1, agent_scope='Ameba', connection_id='conn-err')
+                err_session.responses_history['r_err'] = [{'type': 'message', 'role': 'user', 'content': 'hi'}]
+                with patch('common.antigravity_bridge.os.replace', side_effect=PermissionError('read-only fs')):
+                    ok = err_session._save_persisted_state()
+                self.assertFalse(ok)
+                self.assertIn('history_write_failed', err_session.last_persistence_error or '')
+
+        # 6. Отсутствие finishReason при has_tool_calls=True MUST быть ошибкой (не ложный completed).
+        st, _, err = antigravity_bridge._evaluate_terminal_outcome(
+            finish_reason='',
+            block_reason='',
+            has_text=False,
+            has_tool_calls=True,
+        )
+        self.assertEqual(st, 'failed')
+        self.assertEqual(err['code'], 'premature_stream_close')
+
+        # 7. _sanitize_system_text сохраняет permissions instructions при preserve_permissions=True (Arrodes).
+        raw_prompt = (
+            'Ты Arrodes, исполнитель Ucheba.\n'
+            '<skills_instructions>\ncodex skills hidden\n</skills_instructions>\n'
+            '<permissions instructions>\nsandbox workspace-write & shell policy\n</permissions instructions>'
+        )
+        san_arrodes = antigravity_bridge._sanitize_system_text(raw_prompt, has_custom_agent_prompt=True, preserve_permissions=True)
+        self.assertIn('Ты Arrodes', san_arrodes)
+        self.assertIn('sandbox workspace-write', san_arrodes)
+        self.assertNotIn('codex skills hidden', san_arrodes)
+
+        # 8. Проверка ID token claims: отклонён alg=none, expired, wrong aud; валиден корректный.
+        import base64
+        def _jwt(hdr, pay):
+            h = base64.urlsafe_b64encode(json.dumps(hdr).encode()).decode().rstrip('=')
+            p = base64.urlsafe_b64encode(json.dumps(pay).encode()).decode().rstrip('=')
+            return f'{h}.{p}.sig'
+        valid_pay = {'iss': 'https://accounts.google.com', 'sub': 'sub-1', 'aud': 'cid-1', 'exp': time.time() + 600, 'email': 'a@b.com'}
+        self.assertEqual(antigravity.extract_id_token_claims(_jwt({'alg': 'none'}, valid_pay), expected_aud='cid-1'), {})
+        self.assertEqual(antigravity.extract_id_token_claims(_jwt({'alg': 'RS256'}, {**valid_pay, 'exp': time.time() - 300}), expected_aud='cid-1'), {})
+        self.assertEqual(antigravity.extract_id_token_claims(_jwt({'alg': 'RS256'}, {**valid_pay, 'aud': 'other'}), expected_aud='cid-1'), {})
+        self.assertEqual(antigravity.extract_id_token_claims(_jwt({'alg': 'RS256'}, valid_pay), expected_aud='cid-1')['sub'], 'sub-1')
+
+        # 9. Неожиданный Content-Type в HTTP 200 SSE отклоняется как INVALID_SSE.
+        class _StreamHtml:
+            status_code = 200
+            is_success = True
+            headers = {'content-type': 'text/html; charset=utf-8'}
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): return False
+            async def aread(self): return b'<html>oops</html>'
+
+        class _ClientHtml:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): return False
+            def stream(self, *args, **kwargs): return _StreamHtml()
+
+        with patch('common.antigravity.httpx.AsyncClient', return_value=_ClientHtml()):
+            async def _collect_html():
+                return [ev async for ev in antigravity.stream_generate_content('tok', {'request': {'contents': []}})]
+            with self.assertRaises(antigravity.AntigravityError) as html_exc:
+                asyncio.run(_collect_html())
+        self.assertEqual(html_exc.exception.error_status, 'INVALID_SSE')
 
 
 class AntigravityAdminUserSeparationAndAgentsTests(unittest.TestCase):
@@ -1535,6 +1702,120 @@ class AntigravityAdminUserSeparationAndAgentsTests(unittest.TestCase):
             self.assertEqual(sec1.get('refresh_token', ''), '')
         finally:
             current_user_id.reset(tok1)
+
+    def test_audit_oauth_lifecycle_refresh_preservation_and_config_versioning(self):
+        backend_ag.save_global_config({
+            'enabled': True,
+            'client_id': 'cid-v1.apps.googleusercontent.com',
+            'client_secret': 'secret-v1',
+            'redirect_uri': 'https://antigravity.google/oauth-callback',
+        })
+        v1 = backend_ag.read_global_config()['config_version']
+        tok1 = current_user_id.set(1)
+        try:
+            # 1. Параллельные start_login -> complete_login первого входа с userinfo и refresh_token.
+            s1 = backend_ag.start_login()
+            s2 = backend_ag.start_login()
+            self.assertNotEqual(s1['state'], s2['state'])
+
+            with patch('backend.integrations.antigravity.exchange_oauth_code', AsyncMock(return_value={
+                'access_token': 'acc-a1', 'refresh_token': 'ref-a', 'expires_in': 3600,
+            })), patch('backend.integrations.antigravity.fetch_userinfo', AsyncMock(return_value={
+                'sub': 'google-sub-a', 'email': 'alice@example.com', 'name': 'Alice', 'email_verified': True,
+            })), patch('backend.integrations.antigravity.call', AsyncMock(return_value={
+                'project_id': 'proj-a', 'subscription_tier': 'PRO', 'models': [{'id': 'gemini-4-neon-xhigh', 'name': 'Neon'}],
+            })):
+                res1 = asyncio.run(backend_ag.complete_login(
+                    f"https://antigravity.google/oauth-callback?state={s1['state']}&code=code-1",
+                ))
+            self.assertTrue(res1['oauth_authorized'])
+            self.assertTrue(res1['has_refresh_token'])
+            conn_a1 = res1['connection_id']
+            self.assertTrue(bool(conn_a1))
+
+            # State одноразовый: повторный вызов отклоняется.
+            with self.assertRaises(HTTPException):
+                asyncio.run(backend_ag.complete_login(
+                    f"https://antigravity.google/oauth-callback?state={s1['state']}&code=code-1",
+                ))
+
+            # 2. Повторный вход того же Google-аккаунта и того же client_id БЕЗ refresh_token сохраняет ref-a, но меняет connection_id.
+            s3 = backend_ag.start_login()
+            with patch('backend.integrations.antigravity.exchange_oauth_code', AsyncMock(return_value={
+                'access_token': 'acc-a2', 'expires_in': 3600,
+            })), patch('backend.integrations.antigravity.fetch_userinfo', AsyncMock(return_value={
+                'sub': 'google-sub-a', 'email': 'alice@example.com', 'name': 'Alice', 'email_verified': True,
+            })), patch('backend.integrations.antigravity.call', AsyncMock(return_value={
+                'project_id': 'proj-a', 'subscription_tier': 'PRO', 'models': [],
+            })):
+                res2 = asyncio.run(backend_ag.complete_login(
+                    f"https://antigravity.google/oauth-callback?state={s3['state']}&code=code-2",
+                ))
+            self.assertTrue(res2['has_refresh_token'])
+            self.assertNotEqual(res2['connection_id'], conn_a1)
+            _, sec_a2 = read_settings('antigravity', apply_feature=False)
+            self.assertEqual(sec_a2.get('refresh_token'), 'ref-a')
+
+            # 3. Тест генерации привязан к config_version; смена cloudcode_url инвалидирует verified/catalog.
+            with patch('backend.integrations.antigravity.call', AsyncMock(return_value={
+                'ok': True, 'model': 'gemini-4-neon-xhigh', 'project_id': 'proj-a', 'subscription_tier': 'PRO',
+            })):
+                ver = asyncio.run(backend_ag.test_generation('gemini-4-neon-xhigh'))
+            self.assertTrue(ver['status']['generation_verified'])
+
+            backend_ag.save_global_config({'cloudcode_url': 'https://cloudcode-pa.googleapis.com'})
+            v2 = backend_ag.read_global_config()['config_version']
+            self.assertGreater(v2, v1)
+            stale_st = asyncio.run(backend_ag.status(live=False))
+            self.assertFalse(stale_st['generation_verified'])
+            self.assertFalse(stale_st['catalog_accessible'])
+            self.assertTrue(stale_st['config_stale'])
+
+            # 4. Вход ДРУГОГО Google-аккаунта без refresh_token НЕ переносит ref-a и выставляет refresh_warning.
+            s4 = backend_ag.start_login()
+            with patch('backend.integrations.antigravity.exchange_oauth_code', AsyncMock(return_value={
+                'access_token': 'acc-b1', 'expires_in': 3600,
+            })), patch('backend.integrations.antigravity.fetch_userinfo', AsyncMock(return_value={
+                'sub': 'google-sub-b', 'email': 'bob@example.com', 'name': 'Bob', 'email_verified': True,
+            })), patch('backend.integrations.antigravity.call', AsyncMock(return_value={
+                'project_id': 'proj-b', 'subscription_tier': 'FREE', 'models': [],
+            })):
+                res3 = asyncio.run(backend_ag.complete_login(
+                    f"https://antigravity.google/oauth-callback?state={s4['state']}&code=code-3",
+                ))
+            self.assertFalse(res3['has_refresh_token'])
+            self.assertTrue(bool(res3.get('refresh_warning')))
+            _, sec_b1 = read_settings('antigravity', apply_feature=False)
+            self.assertEqual(sec_b1.get('refresh_token', ''), '')
+
+            # 5. Смена client_id админом помечает сессию oauth_client_mismatch без удаления токенов.
+            backend_ag.save_global_config({'client_id': 'cid-v2.apps.googleusercontent.com'})
+            mismatch_st = asyncio.run(backend_ag.status(live=False))
+            self.assertTrue(mismatch_st['oauth_client_mismatch'])
+            self.assertFalse(mismatch_st['oauth_authorized'])
+
+            # 6. Logout сбрасывает connection_id и очищает токены.
+            with patch('backend.integrations.antigravity.revoke_oauth_token', AsyncMock()):
+                asyncio.run(backend_ag.logout())
+            after_out = asyncio.run(backend_ag.status(live=False))
+            self.assertEqual(after_out['connection_id'], '')
+            self.assertFalse(after_out['oauth_authorized'])
+        finally:
+            current_user_id.reset(tok1)
+
+        # 7. Идемпотентная доочистка частичной миграции, когда SystemSetting уже есть.
+        with Session(self.db1) as s:
+            row = s.get(IntegrationSetting, 'antigravity')
+            cfg = json.loads(row.config)
+            cfg['client_id'] = 'lingering-cid'
+            row.config = json.dumps(cfg)
+            s.add(row)
+            s.commit()
+        mig2 = backend_ag.migrate_legacy_antigravity_config()
+        self.assertTrue(mig2['migrated'])
+        self.assertTrue(mig2['cleaned_partial'])
+        mig3 = backend_ag.migrate_legacy_antigravity_config()
+        self.assertFalse(mig3['migrated'])
 
 
 if __name__ == '__main__':

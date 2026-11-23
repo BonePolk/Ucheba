@@ -18,6 +18,9 @@ DEFAULTS = {
     'telegram': {'enabled': False, 'chat_ids': []},
     'ai_provider': {'base_url': 'https://lenec.tech/v1'},
     'antigravity': {
+        'connection_id': '',
+        'account_sub': '',
+        'oauth_client_id': '',
         'account_email': '',
         'account_name': '',
         'discovered_project_id': '',
@@ -27,10 +30,12 @@ DEFAULTS = {
         'include_internal': False,
         'catalog_accessible': False,
         'catalog_checked_at': None,
+        'catalog_config_version': None,
         'cached_models': [],
         'generation_verified': False,
         'generation_verified_at': None,
         'generation_verified_model': '',
+        'config_version_at_verify': None,
     },
     'monocle': {
         'enabled': True,
@@ -105,6 +110,8 @@ SYSTEM_DEFAULTS = {
         'user_agent': '',
         'allowed_scopes': [],
         'diagnostic_mode': False,
+        'config_version': 1,
+        'config_fingerprint': '',
     },
 }
 SYSTEM_SECRET_FIELDS = {
@@ -336,6 +343,12 @@ def resolve_agent_auth(name, *, require_enabled=False, require_credentials=True)
         client_secret = (sys_secrets.get('client_secret') or env_client_secret() or '').strip()
         if require_credentials and not (client_id and client_secret):
             raise HTTPException(400, 'Google Antigravity OAuth не настроен администратором')
+        stored_client_id = (ag_cfg.get('oauth_client_id') or '').strip()
+        if require_credentials and stored_client_id and stored_client_id != client_id:
+            raise HTTPException(
+                400,
+                'Администратор изменил OAuth-клиент Google Antigravity. Выполните повторный вход через Google в разделе «Подключения AI».',
+            )
         cloudcode_url = validate_cloudcode_url(sys_cfg.get('cloudcode_url') or DEFAULT_CLOUDCODE_URL)
         effective = dict(
             config,
@@ -345,6 +358,8 @@ def resolve_agent_auth(name, *, require_enabled=False, require_credentials=True)
             project_id=(ag_cfg.get('discovered_project_id') or '').strip(),
             user_agent=str(sys_cfg.get('user_agent') or ''),
             include_internal=bool(ag_cfg.get('include_internal', False)),
+            connection_id=(ag_cfg.get('connection_id') or '').strip(),
+            config_version=int(sys_cfg.get('config_version') or 1),
         )
         if require_credentials:
             has_session = bool((ag_secrets.get('access_token') or '').strip() or (ag_secrets.get('refresh_token') or '').strip())

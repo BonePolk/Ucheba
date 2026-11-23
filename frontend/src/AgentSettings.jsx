@@ -8,6 +8,7 @@ import { Switch } from '@/components/ui/controls';
 import { Field, Input, Textarea } from '@/components/ui/input';
 import { SelectField } from '@/components/ui/select';
 import { Badge, Notice, SectionHeader, StatusIndicator } from '@/components/ui/surface';
+import { getModelAvailability, normalizeAntigravityState } from '@/lib/antigravity';
 import { cn } from '@/lib/utils';
 
 const CAP_SOURCE_LABELS = {
@@ -188,35 +189,27 @@ export default function AgentSettings({
 
   const oauthAuthorized = Boolean(oauthState?.data?.authorized);
   const apiKeyReady = Boolean(provider?.configured?.api_key);
-  const agStatus = antigravityState?.data;
-  const agSystemEnabled = (agStatus?.system_enabled ?? antigravityData?.system_enabled) !== false;
-  const agSystemConfigured = (agStatus?.system_configured ?? antigravityData?.system_configured) !== false;
-  const agSessionPresent = Boolean(
-    agStatus?.oauth_authorized
-    ?? agStatus?.authorized
-    ?? (antigravityData?.configured?.access_token || antigravityData?.configured?.refresh_token),
-  );
-  const agEmail = agStatus?.account_email || antigravityData?.account_email || '';
-  const agError = agStatus?.oauth_error || agStatus?.quota_error || agStatus?.error || antigravityData?.last_error || antigravityState?.error?.message || null;
-  const agChecking = Boolean(agSessionPresent && antigravityState?.isFetching && !agStatus);
-  const agReady = Boolean(
-    agSystemEnabled
-    && agSystemConfigured
-    && agSessionPresent
-    && (agStatus?.catalog_accessible ?? agStatus?.subscription_verified) !== false
-    && !agStatus?.token_expired,
-  );
+  const ag = normalizeAntigravityState({ data: antigravityData, stateQuery: antigravityState });
+  const agModelInfo = authMode === 'antigravity'
+    ? getModelAvailability(ag.models, model.trim(), {
+        catalogLoaded: ag.catalogAccessible && ag.models.length > 0,
+        generationVerified: ag.generationVerified,
+        verifiedModel: ag.verifiedModel,
+      })
+    : null;
   const selectedReady = authMode === 'oauth'
     ? oauthAuthorized
     : authMode === 'antigravity'
-      ? agReady
+      ? ag.canRunAgent
       : apiKeyReady;
   const capQueryKey = [
     'integrations',
     'agent-capabilities',
     name,
     authMode,
-    authMode === 'antigravity' ? (antigravityData?.discovered_project_id || agEmail || '') : (provider?.base_url || ''),
+    authMode === 'antigravity'
+      ? `${ag.connectionId}:${ag.configVersion ?? ''}:${ag.projectId || ag.accountEmail || ''}`
+      : (provider?.base_url || ''),
     model.trim(),
     parsedContextWindow ?? 'auto',
     selectedReady,
@@ -246,7 +239,7 @@ export default function AgentSettings({
   const savedAuthReady = savedAuthMode === 'oauth'
     ? oauthAuthorized
     : savedAuthMode === 'antigravity'
-      ? Boolean(agSessionPresent && savedModel.trim())
+      ? Boolean(ag.canUseCatalog && savedModel.trim())
       : Boolean(apiKeyReady && savedModel.trim());
   const actionError = save.error || toggle.error || check.error;
 
@@ -319,20 +312,14 @@ export default function AgentSettings({
             <Badge
               variant={
                 authMode === 'antigravity'
-                  ? (!agSessionPresent || agChecking ? 'outline' : agReady && !agError ? 'success' : 'warning')
+                  ? ag.badgeVariant
                   : (selectedReady ? 'success' : 'warning')
               }
             >
               {authMode === 'oauth'
                 ? (selectedReady ? 'Вход выполнен' : 'Нет входа')
                 : authMode === 'antigravity'
-                  ? (!agSessionPresent
-                    ? 'Не подключён'
-                    : agChecking
-                      ? 'Проверка…'
-                      : agReady && !agError
-                        ? 'Подключён'
-                        : 'Требуется проверка')
+                  ? ag.badgeText
                   : (selectedReady ? 'Ключ настроен' : 'Нет ключа')}
             </Badge>
             {authMode === 'api_key' && (
@@ -340,9 +327,9 @@ export default function AgentSettings({
                 {provider?.base_url || 'https://lenec.tech/v1'}
               </span>
             )}
-            {authMode === 'antigravity' && agEmail && (
+            {authMode === 'antigravity' && ag.accountEmail && (
               <span className="text-[11px] text-[#929292] truncate">
-                {agEmail}
+                {ag.accountEmail}
               </span>
             )}
           </div>
@@ -352,8 +339,16 @@ export default function AgentSettings({
             </Button>
           )}
         </div>
-        {authMode === 'antigravity' && agSessionPresent && agError && (
-          <Notice tone="warning">{agError}</Notice>
+        {authMode === 'antigravity' && ag.primaryError && (
+          <Notice tone={ag.oauthError ? 'error' : 'warning'}>{ag.primaryError}</Notice>
+        )}
+        {authMode === 'antigravity' && !ag.primaryError && ag.canRunAgent && !ag.generationVerified && model.trim() && (
+          <div className="text-[11px] text-[#929292]">
+            Каталог доступен, но реальная генерация для модели «{model.trim()}» ещё не проверялась (запуск разрешён).
+          </div>
+        )}
+        {authMode === 'antigravity' && agModelInfo?.warning && (
+          <Notice tone="warning">{agModelInfo.warning}</Notice>
         )}
       </div>
 
@@ -363,8 +358,10 @@ export default function AgentSettings({
         authMode={authMode}
         providerConfigured={apiKeyReady}
         oauthAuthorized={oauthAuthorized}
-        antigravityAuthorized={agReady}
-        gatewayUrl={antigravityData?.discovered_project_id || ''}
+        antigravityAuthorized={ag.canUseCatalog}
+        gatewayUrl={ag.projectId}
+        connectionId={ag.connectionId}
+        configVersion={ag.configVersion ?? ''}
         value={model}
         onChange={setModel}
         onModelsLoaded={() => client.invalidateQueries({ queryKey: ['integrations', 'agent-capabilities', name] })}

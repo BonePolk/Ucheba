@@ -659,10 +659,23 @@ async def settings():
         state = {'connected': False, 'analyzing': False}
     pub = public_settings()
     g_ag = antigravity.read_global_config()
+    ag_pub = pub['antigravity']
+    ag_has_session = bool(ag_pub.get('configured', {}).get('access_token') or ag_pub.get('configured', {}).get('refresh_token'))
+    stored_cid = str(ag_pub.get('oauth_client_id') or '').strip()
+    oauth_mismatch = bool(ag_has_session and stored_cid and stored_cid != g_ag['client_id'])
+    cat_ver = ag_pub.get('catalog_config_version')
+    gen_ver = ag_pub.get('config_version_at_verify')
+    catalog_stale = bool(ag_has_session and ag_pub.get('catalog_accessible') and cat_ver not in (None, g_ag['config_version']))
+    gen_stale = bool(ag_has_session and ag_pub.get('generation_verified') and gen_ver != g_ag['config_version'])
     pub['antigravity'] = {
-        **pub['antigravity'],
+        **ag_pub,
         'system_enabled': bool(g_ag['enabled']),
         'system_configured': bool(g_ag['configured']),
+        'config_version': g_ag['config_version'],
+        'oauth_client_mismatch': oauth_mismatch,
+        'config_stale': bool(oauth_mismatch or catalog_stale or gen_stale),
+        'catalog_accessible': bool(ag_pub.get('catalog_accessible')) and not catalog_stale and not oauth_mismatch,
+        'generation_verified': bool(ag_pub.get('generation_verified')) and not gen_stale and not oauth_mismatch,
     }
     return {**pub, 'telegram_connected': state['connected'], 'analyzing': state['analyzing']}
 

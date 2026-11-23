@@ -155,11 +155,24 @@ def _normalize_provider_base_url(base_url: str) -> str:
     return f'{scheme}://{netloc}{parts.path.rstrip("/")}'
 
 
-def _capability_scope(auth_mode: str, base_url: str = '') -> tuple[str, str]:
+def _capability_scope(
+    auth_mode: str,
+    base_url: str = '',
+    *,
+    connection_id: str = '',
+    config_version: int | None = None,
+) -> tuple[str, str]:
     mode = (auth_mode or 'api_key').strip().lower()
     if mode == 'antigravity_gateway':
         mode = 'antigravity'
-    if mode in ('api_key', 'antigravity'):
+    if mode == 'antigravity':
+        base_scope = _normalize_provider_base_url(base_url) or _normalize_provider_base_url(DEFAULT_CLOUDCODE_URL)
+        cid = _safe_str(connection_id)
+        if cid or config_version is not None:
+            ver_part = str(config_version) if config_version is not None else '-'
+            return mode, f'{base_scope}|cid={cid}|v={ver_part}'
+        return mode, base_scope
+    if mode == 'api_key':
         return mode, _normalize_provider_base_url(base_url)
     return mode, ''
 
@@ -263,10 +276,17 @@ def cache_provider_models(
     source_kind: str = 'api_key',
     auth_mode: str | None = None,
     mark_probed: bool = True,
+    connection_id: str = '',
+    config_version: int | None = None,
 ) -> None:
     owner = user_id()
     inferred_mode = auth_mode or ('oauth' if source_kind == 'codex' and (base_url or '').strip().lower() == 'oauth' else 'api_key')
-    mode, scope = _capability_scope(inferred_mode, '' if inferred_mode == 'oauth' else base_url)
+    mode, scope = _capability_scope(
+        inferred_mode,
+        '' if inferred_mode == 'oauth' else base_url,
+        connection_id=connection_id,
+        config_version=config_version,
+    )
     has_any = False
     for raw in models_iter or ():
         limits = extract_model_limits(raw)
@@ -286,16 +306,31 @@ async def fetch_provider_model_metadata(
     model: str,
     *,
     auth_mode: str = 'api_key',
+    connection_id: str = '',
+    config_version: int | None = None,
 ) -> dict | None:
     owner = user_id()
-    mode, scope = _capability_scope(auth_mode, base_url)
+    mode, scope = _capability_scope(
+        auth_mode,
+        base_url,
+        connection_id=connection_id,
+        config_version=config_version,
+    )
     if mode == 'antigravity':
         try:
-            await asyncio.wait_for(fetch_live_catalog(), timeout=4.0)
-            return _lookup_cached_model(owner, 'antigravity', mode, scope or _normalize_provider_base_url(DEFAULT_CLOUDCODE_URL), model)
+            catalog = await asyncio.wait_for(fetch_live_catalog(), timeout=4.0)
+            cat_cid = _safe_str(catalog.get('connection_id')) or _safe_str(connection_id)
+            cat_ver = catalog.get('config_version') if catalog.get('config_version') is not None else config_version
+            _, cat_scope = _capability_scope(
+                mode,
+                catalog.get('cloudcode_url') or base_url,
+                connection_id=cat_cid,
+                config_version=cat_ver,
+            )
+            return _lookup_cached_model(owner, 'antigravity', mode, cat_scope, model)
         except Exception as exc:
             logging.getLogger('uvicorn.error').warning('Antigravity catalog capability probe failed: %s', type(exc).__name__)
-            _cache_put(('probed', owner, 'antigravity', mode, scope or _normalize_provider_base_url(DEFAULT_CLOUDCODE_URL)), 'failed', MODEL_CAP_MISS_TTL)
+            _cache_put(('probed', owner, 'antigravity', mode, scope), 'failed', MODEL_CAP_MISS_TTL)
             return None
     source_kind = 'api_key'
     if not scope or (mode == 'api_key' and not api_key):
@@ -389,14 +424,16 @@ async def detect_model_capabilities(
     config: dict | None = None,
     client=None,
     thread=None,
+    connection_id: str = '',
+    config_version: int | None = None,
 ) -> ModelCapabilities:
     """Определяет подтверждённое и ручное контекстное окно модели без фиктивных значений."""
     owner = user_id()
-    mode, scope = _capability_scope(auth_mode, base_url)
-    if mode == 'antigravity' and not scope:
-        scope = _normalize_provider_base_url(DEFAULT_CLOUDCODE_URL)
-    active_model = _safe_str(_field(thread, 'model')) or _safe_str(model)
     cfg = config or {}
+    eff_cid = _safe_str(connection_id) or _safe_str(cfg.get('connection_id'))
+    eff_ver = config_version if config_version is not None else cfg.get('config_version')
+    mode, scope = _capability_scope(auth_mode, base_url, connection_id=eff_cid, config_version=eff_ver)
+    active_model = _safe_str(_field(thread, 'model')) or _safe_str(model)
     manual_ctx = _safe_int(cfg.get('context_window'), minimum=4096)
     cfg_in = _safe_int(cfg.get('max_input_tokens'), minimum=4096)
     cfg_out = _safe_int(cfg.get('max_output_tokens'), minimum=256)
@@ -415,7 +452,14 @@ async def detect_model_capabilities(
         provider_cap = _lookup_cached_model(owner, provider_source, mode, scope, active_model) or {}
         provider_probe_state = _fresh_get(('probed', owner, provider_source, mode, scope))
         if not provider_cap and provider_probe_state is None and (api_key or mode == 'antigravity'):
-            provider_cap = await fetch_provider_model_metadata(scope, api_key, active_model, auth_mode=mode) or {}
+            provider_cap = await fetch_provider_model_metadata(
+                base_url,
+                api_key,
+                active_model,
+                auth_mode=mode,
+                connection_id=eff_cid,
+                config_version=eff_ver,
+            ) or {}
             provider_probe_state = _fresh_get(('probed', owner, provider_source, mode, scope))
 
     rt_entry = _fresh_get(('runtime', owner, mode, scope, active_model))
@@ -767,6 +811,7 @@ async def open_codex(
     allow_shell: bool = False,
     web_search: str = 'disabled',
     cwd: str | Path | None = None,
+    connection_id: str = '',
 ):
     if auth_mode == 'antigravity_gateway':
         auth_mode = 'antigravity'
@@ -778,7 +823,13 @@ async def open_codex(
         if auth_mode == 'antigravity':
             bridge_error = {}
             eff_url, eff_key = await stack.enter_async_context(
-                antigravity_responses_bridge(label=label, cloudcode_url=base_url, error_sink=bridge_error)
+                antigravity_responses_bridge(
+                    label=label,
+                    cloudcode_url=base_url,
+                    error_sink=bridge_error,
+                    agent_scope=label,
+                    connection_id=connection_id,
+                )
             )
         config, thread_provider = build_codex_config(
             auth_mode,
@@ -1594,6 +1645,7 @@ async def check_connection(label: str, *, config: dict | None, api_key: str = ''
             base_url=base_url,
             allow_shell=False,
             web_search='disabled',
+            connection_id=str((config or {}).get('connection_id') or ''),
         ) as (client, thread_provider):
             thread = await start_codex_thread(
                 client,

@@ -24,6 +24,7 @@ import { Field, Textarea } from '@/components/ui/input';
 import { Combobox } from '@/components/ui/select';
 import { Badge, EmptyState, Notice, SectionHeader, StatusIndicator } from '@/components/ui/surface';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow, TableContainer } from '@/components/ui/table';
+import { normalizeAntigravityState } from '@/lib/antigravity';
 import { AnimatePresence, CollapseSection, ExpandableText, LiveHorizon, motion, PANEL_TRANSITION, StageSwap, useReducedMotion } from '@/lib/motion';
 
 const runStatusMeta = {
@@ -220,20 +221,29 @@ export default function ArrodesWorkspace({ task: fixedTask = null, features = {}
 
   const rawAuthMode = integrations.data?.arrodes?.auth_mode || 'oauth';
   const authMode = rawAuthMode === 'antigravity_gateway' ? 'antigravity' : rawAuthMode;
+  const antigravityState = useQuery({
+    queryKey: [
+      'integrations',
+      'antigravity',
+      Boolean(integrations.data?.antigravity?.system_enabled === true),
+      Boolean(integrations.data?.antigravity?.system_configured === true),
+      integrations.data?.antigravity?.config_version ?? null,
+      integrations.data?.antigravity?.connection_id || '',
+    ],
+    queryFn: () => request('/integrations/antigravity/status'),
+    enabled: features.arrodes !== false && authMode === 'antigravity',
+    retry: false,
+  });
+  const agState = normalizeAntigravityState({ data: integrations.data?.antigravity, stateQuery: antigravityState });
   const modelConfigured = Boolean((integrations.data?.arrodes?.model || '').trim());
   const apiKeyReady = Boolean(integrations.data?.ai_provider?.configured?.api_key && modelConfigured);
-  const antigravitySession = Boolean(
-    integrations.data?.antigravity?.system_enabled !== false
-    && integrations.data?.antigravity?.system_configured !== false
-    && (integrations.data?.antigravity?.configured?.access_token || integrations.data?.antigravity?.configured?.refresh_token),
-  );
-  const antigravityReady = Boolean(antigravitySession && modelConfigured);
+  const antigravityReady = Boolean(agState.canRunAgent && modelConfigured);
   const oauthReady = Boolean(arrodesStatus.data?.authorized);
   const authReady = authMode === 'api_key' ? apiKeyReady : authMode === 'antigravity' ? antigravityReady : oauthReady;
   const notAuthorized = authMode === 'api_key'
     ? Boolean(integrations.data && !apiKeyReady)
     : authMode === 'antigravity'
-      ? Boolean(integrations.data && !antigravityReady)
+      ? Boolean(integrations.data && !agState.isLoading && !antigravityReady)
       : Boolean(arrodesStatus.data && !oauthReady);
   const sandboxBlocked = arrodesStatus.data && !arrodesStatus.data.sandbox_available;
   const configuredModel = integrations.data?.arrodes?.model;
@@ -268,7 +278,7 @@ export default function ArrodesWorkspace({ task: fixedTask = null, features = {}
                 {authMode === 'api_key'
                   ? (authReady ? 'API-ключ' : 'Нет ключа')
                   : authMode === 'antigravity'
-                    ? (authReady ? 'Google Antigravity' : 'Нет входа')
+                    ? (authReady ? 'Google Antigravity' : agState.badgeText)
                     : (authReady ? 'Подключён' : 'Нет входа')}
               </Badge>
             )}
@@ -311,7 +321,7 @@ export default function ArrodesWorkspace({ task: fixedTask = null, features = {}
             {authMode === 'api_key'
               ? 'Сохраните API-ключ и модель Arrodes в настройках агентов.'
               : authMode === 'antigravity'
-                ? 'Выполните вход Google Antigravity и выберите модель Arrodes в настройках агентов.'
+                ? (agState.primaryError || (!modelConfigured ? 'Выберите модель Arrodes в настройках агентов.' : 'Выполните вход Google Antigravity и проверьте доступ к каталогу в настройках агентов.'))
                 : 'Нужна авторизация OpenAI OAuth в настройках агентов.'}
           </Notice>
         )}

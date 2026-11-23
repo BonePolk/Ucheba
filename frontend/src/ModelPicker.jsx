@@ -4,6 +4,7 @@ import { request } from './api';
 import { Button } from '@/components/ui/button';
 import { Field, Input } from '@/components/ui/input';
 import { Combobox } from '@/components/ui/select';
+import { formatSafeDateTime, getModelAvailability } from '@/lib/antigravity';
 
 function normalizeModelOption(item) {
   if (typeof item === 'string') {
@@ -35,6 +36,8 @@ export default function ModelPicker({
   antigravityAuthorized = false,
   antigravityConfigured = false,
   gatewayUrl = '',
+  connectionId = '',
+  configVersion = '',
 }) {
   const [items, setItems] = useState([]);
   const [manual, setManual] = useState(false);
@@ -52,7 +55,7 @@ export default function ModelPicker({
     setError('');
     setLoading(false);
     return () => active.current?.abort();
-  }, [path, authMode, endpoint, apiKey, gatewayUrl]);
+  }, [path, authMode, endpoint, apiKey, gatewayUrl, connectionId, configVersion]);
 
   async function load() {
     active.current?.abort();
@@ -104,7 +107,7 @@ export default function ModelPicker({
     if (isAntigravity && canLoad && !loaded && !loading && !error) {
       load();
     }
-  }, [isAntigravity, canLoad, loaded, error, path, gatewayUrl]);
+  }, [isAntigravity, canLoad, loaded, error, path, gatewayUrl, connectionId, configVersion]);
 
   const options = useMemo(() => {
     if (!value) return items;
@@ -112,10 +115,13 @@ export default function ModelPicker({
     return [{ value, label: value, meta: null }, ...items];
   }, [items, value]);
 
-  const selectedMeta = useMemo(
-    () => items.find((opt) => opt.value === value)?.meta ?? null,
-    [items, value],
+  const rawCatalogModels = useMemo(() => items.map((opt) => opt.meta).filter(Boolean), [items]);
+  const modelAvailability = useMemo(
+    () => (isAntigravity ? getModelAvailability(rawCatalogModels, value, { catalogLoaded: loaded }) : null),
+    [isAntigravity, rawCatalogModels, value, loaded],
   );
+  const selectedMeta = modelAvailability?.meta ?? null;
+  const resetText = selectedMeta?.reset_time ? formatSafeDateTime(selectedMeta.reset_time) : null;
 
   return (
     <div className="flex flex-col gap-1.5">
@@ -148,11 +154,16 @@ export default function ModelPicker({
           <span>
             {selectedMeta.remaining_percent != null
               ? `Квота: ${selectedMeta.remaining_percent}%`
-              : 'Квота: не передана сервером'}
+              : 'Квота неизвестна'}
           </span>
-          {selectedMeta.reset_time && (
-            <span>Сброс: {new Date(selectedMeta.reset_time).toLocaleString()}</span>
+          {resetText && (
+            <span>Сброс: {resetText}</span>
           )}
+        </div>
+      )}
+      {isAntigravity && modelAvailability?.warning && (
+        <div className="text-[11px] text-[#E5B567]">
+          {modelAvailability.warning}
         </div>
       )}
       <div className="flex flex-wrap items-center gap-1.5">

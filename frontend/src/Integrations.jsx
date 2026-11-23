@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Field, PasswordField } from '@/components/ui/input';
 import { MultiCombobox } from '@/components/ui/select';
 import { Badge, Notice, PageLoader, SectionHeader, StatusIndicator } from '@/components/ui/surface';
+import { normalizeAntigravityState } from '@/lib/antigravity';
 import { cn } from '@/lib/utils';
 import { motion, SPRING_SNAPPY, StageSwap, useReducedMotion } from '@/lib/motion';
 
@@ -75,9 +76,10 @@ function IntegrationForms({ data, features }) {
     retry: false,
   });
 
-  const antigravityConfigured = Boolean(
-    data.antigravity?.system_enabled !== false
-    && data.antigravity?.system_configured !== false
+  const antigravityShouldPoll = Boolean(
+    data.antigravity?.system_enabled === true
+    && data.antigravity?.system_configured === true
+    && !data.antigravity?.oauth_client_mismatch
     && (
       data.antigravity?.configured?.access_token
       || data.antigravity?.configured?.refresh_token
@@ -88,32 +90,29 @@ function IntegrationForms({ data, features }) {
     queryKey: [
       'integrations',
       'antigravity',
-      Boolean(data.antigravity?.system_enabled !== false),
-      Boolean(data.antigravity?.system_configured !== false),
+      Boolean(data.antigravity?.system_enabled === true),
+      Boolean(data.antigravity?.system_configured === true),
+      data.antigravity?.config_version ?? null,
+      data.antigravity?.connection_id || '',
       Boolean(data.antigravity?.configured?.access_token),
       Boolean(data.antigravity?.configured?.refresh_token),
       data.antigravity?.account_email || '',
     ],
     enabled: anyAgentEnabled,
-    queryFn: () => request(`/integrations/antigravity/status${antigravityConfigured ? '?live=true' : ''}`),
-    refetchInterval: antigravityConfigured ? 60000 : false,
+    queryFn: () => request(`/integrations/antigravity/status${antigravityShouldPoll ? '?live=true' : ''}`),
+    refetchInterval: antigravityShouldPoll ? 60000 : false,
     retry: false,
   });
 
+  const agState = normalizeAntigravityState({ data: data.antigravity, stateQuery: antigravityState });
   const aiReady = Boolean(
     oauthState.data?.authorized
     || data.ai_provider?.configured?.api_key
-    || (
-      antigravityState.data?.system_enabled !== false
-      && antigravityState.data?.system_configured !== false
-      && (antigravityState.data?.oauth_authorized ?? antigravityState.data?.authorized)
-      && (antigravityState.data?.catalog_accessible ?? antigravityState.data?.subscription_verified) !== false
-    ),
+    || agState.canRunAgent,
   );
   const aiError = Boolean(
     data.ai_provider?.last_error
-    || data.antigravity?.last_error
-    || antigravityState.data?.error,
+    || agState.primaryError,
   );
 
   const items = [

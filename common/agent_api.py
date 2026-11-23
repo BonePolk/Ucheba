@@ -118,6 +118,8 @@ def agent_routes(app, label, *, oauth_client_getter=None):
             model=model,
             config=cfg,
             client=client,
+            connection_id=str(cfg.get('connection_id') or ''),
+            config_version=cfg.get('config_version'),
         )
         return caps.to_dict()
 

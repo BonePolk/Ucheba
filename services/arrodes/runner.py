@@ -380,10 +380,22 @@ async def execute(run_id, payload, progress, auth=None, options=None):
             tools_handler = Tools(path, progress)
             adapter = McpToolAdapter(active_tools, tools_handler.call, progress)
             sandbox = Sandbox.full_access if CONTAINER_SANDBOX else Sandbox.workspace_write
+            current_conn_id = str(opts.get('connection_id') or '').strip()
+            same_antigravity_conn = (
+                bool(current_conn_id and previous.get('antigravity_connection_id') == current_conn_id)
+                if auth_mode == 'antigravity'
+                else True
+            )
+            if previous.get('thread_id') and auth_mode == 'antigravity' and not same_antigravity_conn:
+                progress.add('Аккаунт Google Antigravity изменился — создаёт новую сессию в той же рабочей директории')
             can_resume = bool(
                 previous.get('thread_id')
                 and previous.get('auth_mode', 'oauth') == auth_mode
-                and (auth_mode == 'oauth' or previous.get('base_url') == base_url)
+                and (
+                    auth_mode == 'oauth'
+                    or (auth_mode == 'api_key' and previous.get('base_url') == base_url)
+                    or (auth_mode == 'antigravity' and same_antigravity_conn)
+                )
             )
 
             async with scratch_env(writable=True) as (_, shell_policy), serve_mcp(adapter) as mcp_config, open_codex(
@@ -394,6 +406,7 @@ async def execute(run_id, payload, progress, auth=None, options=None):
                 allow_shell=allow_shell,
                 web_search=web_search_mode,
                 cwd=path,
+                connection_id=current_conn_id,
             ) as (current, thread_provider):
                 options = dict(
                     cwd=str(path),
@@ -425,6 +438,7 @@ async def execute(run_id, payload, progress, auth=None, options=None):
                     'workspace': workspace,
                     'auth_mode': auth_mode,
                     'base_url': base_url,
+                    'antigravity_connection_id': current_conn_id,
                 }))
                 outcome = await run_codex_turn(
                     thread,

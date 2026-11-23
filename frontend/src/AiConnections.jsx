@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/controls';
 import { Field, Input, PasswordField } from '@/components/ui/input';
 import { Badge, Notice, SectionHeader } from '@/components/ui/surface';
+import { formatSafeDateTime, normalizeAntigravityState } from '@/lib/antigravity';
 
 function formatLimit(val) {
   return typeof val === 'number' && val > 0 ? val.toLocaleString('ru-RU') : null;
@@ -25,34 +26,28 @@ export default function AiConnections({ data, oauthState, antigravityData, antig
   const oauthAuthorized = Boolean(oauthState?.data?.authorized);
   const device = oauthState?.data?.device;
 
-  const agStatus = antigravityState?.data;
-  const agSystemEnabled = (agStatus?.system_enabled ?? antigravityData?.system_enabled) !== false;
-  const agSystemConfigured = (agStatus?.system_configured ?? antigravityData?.system_configured) !== false;
-  const agAuthorized = Boolean(
-    agStatus?.oauth_authorized
-    ?? agStatus?.authorized
-    ?? (antigravityData?.configured?.access_token || antigravityData?.configured?.refresh_token),
-  );
-  const agEmail = agStatus?.account_email || antigravityData?.account_email || '';
-  const agName = agStatus?.account_name || antigravityData?.account_name || '';
-  const agEffectiveProject = agStatus?.project_id || antigravityData?.discovered_project_id || '';
-  const agTier = agStatus?.subscription_tier || antigravityData?.subscription_tier || '';
-  const agModels = Array.isArray(agStatus?.models)
-    ? agStatus.models
-    : (Array.isArray(antigravityData?.cached_models) ? antigravityData.cached_models : []);
-  const agTokenExpired = Boolean(agStatus?.token_expired);
-  const agCatalogAccessible = Boolean(agStatus?.catalog_accessible ?? antigravityData?.catalog_accessible);
-  const agGenerationVerified = Boolean(agStatus?.generation_verified ?? antigravityData?.generation_verified);
-  const agVerifiedModel = agStatus?.generation_verified_model || antigravityData?.generation_verified_model || '';
-  const agVerifiedAt = agStatus?.generation_verified_at || antigravityData?.generation_verified_at || null;
-  const agIncludeInternal = Boolean(agStatus?.include_internal ?? antigravityData?.include_internal);
+  const ag = normalizeAntigravityState({ data: antigravityData, stateQuery: antigravityState });
+  const agModels = ag.models;
+  const agExpiresText = formatSafeDateTime(ag.tokenExpiresAt);
+  const agVerifiedText = formatSafeDateTime(ag.verifiedAt);
+  const agCheckedTimeText = formatSafeDateTime(ag.checkedAt, { timeOnly: true });
+  const agLastSuccessText = formatSafeDateTime(ag.lastSuccess);
 
   useEffect(() => {
-    if (!agTestModel && agModels.length > 0) {
+    setAgTestModel('');
+  }, [ag.connectionId]);
+
+  useEffect(() => {
+    if (!ag.oauthAuthorized) {
+      setAgTestModel('');
+      return;
+    }
+    const modelExists = agModels.some((m) => m.id === agTestModel);
+    if ((!agTestModel || (agModels.length > 0 && !modelExists)) && agModels.length > 0) {
       const firstAvail = agModels.find((m) => m.available !== false) || agModels[0];
       if (firstAvail?.id) setAgTestModel(firstAvail.id);
     }
-  }, [agModels, agTestModel]);
+  }, [ag.oauthAuthorized, agModels, agTestModel]);
 
   const invalidateAllAi = () => Promise.all([
     client.invalidateQueries({ queryKey: ['integrations'], exact: true }),
@@ -144,6 +139,8 @@ export default function AiConnections({ data, oauthState, antigravityData, antig
     onSuccess: async (res) => {
       setAgPending(null);
       setAgCallbackInput('');
+      setAgTestModel('');
+      agTestGeneration.reset();
       client.setQueriesData({ queryKey: ['integrations', 'antigravity'] }, res);
       await invalidateAllAi();
     },
@@ -152,6 +149,7 @@ export default function AiConnections({ data, oauthState, antigravityData, antig
   const agRefresh = useMutation({
     mutationFn: () => request('/integrations/antigravity/refresh', { method: 'POST' }),
     onSuccess: async (res) => {
+      agTestGeneration.reset();
       client.setQueriesData({ queryKey: ['integrations', 'antigravity'] }, res);
       await invalidateAllAi();
     },
@@ -185,6 +183,8 @@ export default function AiConnections({ data, oauthState, antigravityData, antig
     onSuccess: async () => {
       setAgPending(null);
       setAgCallbackInput('');
+      setAgTestModel('');
+      agTestGeneration.reset();
       await invalidateAllAi();
     },
   });
@@ -201,37 +201,14 @@ export default function AiConnections({ data, oauthState, antigravityData, antig
   );
   const oauthError = oauthConnect.error || oauthDisconnect.error;
   const providerError = saveProvider.error || checkProvider.error;
-  const agActionError = agStartLogin.error || agCompleteLogin.error || agRefresh.error || agTestGeneration.error || agLogout.error;
-  const agOAuthError = agStatus?.oauth_error || null;
-  const agQuotaError = agStatus?.quota_error || null;
-  const agServerError = !agOAuthError && !agQuotaError ? (agStatus?.error || antigravityData?.last_error) : null;
-
-  const agBadgeVariant = !agSystemEnabled || !agSystemConfigured
-    ? 'warning'
-    : !agAuthorized
-      ? 'outline'
-      : agOAuthError || agTokenExpired
-        ? 'warning'
-        : agQuotaError || !agCatalogAccessible
-          ? 'warning'
-          : agGenerationVerified
-            ? 'success'
-            : 'outline';
-  const agBadgeText = !agSystemEnabled
-    ? 'Отключён админом'
-    : !agSystemConfigured
-      ? 'Не настроен админом'
-      : !agAuthorized
-        ? 'Не подключён'
-        : agTokenExpired
-          ? 'Токен истёк'
-          : agOAuthError
-            ? 'Ошибка OAuth'
-            : !agCatalogAccessible
-              ? 'Нет доступа к каталогу'
-              : agGenerationVerified
-                ? 'Подтверждён'
-                : 'Каталог доступен';
+  const agActionError = (
+    agStartLogin.error
+    || agCompleteLogin.error
+    || agRefresh.error
+    || agTestGeneration.error
+    || agToggleInternal.error
+    || agLogout.error
+  );
 
   return (
     <div className="flex flex-col gap-4">
@@ -243,61 +220,77 @@ export default function AiConnections({ data, oauthState, antigravityData, antig
       <section className="border border-[#262626] bg-[#0D0D0D] p-3 flex flex-col gap-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <span className="text-[13px] font-medium text-[#EAEAEA]">Google Antigravity</span>
-          <Badge variant={agBadgeVariant}>{agBadgeText}</Badge>
+          <Badge variant={ag.badgeVariant}>{ag.badgeText}</Badge>
         </div>
 
         <div className="text-[11px] text-[#929292]">
           Подключение вашего Google-аккаунта к Cloud Code API (настраивается администратором Ucheba).
         </div>
 
-        {!agSystemEnabled && (
+        {ag.hasSnapshot && !ag.systemEnabled && (
           <Notice tone="warning">Google Antigravity отключён администратором.</Notice>
         )}
-        {agSystemEnabled && !agSystemConfigured && (
+        {ag.hasSnapshot && ag.systemEnabled && !ag.systemConfigured && (
           <Notice tone="warning">
             Google Antigravity пока не настроен администратором (укажите OAuth Client ID и Client Secret в админ-панели).
           </Notice>
         )}
+        {ag.oauthClientMismatch && (
+          <Notice tone="warning">
+            Администратор изменил OAuth-клиент Google Antigravity. Выполните повторный вход через Google для продолжения работы.
+          </Notice>
+        )}
 
-        {agAuthorized && (
+        {(ag.oauthAuthorized || ag.oauthClientMismatch) && (
           <div className="border border-[#242424] bg-[#111111] px-2.5 py-2 text-[12px] flex flex-col gap-1.5">
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
               <span className="text-[#929292]">Аккаунт:</span>
               <span className="text-[#EAEAEA] font-medium break-all">
-                {agEmail || (agName ? agName : 'Google-аккаунт (email не указан)')}
+                {ag.accountEmail || (ag.accountName ? ag.accountName : 'Google-аккаунт (email не указан)')}
               </span>
-              {agName && agEmail && <span className="text-[#929292]">({agName})</span>}
+              {ag.accountName && ag.accountEmail && <span className="text-[#929292]">({ag.accountName})</span>}
             </div>
-            {agEffectiveProject && (
+            {ag.projectId && (
               <div className="flex flex-wrap items-center gap-x-2 text-[11px] text-[#929292]">
                 <span>Проект:</span>
-                <span className="font-mono text-[#DCDCDC] break-all">{agEffectiveProject}</span>
-                {agTier && <Badge variant="outline">{agTier}</Badge>}
+                <span className="font-mono text-[#DCDCDC] break-all">{ag.projectId}</span>
+                {ag.tier && <Badge variant="outline">{ag.tier}</Badge>}
               </div>
             )}
             <div className="flex flex-wrap gap-1.5 pt-0.5">
-              <Badge variant={agTokenExpired ? 'warning' : 'success'}>
-                {agTokenExpired ? 'OAuth: требуется обновление' : 'OAuth: авторизован'}
+              <Badge variant={ag.oauthClientMismatch || ag.tokenExpired ? 'warning' : 'success'}>
+                {ag.oauthClientMismatch
+                  ? 'OAuth: требуется повторный вход'
+                  : ag.tokenExpired
+                    ? 'OAuth: требуется обновление'
+                    : 'OAuth: авторизован'}
               </Badge>
-              <Badge variant={agCatalogAccessible ? 'success' : 'warning'}>
-                {agCatalogAccessible ? 'Каталог Cloud Code: доступен' : 'Каталог Cloud Code: не подтверждён'}
+              <Badge variant={ag.catalogAccessible ? 'success' : 'warning'}>
+                {ag.catalogAccessible
+                  ? 'Каталог Cloud Code: доступен'
+                  : ag.configStale
+                    ? 'Каталог: требуется перепроверка'
+                    : 'Каталог Cloud Code: не подтверждён'}
               </Badge>
-              <Badge variant={agGenerationVerified ? 'success' : 'outline'}>
-                {agGenerationVerified
-                  ? `Генерация: подтверждена (${agVerifiedModel || 'OK'})`
+              <Badge variant={ag.generationVerified ? 'success' : 'outline'}>
+                {ag.generationVerified
+                  ? `Генерация: подтверждена (${ag.verifiedModel || 'OK'})`
                   : 'Генерация: не проверялась'}
               </Badge>
             </div>
-            {agStatus?.token_expires_at && (
+            {agExpiresText && (
               <div className="text-[11px] text-[#929292]">
-                Токен действует до: {new Date(agStatus.token_expires_at).toLocaleString()}
-                {agStatus.has_refresh_token ? ' · автообновление активно' : ' · без refresh_token'}
+                Токен действует до: {agExpiresText}
+                {ag.hasRefreshToken ? ' · автообновление активно' : ' · без refresh_token'}
               </div>
             )}
-            {agVerifiedAt && (
+            {agVerifiedText && (
               <div className="text-[11px] text-[#929292]">
-                Тест генерации пройден: {new Date(agVerifiedAt).toLocaleString()}
+                Тест генерации пройден: {agVerifiedText}
               </div>
+            )}
+            {ag.refreshWarning && (
+              <div className="text-[11px] text-[#E5B567]">{ag.refreshWarning}</div>
             )}
           </div>
         )}
@@ -307,24 +300,24 @@ export default function AiConnections({ data, oauthState, antigravityData, antig
             size="sm"
             variant="primary"
             loading={agStartLogin.isPending}
-            disabled={agBusy || !agSystemEnabled || !agSystemConfigured}
+            disabled={agBusy || ag.isLoading || !ag.systemEnabled || !ag.systemConfigured}
             onClick={() => agStartLogin.mutate()}
           >
-            {agAuthorized ? 'Переподключить Google' : 'Войти через Google'}
+            {(ag.oauthAuthorized || ag.oauthClientMismatch) ? 'Переподключить Google' : 'Войти через Google'}
           </Button>
-          {agAuthorized && (
+          {ag.oauthAuthorized && (
             <Button
               size="sm"
               variant="default"
               leftIcon={<RefreshCw className={`h-3 w-3 ${agRefresh.isPending ? 'animate-spin' : ''}`} />}
               loading={agRefresh.isPending}
-              disabled={agBusy || !agSystemEnabled || !agSystemConfigured}
+              disabled={agBusy || !ag.systemEnabled || !ag.systemConfigured}
               onClick={() => agRefresh.mutate()}
             >
               Обновить токен и каталог
             </Button>
           )}
-          {agAuthorized && (
+          {(ag.oauthAuthorized || ag.oauthClientMismatch) && (
             <Button
               size="sm"
               variant="danger-ghost"
@@ -341,7 +334,7 @@ export default function AiConnections({ data, oauthState, antigravityData, antig
           )}
         </div>
 
-        {agAuthorized && agSystemEnabled && agSystemConfigured && (
+        {ag.oauthAuthorized && ag.systemEnabled && ag.systemConfigured && (
           <div className="border border-[#242424] bg-[#111111] p-2.5 flex flex-col gap-2">
             <div className="flex flex-wrap items-end gap-2">
               <Field label="Модель для проверки реальной генерации" className="w-full sm:flex-1 sm:min-w-[220px]">
@@ -365,11 +358,11 @@ export default function AiConnections({ data, oauthState, antigravityData, antig
             </div>
             <Switch
               label="Показывать внутренние / экспериментальные модели без displayName"
-              checked={agIncludeInternal}
+              checked={ag.includeInternal}
               disabled={agBusy}
               onCheckedChange={(checked) => agToggleInternal.mutate(checked)}
             />
-            {agTestGeneration.data?.ok && (
+            {agTestGeneration.data?.ok && !agTestGeneration.isPending && (
               <Notice tone="success">
                 Генерация подтверждена ({agTestGeneration.data.model}): {agTestGeneration.data.sample_text}
               </Notice>
@@ -425,22 +418,25 @@ export default function AiConnections({ data, oauthState, antigravityData, antig
         )}
 
         {agActionError && <Notice tone="error">{agActionError.message}</Notice>}
-        {agOAuthError && !agActionError && (
-          <Notice tone="error" title="Ошибка OAuth Google">{agOAuthError}</Notice>
+        {ag.oauthError && !agActionError && !ag.oauthClientMismatch && (
+          <Notice tone="error" title="Ошибка OAuth Google">{ag.oauthError}</Notice>
         )}
-        {agQuotaError && !agActionError && (
-          <Notice tone="warning" title="Проблема доступа или квоты Cloud Code">{agQuotaError}</Notice>
+        {ag.transportError && !agActionError && (
+          <Notice tone="warning" title="Ошибка соединения с сервером">{ag.transportError}</Notice>
         )}
-        {agServerError && !agActionError && (
-          <Notice tone="warning" title="Ошибка Google Antigravity">{agServerError}</Notice>
+        {ag.quotaError && !agActionError && (
+          <Notice tone="warning" title="Проблема доступа или квоты Cloud Code">{ag.quotaError}</Notice>
+        )}
+        {ag.serverError && !agActionError && (
+          <Notice tone="warning" title="Ошибка Google Antigravity">{ag.serverError}</Notice>
         )}
 
-        {agAuthorized && agModels.length > 0 && (
+        {ag.oauthAuthorized && agModels.length > 0 && (
           <div className="border border-[#242424] bg-[#111111] p-2.5 flex flex-col gap-2">
             <div className="flex items-center justify-between gap-2 text-[11px] text-[#929292]">
               <span>Доступные модели аккаунта ({agModels.length})</span>
-              {agStatus?.checked_at && (
-                <span>Обновлено: {new Date(agStatus.checked_at).toLocaleTimeString()}</span>
+              {agCheckedTimeText && (
+                <span>Обновлено: {agCheckedTimeText}</span>
               )}
             </div>
             <div className="max-h-56 overflow-y-auto divide-y divide-[#1E1E1E]">
@@ -448,6 +444,7 @@ export default function AiConnections({ data, oauthState, antigravityData, antig
                 const pct = m.remaining_percent;
                 const inLim = formatLimit(m.max_input_tokens || m.context_window);
                 const outLim = formatLimit(m.max_output_tokens);
+                const resetText = formatSafeDateTime(m.reset_time);
                 return (
                   <div key={m.id} className="py-1.5 flex flex-wrap items-center justify-between gap-2 text-[11px]">
                     <div className="min-w-0 flex flex-col">
@@ -456,11 +453,11 @@ export default function AiConnections({ data, oauthState, antigravityData, antig
                         <span className="font-mono text-[#787878] truncate">{m.id}</span>
                         {m.available === false && <Badge variant="warning">недоступна</Badge>}
                       </div>
-                      {(inLim || outLim || m.reset_time) && (
+                      {(inLim || outLim || resetText) && (
                         <div className="text-[#787878] flex flex-wrap gap-x-2">
                           {inLim && <span>вход: {inLim}</span>}
                           {outLim && <span>выход: {outLim}</span>}
-                          {m.reset_time && <span>сброс: {new Date(m.reset_time).toLocaleString()}</span>}
+                          {resetText && <span>сброс: {resetText}</span>}
                         </div>
                       )}
                     </div>
@@ -470,7 +467,7 @@ export default function AiConnections({ data, oauthState, antigravityData, antig
                           {pct}% квоты
                         </Badge>
                       ) : (
-                        <span className="text-[#787878]">квота не передана</span>
+                        <span className="text-[#787878]">Квота неизвестна</span>
                       )}
                     </div>
                   </div>
@@ -480,9 +477,9 @@ export default function AiConnections({ data, oauthState, antigravityData, antig
           </div>
         )}
 
-        {antigravityData?.last_success && (
+        {agLastSuccessText && (
           <div className="text-[11px] text-[#929292]">
-            Последняя проверка: {new Date(antigravityData.last_success).toLocaleString()}
+            Последняя проверка: {agLastSuccessText}
           </div>
         )}
       </section>
