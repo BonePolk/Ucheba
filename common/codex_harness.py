@@ -1,7 +1,7 @@
 """Общий Codex harness (openai-codex SDK + изолированный MCP) для всех агентов."""
 import asyncio
 from collections import OrderedDict, deque
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 import inspect
 import json
@@ -22,11 +22,13 @@ from fastapi import HTTPException
 import httpx
 from openai_codex import ApprovalMode, AsyncCodex, CodexConfig, Sandbox
 
+from common.antigravity import DEFAULT_CLOUDCODE_URL, fetch_live_catalog, validate_cloudcode_url
+from common.antigravity_bridge import antigravity_responses_bridge
 from common.browser_client import browser_agent, browser_run_id, browser_task_id
 from common.browser_tools import BROWSER_NAMES
 from common.identity import current_user_id, user_id
 from common.progress import timestamp
-from common.provider import gateway_url, provider_url
+from common.provider import provider_url
 
 HOME = Path('/home/codex')
 WORKER_BIN = '/usr/local/bin/codex-worker'
@@ -122,7 +124,9 @@ def _normalize_provider_base_url(base_url: str) -> str:
 
 def _capability_scope(auth_mode: str, base_url: str = '') -> tuple[str, str]:
     mode = (auth_mode or 'api_key').strip().lower()
-    if mode in ('api_key', 'antigravity_gateway'):
+    if mode == 'antigravity_gateway':
+        mode = 'antigravity'
+    if mode in ('api_key', 'antigravity'):
         return mode, _normalize_provider_base_url(base_url)
     return mode, ''
 
@@ -252,7 +256,15 @@ async def fetch_provider_model_metadata(
 ) -> dict | None:
     owner = user_id()
     mode, scope = _capability_scope(auth_mode, base_url)
-    source_kind = 'antigravity_gateway' if mode == 'antigravity_gateway' else 'api_key'
+    if mode == 'antigravity':
+        try:
+            await asyncio.wait_for(fetch_live_catalog(), timeout=4.0)
+            return _lookup_cached_model(owner, 'antigravity', mode, scope or _normalize_provider_base_url(DEFAULT_CLOUDCODE_URL), model)
+        except Exception as exc:
+            logging.getLogger('uvicorn.error').warning('Antigravity catalog capability probe failed: %s', type(exc).__name__)
+            _cache_put(('probed', owner, 'antigravity', mode, scope or _normalize_provider_base_url(DEFAULT_CLOUDCODE_URL)), 'failed', MODEL_CAP_MISS_TTL)
+            return None
+    source_kind = 'api_key'
     if not scope or (mode == 'api_key' and not api_key):
         return None
     headers = {'Authorization': f'Bearer {api_key}'} if api_key else {}
@@ -319,7 +331,7 @@ async def _probe_codex_models(client, active_model: str, auth_mode: str, base_ur
                 page = await asyncio.wait_for(res, timeout=MODEL_PROBE_TIMEOUT) if inspect.isawaitable(res) else res
                 data = getattr(page, 'data', None)
                 if isinstance(data, (list, tuple)):
-                    cache_provider_models(scope if mode in ('api_key', 'antigravity_gateway') else 'oauth', data, source_kind='codex', auth_mode=mode)
+                    cache_provider_models(scope if mode in ('api_key', 'antigravity') else 'oauth', data, source_kind='codex', auth_mode=mode)
                     if not active_model:
                         default_item = next(
                             (m for m in data if _field(m, 'is_default', 'isDefault') is True),
@@ -348,6 +360,8 @@ async def detect_model_capabilities(
     """Определяет подтверждённое и ручное контекстное окно модели без фиктивных значений."""
     owner = user_id()
     mode, scope = _capability_scope(auth_mode, base_url)
+    if mode == 'antigravity' and not scope:
+        scope = _normalize_provider_base_url(DEFAULT_CLOUDCODE_URL)
     active_model = _safe_str(_field(thread, 'model')) or _safe_str(model)
     cfg = config or {}
     manual_ctx = _safe_int(cfg.get('context_window'), minimum=4096)
@@ -359,11 +373,11 @@ async def detect_model_capabilities(
     codex_probe_state = _fresh_get(('probed', owner, 'codex', mode, scope))
     provider_cap = {}
     provider_probe_state = None
-    if mode in ('api_key', 'antigravity_gateway') and scope:
-        provider_source = 'antigravity_gateway' if mode == 'antigravity_gateway' else 'api_key'
+    if mode in ('api_key', 'antigravity') and scope:
+        provider_source = 'antigravity' if mode == 'antigravity' else 'api_key'
         provider_cap = _lookup_cached_model(owner, provider_source, mode, scope, active_model) or {}
         provider_probe_state = _fresh_get(('probed', owner, provider_source, mode, scope))
-        if not provider_cap and provider_probe_state is None and (api_key or mode == 'antigravity_gateway'):
+        if not provider_cap and provider_probe_state is None and (api_key or mode == 'antigravity'):
             provider_cap = await fetch_provider_model_metadata(scope, api_key, active_model, auth_mode=mode) or {}
             provider_probe_state = _fresh_get(('probed', owner, provider_source, mode, scope))
 
@@ -410,7 +424,7 @@ async def detect_model_capabilities(
     else:
         final_ctx, final_source = None, 'unknown'
 
-    provider_failed = mode in ('api_key', 'antigravity_gateway') and provider_probe_state == 'failed'
+    provider_failed = mode in ('api_key', 'antigravity') and provider_probe_state == 'failed'
     codex_failed = codex_probe_state == 'failed' or (
         mode == 'oauth' and client is None and thread is None and codex_probe_state != 'ok'
     )
@@ -517,7 +531,9 @@ def prepare_codex_user() -> None:
 def normalize_auth(config: dict | None, api_key: str = '', *, default_mode: str = 'api_key', label: str = 'Агент'):
     cfg = config or {}
     auth_mode = (cfg.get('auth_mode') or default_mode).strip()
-    if auth_mode not in ('oauth', 'api_key', 'antigravity_gateway'):
+    if auth_mode == 'antigravity_gateway':
+        auth_mode = 'antigravity'
+    if auth_mode not in ('oauth', 'api_key', 'antigravity'):
         raise HTTPException(422, 'Неизвестный режим авторизации')
     model = (cfg.get('model') or '').strip()
     if auth_mode == 'api_key':
@@ -531,17 +547,14 @@ def normalize_auth(config: dict | None, api_key: str = '', *, default_mode: str 
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
         return 'api_key', key, base_url, model
-    if auth_mode == 'antigravity_gateway':
-        raw_url = (cfg.get('base_url') or '').strip()
-        if not raw_url:
-            raise HTTPException(400, f'Для {label} в режиме Antigravity Gateway укажите адрес шлюза в разделе «Подключения AI»')
+    if auth_mode == 'antigravity':
         if not model:
-            raise HTTPException(400, f'Для {label} в режиме Antigravity Gateway укажите модель в профиле')
+            raise HTTPException(400, f'Для {label} в режиме Google Antigravity укажите модель в профиле')
         try:
-            base_url = gateway_url(raw_url)
+            base_url = validate_cloudcode_url(cfg.get('cloudcode_url') or cfg.get('base_url'))
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
-        return 'antigravity_gateway', (api_key or '').strip(), base_url, model
+        return 'antigravity', '', base_url, model
     return 'oauth', '', '', model
 
 
@@ -572,9 +585,11 @@ def build_codex_config(
     web_search: str = 'disabled',
     cwd: str | Path | None = None,
 ) -> tuple[CodexConfig, str | None]:
+    if auth_mode == 'antigravity_gateway':
+        auth_mode = 'antigravity'
     if auth_mode == 'api_key':
         mode_arg = 'api'
-    elif auth_mode == 'antigravity_gateway':
+    elif auth_mode == 'antigravity':
         mode_arg = 'antigravity' if _worker_supports_antigravity() else 'api'
     else:
         mode_arg = 'oauth'
@@ -603,12 +618,12 @@ def build_codex_config(
         ])
         env = {'UCHEBA_API_KEY': api_key}
         thread_provider = API_PROVIDER_ID
-    elif auth_mode == 'antigravity_gateway':
+    elif auth_mode == 'antigravity':
         token = (api_key or '').strip()
         token_env = 'UCHEBA_ANTIGRAVITY_TOKEN' if mode_arg == 'antigravity' else 'UCHEBA_API_KEY'
         args.extend([
             '-c', f'model_provider={json.dumps(ANTIGRAVITY_PROVIDER_ID)}',
-            '-c', f'model_providers.{ANTIGRAVITY_PROVIDER_ID}.name="Antigravity Gateway"',
+            '-c', f'model_providers.{ANTIGRAVITY_PROVIDER_ID}.name="Google Antigravity"',
             '-c', f'model_providers.{ANTIGRAVITY_PROVIDER_ID}.base_url={json.dumps(base_url)}',
             '-c', f'model_providers.{ANTIGRAVITY_PROVIDER_ID}.wire_api="responses"',
             '-c', f'model_providers.{ANTIGRAVITY_PROVIDER_ID}.requires_openai_auth=false',
@@ -716,34 +731,43 @@ async def open_codex(
     web_search: str = 'disabled',
     cwd: str | Path | None = None,
 ):
+    if auth_mode == 'antigravity_gateway':
+        auth_mode = 'antigravity'
     prepare_codex_user()
-    config, thread_provider = build_codex_config(
-        auth_mode,
-        api_key=api_key,
-        base_url=base_url,
-        allow_shell=allow_shell,
-        web_search=web_search,
-        cwd=cwd,
-    )
-    client = AsyncCodex(config)
-    try:
-        async with asyncio.timeout(TURN_START_TIMEOUT):
-            await client.__aenter__()
-    except TimeoutError:
-        await _close_client(label, client)
-        raise HTTPException(502, f'{label}: не удалось запустить процесс агента') from None
-    try:
-        if auth_mode == 'oauth':
-            try:
-                async with asyncio.timeout(TURN_START_TIMEOUT):
-                    account = await client.account()
-            except TimeoutError:
-                raise HTTPException(502, f'{label}: не удалось проверить OpenAI OAuth') from None
-            if account.account is None:
-                raise HTTPException(400, f'Подключите OpenAI OAuth в профиле для {label}')
-        yield client, thread_provider
-    finally:
-        await _close_client(label, client)
+    async with AsyncExitStack() as stack:
+        eff_key = api_key
+        eff_url = base_url
+        if auth_mode == 'antigravity':
+            eff_url, eff_key = await stack.enter_async_context(
+                antigravity_responses_bridge(label=label, cloudcode_url=base_url)
+            )
+        config, thread_provider = build_codex_config(
+            auth_mode,
+            api_key=eff_key,
+            base_url=eff_url,
+            allow_shell=allow_shell,
+            web_search=web_search,
+            cwd=cwd,
+        )
+        client = AsyncCodex(config)
+        try:
+            async with asyncio.timeout(TURN_START_TIMEOUT):
+                await client.__aenter__()
+        except TimeoutError:
+            await _close_client(label, client)
+            raise HTTPException(502, f'{label}: не удалось запустить процесс агента') from None
+        try:
+            if auth_mode == 'oauth':
+                try:
+                    async with asyncio.timeout(TURN_START_TIMEOUT):
+                        account = await client.account()
+                except TimeoutError:
+                    raise HTTPException(502, f'{label}: не удалось проверить OpenAI OAuth') from None
+                if account.account is None:
+                    raise HTTPException(400, f'Подключите OpenAI OAuth в профиле для {label}')
+            yield client, thread_provider
+        finally:
+            await _close_client(label, client)
 
 
 async def start_codex_thread(client, label: str, *, resume_id: str | None = None, **kwargs):
@@ -842,6 +866,8 @@ class McpToolAdapter:
         args = message['params'].get('arguments', {})
         self.active_calls += 1
         self.active_tools.append(name)
+        if self.progress is not None:
+            self.progress.update(active_tool=name)
         try:
             async with self.lock:
                 if name in UNBOUNDED_TOOLS or name in BROWSER_NAMES:
@@ -873,6 +899,8 @@ class McpToolAdapter:
             self.active_calls -= 1
             if name in self.active_tools:
                 self.active_tools.remove(name)
+            if self.progress is not None:
+                self.progress.update(active_tool=self.active_tools[-1] if self.active_tools else None)
 
 
 @asynccontextmanager
@@ -1021,19 +1049,19 @@ def format_turn_error(label: str, turn_obj) -> str:
     error_obj = getattr(turn_obj, 'error', None)
     kind, status_code = _extract_error_info(error_obj)
     if status_code == 401 or kind == 'unauthorized':
-        return f'{label}: шлюз или OpenAI отклонил авторизацию (401)'
+        return f'{label}: провайдер отклонил авторизацию (HTTP 401)'
     if status_code == 402:
-        return f'{label}: недостаточно средств или исчерпан баланс ключа на шлюзе (HTTP 402)'
+        return f'{label}: недостаточно средств или исчерпан баланс ключа (HTTP 402)'
     if status_code == 403:
-        return f'{label}: шлюз запретил доступ к модели (HTTP 403)'
+        return f'{label}: провайдер запретил доступ к модели или аккаунту (HTTP 403)'
     if status_code == 404 or kind == 'modelNotFound':
-        return f'{label}: шлюз не нашёл модель или Responses API (HTTP 404)'
+        return f'{label}: провайдер не нашёл запрошенную модель или endpoint (HTTP 404)'
     if status_code == 429 or kind == 'usageLimitExceeded':
-        return f'{label}: превышен лимит запросов или квота шлюза (HTTP 429)'
+        return f'{label}: превышен лимит запросов или квота (HTTP 429)'
     if status_code == 503:
-        return f'{label}: модельный шлюз временно недоступен или не готов (HTTP 503)'
+        return f'{label}: AI-сервис временно недоступен (HTTP 503)'
     if kind in ('httpConnectionFailed', 'responseStreamConnectionFailed', 'responseStreamDisconnected'):
-        return f'{label}: ошибка соединения с модельным шлюзом'
+        return f'{label}: ошибка соединения с модельным провайдером'
     if kind == 'contextWindowExceeded':
         return f'{label}: превышен контекст модели'
     return f'{label}: агент не завершил работу'
@@ -1071,6 +1099,12 @@ async def run_codex_turn(
     capability_scope: tuple[str, str, str] | None = None,
 ) -> TurnOutcome:
     progress.begin_response()
+    active_model = _safe_str(_field(thread, 'model')) or (
+        _safe_str(capability_scope[2]) if capability_scope and len(capability_scope) >= 3 else ''
+    )
+    if active_model:
+        progress.update(model=active_model)
+        progress.add(f'Запускает генерацию ({active_model})', current=False)
     turn_kwargs = {}
     if effort is not None:
         turn_kwargs['effort'] = effort
@@ -1158,6 +1192,7 @@ async def run_codex_turn(
                                 if callable(adapter.on_compaction):
                                     adapter.on_compaction()
                         if item_type == 'agentMessage':
+                            progress.update(stream_preview=None)
                             if phase == 'final_answer':
                                 summary_text = item.text
                             elif phase is None:
@@ -1186,6 +1221,9 @@ async def run_codex_turn(
                     else:
                         delta_buffers[data.item_id] = delta_buffers.get(data.item_id, '') + data.delta
                         last_delta_id = data.item_id
+                        buf = delta_buffers[data.item_id].strip()
+                        if buf and not buf.startswith('{'):
+                            progress.update(stream_preview=buf[-320:])
                 elif method == 'item/reasoning/summaryTextDelta':
                     progress.reasoning_delta(data.delta, (data.item_id, data.summary_index))
                 elif method == 'thread/tokenUsage/updated':
@@ -1295,7 +1333,7 @@ async def run_codex_turn(
             await asyncio.gather(watch_task, return_exceptions=True)
         if adapter is not None:
             adapter.turn = None
-        progress.update(model_waiting=False)
+        progress.update(model_waiting=False, stream_preview=None, active_tool=None)
 
     if adapter is not None and adapter.fatal_error is not None:
         raise adapter.fatal_error

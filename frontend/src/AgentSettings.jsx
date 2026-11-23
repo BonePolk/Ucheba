@@ -65,7 +65,8 @@ export default function AgentSettings({
 }) {
   const client = useQueryClient();
   const defaultMode = name === 'arrodes' ? 'oauth' : 'api_key';
-  const savedAuthMode = data.auth_mode || defaultMode;
+  const rawSavedMode = data.auth_mode || defaultMode;
+  const savedAuthMode = rawSavedMode === 'antigravity_gateway' ? 'antigravity' : rawSavedMode;
   const savedModel = data.model ?? (savedAuthMode === 'api_key' ? 'gpt-6-luna' : '');
   const savedContextWindow = data.context_window != null ? String(data.context_window) : '';
 
@@ -187,21 +188,26 @@ export default function AgentSettings({
 
   const oauthAuthorized = Boolean(oauthState?.data?.authorized);
   const apiKeyReady = Boolean(provider?.configured?.api_key);
-  const antigravityConfigured = Boolean(antigravityData?.base_url?.trim());
-  const antigravityStatus = antigravityState?.data;
-  const antigravityReachable = Boolean(antigravityConfigured && antigravityStatus?.reachable);
-  const antigravityChecking = Boolean(antigravityConfigured && antigravityState?.isFetching && !antigravityStatus);
+  const agStatus = antigravityState?.data;
+  const agSessionPresent = Boolean(
+    agStatus?.authorized
+    ?? (antigravityData?.configured?.access_token || antigravityData?.configured?.refresh_token),
+  );
+  const agEmail = agStatus?.account_email || antigravityData?.account_email || '';
+  const agError = agStatus?.error || antigravityData?.last_error || antigravityState?.error?.message || null;
+  const agChecking = Boolean(agSessionPresent && antigravityState?.isFetching && !agStatus);
+  const agReady = Boolean(agSessionPresent && agStatus?.subscription_verified !== false && !agStatus?.token_expired);
   const selectedReady = authMode === 'oauth'
     ? oauthAuthorized
-    : authMode === 'antigravity_gateway'
-      ? antigravityReachable
+    : authMode === 'antigravity'
+      ? agReady
       : apiKeyReady;
   const capQueryKey = [
     'integrations',
     'agent-capabilities',
     name,
     authMode,
-    authMode === 'antigravity_gateway' ? (antigravityData?.base_url || '') : (provider?.base_url || ''),
+    authMode === 'antigravity' ? (antigravityData?.cloudcode_url || '') : (provider?.base_url || ''),
     model.trim(),
     parsedContextWindow ?? 'auto',
     selectedReady,
@@ -230,8 +236,8 @@ export default function AgentSettings({
   const hasUnsavedAuthOrModel = authMode !== savedAuthMode || model.trim() !== savedModel.trim();
   const savedAuthReady = savedAuthMode === 'oauth'
     ? oauthAuthorized
-    : savedAuthMode === 'antigravity_gateway'
-      ? Boolean(antigravityConfigured && savedModel.trim())
+    : savedAuthMode === 'antigravity'
+      ? Boolean(agSessionPresent && savedModel.trim())
       : Boolean(apiKeyReady && savedModel.trim());
   const actionError = save.error || toggle.error || check.error;
 
@@ -286,15 +292,15 @@ export default function AgentSettings({
             </button>
             <button
               type="button"
-              onClick={() => switchAuthMode('antigravity_gateway')}
+              onClick={() => switchAuthMode('antigravity')}
               className={cn(
                 'px-3 py-1.5 text-[12px] font-medium transition-colors cursor-pointer',
-                authMode === 'antigravity_gateway'
+                authMode === 'antigravity'
                   ? 'bg-[#7F49B4]/20 text-[#EAEAEA] border-b-2 border-b-[#7F49B4]'
                   : 'text-[#929292] hover:text-[#EAEAEA] hover:bg-[#161616]',
               )}
             >
-              Antigravity Gateway
+              Google Antigravity
             </button>
           </div>
         </Field>
@@ -303,21 +309,21 @@ export default function AgentSettings({
           <div className="flex flex-wrap items-center gap-2 min-w-0">
             <Badge
               variant={
-                authMode === 'antigravity_gateway'
-                  ? (!antigravityConfigured || antigravityChecking ? 'outline' : antigravityReachable ? 'success' : 'warning')
+                authMode === 'antigravity'
+                  ? (!agSessionPresent || agChecking ? 'outline' : agReady && !agError ? 'success' : 'warning')
                   : (selectedReady ? 'success' : 'warning')
               }
             >
               {authMode === 'oauth'
                 ? (selectedReady ? 'Вход выполнен' : 'Нет входа')
-                : authMode === 'antigravity_gateway'
-                  ? (!antigravityConfigured
-                    ? 'Шлюз не настроен'
-                    : antigravityChecking
-                      ? 'Проверка шлюза…'
-                      : antigravityReachable
-                        ? 'Шлюз доступен'
-                        : 'Шлюз недоступен')
+                : authMode === 'antigravity'
+                  ? (!agSessionPresent
+                    ? 'Не подключён'
+                    : agChecking
+                      ? 'Проверка…'
+                      : agReady && !agError
+                        ? 'Подключён'
+                        : 'Требуется проверка')
                   : (selectedReady ? 'Ключ настроен' : 'Нет ключа')}
             </Badge>
             {authMode === 'api_key' && (
@@ -325,9 +331,9 @@ export default function AgentSettings({
                 {provider?.base_url || 'https://lenec.tech/v1'}
               </span>
             )}
-            {authMode === 'antigravity_gateway' && antigravityConfigured && (
+            {authMode === 'antigravity' && agEmail && (
               <span className="text-[11px] text-[#929292] truncate">
-                {antigravityData.base_url}
+                {agEmail}
               </span>
             )}
           </div>
@@ -337,8 +343,8 @@ export default function AgentSettings({
             </Button>
           )}
         </div>
-        {authMode === 'antigravity_gateway' && antigravityConfigured && !antigravityReachable && (antigravityStatus?.error || antigravityState?.error) && (
-          <Notice tone="warning">{antigravityStatus?.error || antigravityState?.error?.message}</Notice>
+        {authMode === 'antigravity' && agSessionPresent && agError && (
+          <Notice tone="warning">{agError}</Notice>
         )}
       </div>
 
@@ -348,8 +354,8 @@ export default function AgentSettings({
         authMode={authMode}
         providerConfigured={apiKeyReady}
         oauthAuthorized={oauthAuthorized}
-        antigravityConfigured={antigravityConfigured}
-        gatewayUrl={antigravityData?.base_url || ''}
+        antigravityAuthorized={agSessionPresent}
+        gatewayUrl={antigravityData?.cloudcode_url || ''}
         value={model}
         onChange={setModel}
         onModelsLoaded={() => client.invalidateQueries({ queryKey: ['integrations', 'agent-capabilities', name] })}
@@ -563,7 +569,7 @@ export default function AgentSettings({
         <Button
           variant="primary"
           loading={save.isPending}
-          disabled={toggle.isPending || Boolean(contextWindowError) || ((authMode === 'api_key' || authMode === 'antigravity_gateway') && !model.trim())}
+          disabled={toggle.isPending || Boolean(contextWindowError) || ((authMode === 'api_key' || authMode === 'antigravity') && !model.trim())}
           onClick={() => save.mutate()}
         >
           Сохранить

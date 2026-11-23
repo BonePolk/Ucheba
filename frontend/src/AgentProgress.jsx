@@ -426,6 +426,9 @@ export default function AgentProgress({
             <span className="text-[13px] font-medium text-[#EAEAEA] truncate">{displayAgent}</span>
           )}
           <Badge variant={statusBadgeVariant}>{statusLabel}</Badge>
+          {run?.model && (
+            <Badge variant="outline" className="hidden sm:inline-flex max-w-[180px] truncate">{run.model}</Badge>
+          )}
           {hasTokens && (
             <span className="text-[11px] text-[#929292] tabular-nums hidden sm:inline">
               {run.token_usage.input_tokens ?? 0} / {run.token_usage.output_tokens ?? 0} tok
@@ -449,8 +452,8 @@ export default function AgentProgress({
 
       {run?.status === 'running' && (
         <div className="flex flex-col gap-1 border-t border-[#222222] pt-2" key={run.id}>
-          <StageSwap stageKey={run.pending_question ? 'q' : run.browser_waiting ? 'browser-wait' : run.model_waiting ? 'wait' : (run.current_action ?? 'step')}>
-            <div className="flex items-start gap-2 text-[13px]" role="status" aria-live="polite">
+          <StageSwap stageKey={run.pending_question ? 'q' : run.browser_waiting ? 'browser-wait' : run.active_tool ? `tool-${run.active_tool}` : run.model_waiting ? 'wait' : (run.current_action ?? 'step')}>
+            <div className="flex flex-wrap items-center gap-2 text-[13px]" role="status" aria-live="polite">
               {run.pending_question ? (
                 <span className="text-[#D4A24C]">Ждёт ответа</span>
               ) : run.browser_waiting ? (
@@ -464,10 +467,18 @@ export default function AgentProgress({
                   <AgentExplanation text={run.current_action ?? 'Выполняет шаг'} />
                 </span>
               )}
+              {run.active_tool && !run.pending_question && (
+                <Badge variant="accent" className="font-mono text-[10px]">{run.active_tool}</Badge>
+              )}
             </div>
           </StageSwap>
           {run.action_description && !run.model_waiting && !run.pending_question && (
             <div className="text-[12px] text-[#929292]">{run.action_description}</div>
+          )}
+          {run.stream_preview && !run.pending_question && (
+            <div className="text-[11px] text-[#929292] font-mono bg-[#0A0A0A] border border-[#222222] px-2 py-1 line-clamp-3 whitespace-pre-wrap break-words">
+              {run.stream_preview}
+            </div>
           )}
           {run.agent_comment && (
             <div className="text-[12px] text-[#D8C2EE] border-l-2 border-[#7F49B4] pl-2 py-0.5 whitespace-pre-wrap break-words">

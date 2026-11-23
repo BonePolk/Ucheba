@@ -75,29 +75,34 @@ function IntegrationForms({ data, features }) {
     retry: false,
   });
 
-  const antigravityConfigured = Boolean(data.antigravity_gateway?.base_url?.trim());
+  const antigravityConfigured = Boolean(
+    data.antigravity?.configured?.access_token
+    || data.antigravity?.configured?.refresh_token
+    || data.antigravity?.account_email,
+  );
   const antigravityState = useQuery({
     queryKey: [
       'integrations',
-      'antigravity-gateway',
-      data.antigravity_gateway?.base_url || '',
-      Boolean(data.antigravity_gateway?.configured?.gateway_token),
+      'antigravity',
+      Boolean(data.antigravity?.configured?.access_token),
+      Boolean(data.antigravity?.configured?.refresh_token),
+      data.antigravity?.account_email || '',
     ],
-    enabled: anyAgentEnabled && antigravityConfigured,
-    queryFn: () => request('/integrations/antigravity_gateway/status'),
-    refetchInterval: 30000,
+    enabled: anyAgentEnabled,
+    queryFn: () => request(`/integrations/antigravity/status${antigravityConfigured ? '?live=true' : ''}`),
+    refetchInterval: antigravityConfigured ? 60000 : false,
     retry: false,
   });
 
   const aiReady = Boolean(
     oauthState.data?.authorized
     || data.ai_provider?.configured?.api_key
-    || (antigravityConfigured && antigravityState.data?.reachable),
+    || (antigravityState.data?.authorized && antigravityState.data?.subscription_verified !== false),
   );
   const aiError = Boolean(
     data.ai_provider?.last_error
-    || data.antigravity_gateway?.last_error
-    || (antigravityConfigured && antigravityState.data && !antigravityState.data.reachable),
+    || data.antigravity?.last_error
+    || antigravityState.data?.error,
   );
 
   const items = [
@@ -200,7 +205,7 @@ function IntegrationForms({ data, features }) {
                 key="ai_provider"
                 data={data.ai_provider}
                 oauthState={oauthState}
-                antigravityData={data.antigravity_gateway}
+                antigravityData={data.antigravity}
                 antigravityState={antigravityState}
               />
             )}
@@ -213,7 +218,7 @@ function IntegrationForms({ data, features }) {
                 data={data.ameba}
                 provider={data.ai_provider}
                 oauthState={oauthState}
-                antigravityData={data.antigravity_gateway}
+                antigravityData={data.antigravity}
                 antigravityState={antigravityState}
                 onOpenProvider={() => setSelectedId('ai_provider')}
               />
@@ -227,7 +232,7 @@ function IntegrationForms({ data, features }) {
                 data={data.monocle}
                 provider={data.ai_provider}
                 oauthState={oauthState}
-                antigravityData={data.antigravity_gateway}
+                antigravityData={data.antigravity}
                 antigravityState={antigravityState}
                 onOpenProvider={() => setSelectedId('ai_provider')}
               />
@@ -241,7 +246,7 @@ function IntegrationForms({ data, features }) {
                 data={data.straus}
                 provider={data.ai_provider}
                 oauthState={oauthState}
-                antigravityData={data.antigravity_gateway}
+                antigravityData={data.antigravity}
                 antigravityState={antigravityState}
                 onOpenProvider={() => setSelectedId('ai_provider')}
               />
@@ -255,7 +260,7 @@ function IntegrationForms({ data, features }) {
                 data={data.arrodes}
                 provider={data.ai_provider}
                 oauthState={oauthState}
-                antigravityData={data.antigravity_gateway}
+                antigravityData={data.antigravity}
                 antigravityState={antigravityState}
                 onOpenProvider={() => setSelectedId('ai_provider')}
               />

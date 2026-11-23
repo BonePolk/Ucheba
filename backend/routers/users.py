@@ -296,3 +296,38 @@ async def ameba_progress_internal(request: Request):
         )
     finally:
         current_user_id.reset(token)
+
+
+@router.post('/antigravity/session/internal')
+async def antigravity_session_internal(request: Request):
+    from common.rpc import require_service
+    from common.identity import current_user_id
+    from integrations import antigravity
+    token = current_user_id.set(require_service(request, 'context'))
+    try:
+        try:
+            body = await request.json()
+        except ValueError:
+            body = {}
+        force_refresh = bool(isinstance(body, dict) and body.get('force_refresh'))
+        return await antigravity.ensure_valid_session(force_refresh=force_refresh)
+    finally:
+        current_user_id.reset(token)
+
+
+@router.post('/antigravity/project/internal')
+async def antigravity_project_internal(request: Request):
+    from common.rpc import require_service
+    from common.identity import current_user_id
+    from integrations import antigravity
+    token = current_user_id.set(require_service(request, 'context'))
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(422, 'Некорректные параметры проекта Antigravity')
+        return antigravity.save_discovered_project(
+            str(body.get('project_id') or ''),
+            str(body.get('subscription_tier') or ''),
+        )
+    finally:
+        current_user_id.reset(token)

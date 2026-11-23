@@ -17,13 +17,14 @@ import httpx
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from sqlmodel import Session, select
 
-from common.provider import gateway_url, provider_url
+from common.antigravity import validate_cloudcode_url, validate_redirect_uri
+from common.provider import provider_url
 from common.database import get_engine
 from common.rpc import call, internal_token, service_name
 from common.security import require_user
 from common.identity import user_id
 from common.accounts import check_feature, features
-from integrations import ameba, arrodes, telegram, context, jobs, scheduler, straus
+from integrations import ameba, antigravity, arrodes, telegram, context, jobs, scheduler, straus
 from common import extraction as pipeline
 from common.settings import read_config, SECRET_FIELDS, public_settings, read_settings, report, save_settings
 from common.models.integration import ArrodesRun, Suggestion
@@ -74,27 +75,22 @@ async def agent_models(name: Literal['monocle', 'ameba', 'straus', 'arrodes'], r
     config, _ = read_settings(name)
     check_feature(name)
     body = await request.json() if request.method == 'POST' else {}
-    auth_mode = (body.get('auth_mode') or config.get('auth_mode') or ('oauth' if name == 'arrodes' else 'api_key')).strip()
-    if auth_mode not in ('api_key', 'oauth', 'antigravity_gateway'):
+    raw_mode = (body.get('auth_mode') or config.get('auth_mode') or ('oauth' if name == 'arrodes' else 'api_key')).strip()
+    auth_mode = 'antigravity' if raw_mode == 'antigravity_gateway' else raw_mode
+    if auth_mode not in ('api_key', 'oauth', 'antigravity'):
         raise HTTPException(422, 'Неизвестный режим авторизации')
     if auth_mode == 'oauth':
         return await call('arrodes', '/models', method='GET', timeout=45)
-    if auth_mode == 'antigravity_gateway':
-        gw_cfg, gw_secrets = read_settings('antigravity_gateway', apply_feature=False)
-        raw_url = body.get('base_url') if 'base_url' in body else gw_cfg.get('base_url')
-        raw_url = raw_url.strip() if isinstance(raw_url, str) else ''
-        if not raw_url:
-            raise HTTPException(400, 'Укажите адрес Antigravity Gateway в разделе «Подключения AI»')
-        try:
-            endpoint = gateway_url(raw_url)
-        except ValueError as exc:
-            raise HTTPException(422, str(exc)) from None
-        raw_tok = body.get('gateway_token') or gw_secrets.get('gateway_token') or ''
-        token = raw_tok.strip() if isinstance(raw_tok, str) else ''
+    if auth_mode == 'antigravity':
         return await call(
             name,
             '/models',
-            {'auth_mode': 'antigravity_gateway', 'base_url': endpoint, 'gateway_token': token},
+            {
+                'auth_mode': 'antigravity',
+                'detailed': bool(body.get('detailed')),
+                'force_refresh': bool(body.get('force_refresh')),
+                **({'include_internal': bool(body['include_internal'])} if 'include_internal' in body else {}),
+            },
             timeout=45,
         )
     provider_cfg, provider_secrets = read_settings('ai_provider', apply_feature=False)
@@ -133,85 +129,49 @@ async def check_ai_provider(body: dict | None = None):
     return {'ok': True, 'models_count': len(models)}
 
 
-@router.get('/antigravity_gateway/status')
-async def antigravity_gateway_status():
-    check_any_agent_feature()
-    gw_cfg, gw_secrets = read_settings('antigravity_gateway', apply_feature=False)
-    raw_url = (gw_cfg.get('base_url') or '').strip()
-    if not raw_url:
-        return {
-            'configured': False,
-            'reachable': False,
-            'models_count': 0,
-            'health_ok': None,
-            'health_status': None,
-            'error': None,
-            'checked_at': None,
-        }
-    try:
-        endpoint = gateway_url(raw_url)
-    except ValueError as exc:
-        return {
-            'configured': True,
-            'reachable': False,
-            'models_count': 0,
-            'health_ok': None,
-            'health_status': None,
-            'error': str(exc),
-            'checked_at': datetime.now(timezone.utc).isoformat(),
-        }
-    service = _pick_agent_service()
-    token = (gw_secrets.get('gateway_token') or '').strip()
-    try:
-        return await call(
-            service,
-            '/gateway/status',
-            {'base_url': endpoint, 'gateway_token': token, 'strict': False},
-            timeout=15,
-        )
-    except HTTPException as exc:
-        return {
-            'configured': True,
-            'reachable': False,
-            'models_count': 0,
-            'health_ok': None,
-            'health_status': None,
-            'error': str(exc.detail),
-            'checked_at': datetime.now(timezone.utc).isoformat(),
-        }
-    except httpx.HTTPError:
-        return {
-            'configured': True,
-            'reachable': False,
-            'models_count': 0,
-            'health_ok': None,
-            'health_status': None,
-            'error': 'Сервис агента недоступен или превышено время ожидания',
-            'checked_at': datetime.now(timezone.utc).isoformat(),
-        }
+class AntigravityLoginComplete(BaseModel):
+    callback_url_or_code: str = Field(min_length=1, max_length=4000)
+    state: str | None = Field(default=None, max_length=200)
 
 
-@router.post('/antigravity_gateway/check')
-async def check_antigravity_gateway(body: dict | None = None):
+@router.get('/antigravity/status')
+async def antigravity_status(live: bool = False):
     check_any_agent_feature()
-    data = body or {}
-    gw_cfg, gw_secrets = read_settings('antigravity_gateway', apply_feature=False)
-    raw_url = data.get('base_url') if 'base_url' in data else gw_cfg.get('base_url')
-    raw_url = raw_url.strip() if isinstance(raw_url, str) else ''
-    if not raw_url:
-        raise HTTPException(400, 'Укажите адрес Antigravity Gateway в разделе «Подключения AI»')
-    try:
-        endpoint = gateway_url(raw_url)
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from None
-    raw_tok = data.get('gateway_token') or gw_secrets.get('gateway_token') or ''
-    token = raw_tok.strip() if isinstance(raw_tok, str) else ''
+    return await antigravity.status(live=live)
+
+
+@router.post('/antigravity/login/start')
+def antigravity_login_start():
+    check_any_agent_feature()
+    return antigravity.start_login()
+
+
+@router.post('/antigravity/login/complete')
+async def antigravity_login_complete(body: AntigravityLoginComplete):
+    check_any_agent_feature()
+    return await antigravity.complete_login(body.callback_url_or_code, body.state)
+
+
+@router.post('/antigravity/refresh')
+async def antigravity_refresh():
+    check_any_agent_feature()
+    return await antigravity.status(live=True, force_refresh=True)
+
+
+@router.post('/antigravity/logout')
+async def antigravity_logout():
+    check_any_agent_feature()
+    return await antigravity.logout()
+
+
+@router.get('/antigravity/models')
+async def antigravity_models(include_internal: bool | None = None):
+    check_any_agent_feature()
     service = _pick_agent_service()
-    result = await provider_call(
-        'antigravity_gateway',
-        call(service, '/gateway/status', {'base_url': endpoint, 'gateway_token': token, 'strict': True}, timeout=25),
-    )
-    return {'ok': True, **result}
+    payload = {'force_refresh': False}
+    if include_internal is not None:
+        payload['include_internal'] = include_internal
+    return await provider_call('antigravity', call(service, '/antigravity/catalog', payload, timeout=45))
 
 
 def _parse_context_window(value):
@@ -232,7 +192,7 @@ def _parse_context_window(value):
 
 
 class AgentCapabilitiesRequest(BaseModel):
-    auth_mode: Literal['api_key', 'oauth', 'antigravity_gateway'] | None = None
+    auth_mode: Literal['api_key', 'oauth', 'antigravity', 'antigravity_gateway'] | None = None
     model: str | None = Field(default=None, max_length=200)
     context_window: int | None = Field(default=None, ge=4096, le=10_000_000)
 
@@ -258,16 +218,17 @@ async def agent_capabilities(
             effective['model'] = body.model.strip()
         if 'context_window' in body.model_fields_set:
             effective['context_window'] = body.context_window
-    auth_mode = (effective.get('auth_mode') or ('oauth' if name == 'arrodes' else 'api_key')).strip()
+    raw_mode = (effective.get('auth_mode') or ('oauth' if name == 'arrodes' else 'api_key')).strip()
+    auth_mode = 'antigravity' if raw_mode == 'antigravity_gateway' else raw_mode
     effective['auth_mode'] = auth_mode
     api_key = ''
     if auth_mode == 'api_key':
         effective['base_url'] = provider_cfg['base_url']
         api_key = (provider_secrets.get('api_key') or '').strip()
-    elif auth_mode == 'antigravity_gateway':
-        gw_cfg, gw_secrets = read_settings('antigravity_gateway', apply_feature=False)
-        effective['base_url'] = (gw_cfg.get('base_url') or '').strip()
-        api_key = (gw_secrets.get('gateway_token') or '').strip()
+    elif auth_mode == 'antigravity':
+        ag_cfg, _ = read_settings('antigravity', apply_feature=False)
+        effective['base_url'] = (ag_cfg.get('cloudcode_url') or '').strip()
+        effective['cloudcode_url'] = effective['base_url']
     target = 'arrodes' if auth_mode == 'oauth' else name
     try:
         return await call(target, '/capabilities', {'config': effective, 'api_key': api_key}, timeout=10)
@@ -580,18 +541,32 @@ class AiProviderConfig(ProviderConfig):
     pass
 
 
-class AntigravityGatewayConfig(BaseModel):
-    base_url: str = Field(default='', max_length=2000)
+class AntigravityConfig(BaseModel):
+    client_id: str = Field(default='1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com', min_length=1, max_length=300)
+    redirect_uri: str = Field(default='https://antigravity.google/oauth-callback', max_length=500)
+    cloudcode_url: str = Field(default='https://daily-cloudcode-pa.googleapis.com', max_length=2000)
+    project_id: str = Field(default='', max_length=200)
+    user_agent: str = Field(default='', max_length=300)
+    include_internal: bool = False
 
-    @field_validator('base_url')
+    @field_validator('cloudcode_url')
     @classmethod
-    def valid_endpoint(cls, value):
-        cleaned = (value or '').strip()
-        return gateway_url(cleaned) if cleaned else ''
+    def valid_cloudcode_url(cls, value):
+        return validate_cloudcode_url(value)
+
+    @field_validator('redirect_uri')
+    @classmethod
+    def valid_redirect_uri(cls, value):
+        return validate_redirect_uri(value)
+
+    @field_validator('client_id', 'project_id', 'user_agent')
+    @classmethod
+    def strip_text(cls, value):
+        return (value or '').strip()
 
 
 class BaseAgentConfig(BaseModel):
-    auth_mode: Literal['api_key', 'oauth', 'antigravity_gateway'] = 'api_key'
+    auth_mode: Literal['api_key', 'oauth', 'antigravity', 'antigravity_gateway'] = 'api_key'
     model: str = Field(default='gpt-6-luna', max_length=200)
     context_window: int | None = Field(default=None, ge=4096, le=10_000_000)
     reasoning_effort: Literal['low', 'medium', 'high'] = 'medium'
@@ -604,16 +579,18 @@ class BaseAgentConfig(BaseModel):
 
     @model_validator(mode='after')
     def check_api_key_model(self):
+        if self.auth_mode == 'antigravity_gateway':
+            self.auth_mode = 'antigravity'
         self.model = self.model.strip()
         self.custom_instructions = self.custom_instructions.strip()
-        if self.auth_mode in ('api_key', 'antigravity_gateway') and getattr(self, 'enabled', False) and not self.model:
+        if self.auth_mode in ('api_key', 'antigravity') and getattr(self, 'enabled', False) and not self.model:
             raise ValueError('model')
         return self
 
 
 class ArrodesConfig(BaseAgentConfig):
     enabled: bool = False
-    auth_mode: Literal['api_key', 'oauth', 'antigravity_gateway'] = 'oauth'
+    auth_mode: Literal['api_key', 'oauth', 'antigravity', 'antigravity_gateway'] = 'oauth'
     model: str = Field(default='', max_length=200)
     auto_prepare: bool = False
     web_search_mode: Literal['cached', 'live', 'disabled'] = 'cached'
@@ -654,7 +631,7 @@ class StrausConfig(BaseAgentConfig):
 
 CONFIG_MODELS = {
     'ai_provider': AiProviderConfig,
-    'antigravity_gateway': AntigravityGatewayConfig,
+    'antigravity': AntigravityConfig,
     'monocle': ContextConfig,
     'ameba': AmebaConfig,
     'straus': StrausConfig,
@@ -678,16 +655,17 @@ async def settings():
 async def configure(
     name: Literal[
         'telegram', 'arrodes', 'collector', 'notifications',
-        'monocle', 'ameba', 'straus', 'ai_provider', 'antigravity_gateway',
+        'monocle', 'ameba', 'straus', 'ai_provider', 'antigravity',
     ],
     body: dict,
 ):
     name = service_name(name)
-    if name in ('ai_provider', 'antigravity_gateway'):
+    if name in ('ai_provider', 'antigravity'):
         check_any_agent_feature()
     elif body.get('enabled'):
         check_feature(name)
-    allowed = set(CONFIG_MODELS[name].model_fields) | (SECRET_FIELDS[name] - {'session'})
+    patchable_secrets = {'client_secret'} if name == 'antigravity' else (SECRET_FIELDS[name] - {'session'})
+    allowed = set(CONFIG_MODELS[name].model_fields) | patchable_secrets
     if set(body) - allowed:
         raise HTTPException(422, 'Неизвестное поле настроек')
     current, _ = read_settings(name, apply_feature=False)
@@ -705,7 +683,7 @@ async def configure(
         if read_settings(other)[1].get('bot_token') == body['bot_token']:
             raise HTTPException(422, 'Используйте два разных токена BotFather для двух ботов')
     secrets = {key: str(value) if value is not None else '' for key, value in body.items()
-               if key in SECRET_FIELDS[name] and key != 'session' and value != ''}
+               if key in patchable_secrets and value != ''}
     async with settings_lock:
         if name == 'telegram' and secrets:
             _, private = read_settings('telegram')
@@ -713,13 +691,14 @@ async def configure(
                 raise HTTPException(409, 'Отключите Telegram перед сменой реквизитов аккаунта')
             await provider_call('telegram', telegram.close())
         save_settings(name, config=config, secrets=secrets if secrets else None)
-        if name == 'antigravity_gateway' and not config.get('base_url'):
-            report('antigravity_gateway', error=None)
         if name == 'ai_provider' and current.get('base_url') != config.get('base_url'):
             if read_config('monocle').get('auth_mode') == 'api_key':
                 context.invalidate_file_contexts()
-        if name == 'antigravity_gateway' and current.get('base_url') != config.get('base_url'):
-            if read_config('monocle').get('auth_mode') == 'antigravity_gateway':
+        if name == 'antigravity' and (
+            current.get('cloudcode_url') != config.get('cloudcode_url')
+            or current.get('project_id') != config.get('project_id')
+        ):
+            if read_config('monocle').get('auth_mode') == 'antigravity':
                 context.invalidate_file_contexts()
         if name == 'monocle' and (current.get('model') != config.get('model') or current.get('auth_mode') != config.get('auth_mode')):
             context.invalidate_file_contexts()

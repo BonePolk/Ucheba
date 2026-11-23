@@ -5,6 +5,7 @@ from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session
 
+from common.antigravity import DEFAULT_CLOUDCODE_URL, DEFAULT_PUBLIC_CLIENT_ID, DEFAULT_REDIRECT_URI
 from common.database import get_engine
 from common.rpc import service_name
 from common.security import decrypt, encrypt
@@ -15,7 +16,20 @@ DEFAULTS = {
     'collector': {'enabled': False, 'chat_ids': []},
     'telegram': {'enabled': False, 'chat_ids': []},
     'ai_provider': {'base_url': 'https://lenec.tech/v1'},
-    'antigravity_gateway': {'base_url': ''},
+    'antigravity': {
+        'client_id': DEFAULT_PUBLIC_CLIENT_ID,
+        'redirect_uri': DEFAULT_REDIRECT_URI,
+        'cloudcode_url': DEFAULT_CLOUDCODE_URL,
+        'project_id': '',
+        'user_agent': '',
+        'include_internal': False,
+        'account_email': '',
+        'account_name': '',
+        'discovered_project_id': '',
+        'subscription_tier': '',
+        'token_expires_at': None,
+        'scopes': '',
+    },
     'monocle': {
         'enabled': True,
         'auth_mode': 'api_key',
@@ -67,7 +81,7 @@ SECRET_FIELDS = {
     'collector': {'bot_token'},
     'telegram': {'api_id', 'api_hash', 'phone', 'session'},
     'ai_provider': {'api_key'},
-    'antigravity_gateway': {'gateway_token'},
+    'antigravity': {'client_secret', 'access_token', 'refresh_token'},
     'monocle': set(),
     'ameba': set(),
     'straus': set(),
@@ -79,6 +93,11 @@ AGENT_LABELS = {
     'straus': 'Straus',
     'arrodes': 'Arrodes',
 }
+
+
+def normalize_auth_mode(value: str | None, default: str = 'api_key') -> str:
+    mode = (value or default).strip()
+    return 'antigravity' if mode == 'antigravity_gateway' else mode
 
 
 def setting_key(name):
@@ -154,6 +173,8 @@ def read_settings(name, *, apply_feature=True):
         row = session.get(IntegrationSetting, setting_key(name))
         stored = json.loads(row.config) if row else {}
         config = {key: stored.get(key, default) for key, default in DEFAULTS[name].items()}
+        if 'auth_mode' in config:
+            config['auth_mode'] = normalize_auth_mode(config.get('auth_mode'), DEFAULTS[name]['auth_mode'])
         secrets = json.loads(decrypt(row.secrets)) if row and row.secrets else {}
         from common.accounts import features
         enabled = features()
@@ -167,7 +188,13 @@ def save_settings(name, config=None, secrets=None):
     # Общий запрет влияет на запуск, но не меняет личный переключатель.
     current, private = read_settings(name, apply_feature=False)
     current.update(config or {})
-    private.update(secrets or {})
+    if 'auth_mode' in current:
+        current['auth_mode'] = normalize_auth_mode(current.get('auth_mode'), DEFAULTS[name]['auth_mode'])
+    for key, val in (secrets or {}).items():
+        if val is None or val == '':
+            private.pop(key, None)
+        else:
+            private[key] = val
     if name in ('collector', 'notifications') and secrets is not None and 'bot_token' in secrets:
         from common.accounts import claim_bot
         claim_bot(name, private.get('bot_token', ''))
@@ -203,6 +230,8 @@ def public_settings():
             row = session.get(IntegrationSetting, setting_key(name))
             stored = json.loads(row.config) if row else {}
             config = {key: stored.get(key, default) for key, default in DEFAULTS[name].items()}
+            if 'auth_mode' in config:
+                config['auth_mode'] = normalize_auth_mode(config.get('auth_mode'), DEFAULTS[name]['auth_mode'])
             if name in enabled and not enabled[name]:
                 config['enabled'] = False
             secrets = json.loads(decrypt(row.secrets)) if row and row.secrets else {}
@@ -226,6 +255,8 @@ def read_config(name):
         row = session.get(IntegrationSetting, setting_key(name))
         stored = json.loads(row.config) if row else {}
         config = {key: stored.get(key, default) for key, default in DEFAULTS[name].items()}
+        if 'auth_mode' in config:
+            config['auth_mode'] = normalize_auth_mode(config.get('auth_mode'), DEFAULTS[name]['auth_mode'])
         from common.accounts import features
         enabled = features()
         if name in enabled and not enabled[name]:
@@ -240,18 +271,26 @@ def resolve_agent_auth(name, *, require_enabled=False, require_credentials=True)
     provider_cfg, provider_secrets = read_settings('ai_provider', apply_feature=False)
     if require_enabled and not config.get('enabled'):
         raise HTTPException(400, f'Включите {label} в настройках')
-    auth_mode = (config.get('auth_mode') or ('oauth' if name == 'arrodes' else 'api_key')).strip()
-    if auth_mode == 'antigravity_gateway':
-        gw_cfg, gw_secrets = read_settings('antigravity_gateway', apply_feature=False)
-        base_url = (gw_cfg.get('base_url') or '').strip()
-        token = (gw_secrets.get('gateway_token') or '').strip()
-        effective = dict(config, auth_mode=auth_mode, base_url=base_url)
+    default_mode = 'oauth' if name == 'arrodes' else 'api_key'
+    auth_mode = normalize_auth_mode(config.get('auth_mode'), default_mode)
+    if auth_mode == 'antigravity':
+        ag_cfg, ag_secrets = read_settings('antigravity', apply_feature=False)
+        cloudcode_url = (ag_cfg.get('cloudcode_url') or DEFAULT_CLOUDCODE_URL).strip()
+        effective = dict(
+            config,
+            auth_mode='antigravity',
+            base_url=cloudcode_url,
+            cloudcode_url=cloudcode_url,
+            project_id=(ag_cfg.get('project_id') or ag_cfg.get('discovered_project_id') or '').strip(),
+            include_internal=bool(ag_cfg.get('include_internal', False)),
+        )
         if require_credentials:
-            if not base_url:
-                raise HTTPException(400, 'Укажите адрес Antigravity Gateway в разделе «Подключения AI»')
+            has_session = bool((ag_secrets.get('access_token') or '').strip() or (ag_secrets.get('refresh_token') or '').strip())
+            if not has_session:
+                raise HTTPException(400, 'Подключите аккаунт Google Antigravity в разделе «Подключения AI»')
             if not config.get('model', '').strip():
                 raise HTTPException(400, f'Выберите модель для {label} в настройках агента')
-        return effective, token
+        return effective, ''
     effective = dict(config, auth_mode=auth_mode, base_url=provider_cfg['base_url'])
     if auth_mode == 'api_key':
         api_key = (provider_secrets.get('api_key') or '').strip()

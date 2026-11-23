@@ -154,7 +154,7 @@ class Progress:
         self.response_number += 1
         self.reasoning_key = None
         self.update(model_waiting=True, current_action=None, action_description=None, action_started_at=None, current_usage_known=False,
-                    reasoning_text='', response_event_start=self.sequence, last_activity_at=timestamp())
+                    reasoning_text='', stream_preview=None, active_tool=None, response_event_start=self.sequence, last_activity_at=timestamp())
 
     def note(self, arguments):
         text = json.loads(arguments).get('text')
