@@ -1,4 +1,4 @@
-"""Monocle, Straus и Arrodes работают параллельно и делят браузер по очереди, а Ameba ждёт завершения всех агентов."""
+"""Monocle, Straus и Arrodes работают параллельно (до 5 агентов одновременно) и делят браузер по очереди, а Ameba ждёт завершения всех агентов."""
 import asyncio
 from contextlib import asynccontextmanager
 from uuid import uuid4
@@ -9,6 +9,7 @@ from common.identity import user_id
 from common.rpc import call
 
 WORK_PROVIDERS = frozenset({'monocle', 'straus', 'arrodes'})
+MAX_CONCURRENT_AGENTS = 5
 
 condition = asyncio.Condition()
 waiting = []
@@ -86,11 +87,35 @@ async def run_ranking(body, endpoint='/rank'):
             ranking_requests.pop(user_id(), None)
 
 
+def _entry_eligible(item) -> bool:
+    item_owner = item['owner']
+    item_provider = item['provider']
+    if item_owner in ameba_users:
+        return False
+    if item_provider in WORK_PROVIDERS:
+        item_key = _slot_key(item_provider, item['task_id'])
+        same_running = any(
+            active['owner'] == item_owner and _slot_key(active['provider'], active['task_id']) == item_key
+            for active in running
+        )
+        same_waiting = [
+            pending for pending in waiting
+            if pending['owner'] == item_owner and _slot_key(pending['provider'], pending['task_id']) == item_key
+        ]
+        return not same_running and bool(same_waiting) and same_waiting[0] is item
+    if _active_work(item_owner) or _waiting_work(item_owner) or planned.get(item_owner):
+        return False
+    ranking_waiting = [
+        pending for pending in waiting
+        if pending['owner'] == item_owner and pending['provider'] not in WORK_PROVIDERS
+    ]
+    return bool(ranking_waiting) and ranking_waiting[0] is item
+
+
 @asynccontextmanager
 async def slot(provider, task_id=0):
     owner = user_id()
     norm = _normalize_provider(provider, task_id)
-    key = _slot_key(norm, task_id)
     entry = {'owner': owner, 'provider': norm, 'task_id': task_id}
     async with condition:
         waiting.append(entry)
@@ -99,22 +124,11 @@ async def slot(provider, task_id=0):
             await interrupt_ranking()
         async with condition:
             def available():
-                if owner in ameba_users:
+                if len(running) >= MAX_CONCURRENT_AGENTS:
                     return False
-                if norm in WORK_PROVIDERS:
-                    same_running = any(
-                        item['owner'] == owner and _slot_key(item['provider'], item['task_id']) == key
-                        for item in running
-                    )
-                    same_waiting = [
-                        item for item in waiting
-                        if item['owner'] == owner and _slot_key(item['provider'], item['task_id']) == key
-                    ]
-                    return not same_running and bool(same_waiting) and same_waiting[0] is entry
-                if _active_work(owner) or _waiting_work(owner) or planned.get(owner):
+                if not _entry_eligible(entry):
                     return False
-                ranking_waiting = [item for item in waiting if item['owner'] == owner and item['provider'] not in WORK_PROVIDERS]
-                return bool(ranking_waiting) and ranking_waiting[0] is entry
+                return next((pending for pending in waiting if _entry_eligible(pending)), None) is entry
 
             await condition.wait_for(available)
             waiting.remove(entry)
@@ -172,6 +186,7 @@ def queue_state():
         'ameba_running': any(item['provider'] == 'ameba' for item in active),
         'ameba_waiting': any(item['provider'] == 'ameba' for item in pending),
         'busy': bool(active or pending),
+        'max_concurrent': MAX_CONCURRENT_AGENTS,
     }
 
 

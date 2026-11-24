@@ -411,13 +411,18 @@ def cloudcode_headers(access_token: str, user_agent: str = '', *, accept: str = 
     }
 
 
-def _parse_retry_after(headers: httpx.Headers | None) -> float | None:
+def _parse_retry_after(headers: httpx.Headers | dict | None) -> float | None:
     if not headers:
         return None
     raw = headers.get('retry-after')
+    if raw is None and isinstance(headers, dict):
+        for k, v in headers.items():
+            if isinstance(k, str) and k.lower() == 'retry-after':
+                raw = v
+                break
     if not raw:
         return None
-    text = raw.strip()
+    text = str(raw).strip()
     try:
         val = float(text)
         return max(0.0, val)

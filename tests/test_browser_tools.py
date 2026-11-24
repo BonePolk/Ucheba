@@ -240,7 +240,47 @@ class QueueIsolation(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         scheduler.condition = asyncio.Condition()
         scheduler.waiting.clear(); scheduler.running.clear(); scheduler.planned.clear()
-        scheduler.active_users.clear(); scheduler.jeba_users.clear(); scheduler.ranking_requests.clear()
+        scheduler.active_users.clear(); scheduler.ameba_users.clear(); scheduler.ranking_requests.clear()
+
+    async def test_max_concurrent_agents_limit_and_fifo_queue(self):
+        self.assertEqual(scheduler.MAX_CONCURRENT_AGENTS, 5)
+        active_now = 0
+        peak_active = 0
+        finished = 0
+        five_entered = asyncio.Event()
+        release_first_batch = asyncio.Event()
+
+        async def worker(owner, task_id):
+            nonlocal active_now, peak_active, finished
+            token = current_user_id.set(owner)
+            try:
+                async with scheduler.slot('monocle', task_id):
+                    active_now += 1
+                    peak_active = max(peak_active, active_now)
+                    if active_now == 5:
+                        five_entered.set()
+                    await release_first_batch.wait()
+                    active_now -= 1
+                    finished += 1
+            finally:
+                current_user_id.reset(token)
+
+        tasks = [
+            asyncio.create_task(worker(owner=(i // 3) + 1, task_id=100 + i))
+            for i in range(8)
+        ]
+        await asyncio.wait_for(five_entered.wait(), 1)
+        await asyncio.sleep(0.02)
+        self.assertEqual(len(scheduler.running), 5)
+        self.assertEqual(len(scheduler.waiting), 3)
+        self.assertEqual(peak_active, 5)
+
+        release_first_batch.set()
+        await asyncio.wait_for(asyncio.gather(*tasks), 2)
+        self.assertEqual(finished, 8)
+        self.assertEqual(peak_active, 5)
+        self.assertEqual(len(scheduler.running), 0)
+        self.assertEqual(len(scheduler.waiting), 0)
 
     async def test_same_user_serial_other_user_parallel(self):
         release = asyncio.Event(); first = asyncio.Event(); second = asyncio.Event(); other = asyncio.Event()

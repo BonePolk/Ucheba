@@ -63,34 +63,23 @@ def _strip_exact_xml_blocks(text: str, tags: tuple[str, ...]) -> str:
     """Структурно удаляет только заданные корневые XML-секции Codex harness по точным парам тегов."""
     if not text or not tags:
         return text
-    lines = text.splitlines(keepends=True)
-    tag_set = {t.lower() for t in tags}
-    open_re = re.compile(r'^\s*<([a-zA-Z0-9_-]+(?:\s+instructions)?)(?:\s[^>]*)?>\s*$')
-    inline_res = [
-        re.compile(rf'^\s*<{re.escape(t)}(?:\s[^>]*)?>.*</{re.escape(t)}>\s*$', re.I)
-        for t in tags
-    ]
-    out: list[str] = []
-    idx = 0
-    while idx < len(lines):
-        line = lines[idx]
-        if any(rx.match(line) for rx in inline_res):
-            idx += 1
-            continue
-        m = open_re.match(line)
-        if m and m.group(1).lower() in tag_set:
-            expected_close = f'</{m.group(1).lower()}>'
-            close_idx = None
-            for scan in range(idx + 1, len(lines)):
-                if lines[scan].strip().lower() == expected_close:
-                    close_idx = scan
-                    break
-            if close_idx is not None:
-                idx = close_idx + 1
-                continue
-        out.append(line)
-        idx += 1
-    return ''.join(out)
+    out = text
+    for tag in tags:
+        open_pat = re.compile(rf'(?:^|\n)[ \t]*<{re.escape(tag)}(?:\s[^>\n]*)?>', re.I)
+        close_tag = f'</{tag}>'
+        close_pat = re.compile(rf'</{re.escape(tag)}>[ \t]*(?:\n|$)', re.I)
+        while True:
+            m_open = open_pat.search(out)
+            if not m_open:
+                break
+            m_close = close_pat.search(out, m_open.end())
+            if not m_close:
+                break
+            start = m_open.start()
+            # Сохраняем ведущий перенос строки, если удаляемый блок начинается не в 0.
+            prefix = '\n' if start > 0 and out[start] == '\n' else ''
+            out = out[:start] + prefix + out[m_close.end():]
+    return out
 
 
 def _sanitize_system_text(
@@ -434,11 +423,31 @@ class AntigravityBridgeSession:
             if len(items) > 1:
                 items = items[1:]
                 continue
-            # Единственная запись все равно слишком велика: урезаем старейшие элементы её истории.
+            # Единственная запись все равно слишком велика: урезаем старейшие логические шаги,
+            # не оставляя осиротевших function_call_output или фрагментов пары call/response.
             rid, rec = items[0]
             hist = list((rec.get('history') if isinstance(rec, dict) else rec) or [])
             while len(hist) > 1:
-                hist = hist[1:]
+                first = hist.pop(0)
+                if isinstance(first, dict) and first.get('type') in ('function_call', 'custom_tool_call'):
+                    dropped_cid = str(first.get('call_id') or first.get('id') or '').strip()
+                    if dropped_cid:
+                        hist = [
+                            h for h in hist
+                            if not (
+                                isinstance(h, dict)
+                                and h.get('type') in ('function_call_output', 'custom_tool_call_output')
+                                and str(h.get('call_id') or '').strip() == dropped_cid
+                            )
+                        ]
+                while len(hist) > 1 and isinstance(hist[0], dict) and hist[0].get('type') in (
+                    'function_call_output',
+                    'custom_tool_call_output',
+                    'reasoning',
+                ):
+                    hist.pop(0)
+                if not hist:
+                    break
                 clean_hist = [_strip_heavy_blobs(h, max_text_chars=256) for h in hist]
                 used_cids = {
                     str(h.get('call_id') or h.get('id') or '')
@@ -582,11 +591,7 @@ class AntigravityBridgeSession:
             isinstance(t, dict) and t.get('type') == 'namespace' and str(t.get('name') or '').startswith('mcp__ucheba')
             for t in raw_tools
         )
-        has_shell_tool = any(
-            isinstance(t, dict) and str(t.get('name') or '') in ('shell', 'exec_command', 'local_shell', 'apply_patch')
-            for t in raw_tools
-        )
-        strip_codex_harness_tools = has_ucheba_mcp and not has_shell_tool
+        strip_codex_harness_tools = has_ucheba_mcp
 
         def _add_declaration(
             *,
@@ -1706,6 +1711,10 @@ def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, labe
                     yield _sse(ev_name, {'type': ev_name, 'sequence_number': next_seq(), 'response': final_resp})
                 else:
                     yield final_resp
+            except asyncio.CancelledError:
+                if 'gen' in locals():
+                    await gen.aclose()
+                raise
             except AntigravityError as exc:
                 err_code = exc.error_status or str(exc.status_code or 502)
                 bridge_log.warning(
@@ -1757,6 +1766,8 @@ def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, labe
                 if result is None:
                     raise AntigravityError('Модель не вернула ответ', status_code=502, error_status='empty_response')
                 return JSONResponse(status_code=200, content=result)
+            except asyncio.CancelledError:
+                return JSONResponse(status_code=499, content={'error': {'message': 'Запрос отменён', 'type': 'cancelled', 'code': 'request_cancelled'}})
             except AntigravityError as exc:
                 status = exc.status_code or 502
                 return JSONResponse(
@@ -1770,6 +1781,9 @@ def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, labe
             first_bytes = await stream_gen.__anext__()
         except StopAsyncIteration:
             first_bytes = b''
+        except asyncio.CancelledError:
+            await stream_gen.aclose()
+            return JSONResponse(status_code=499, content={'error': {'message': 'Запрос отменён', 'type': 'cancelled', 'code': 'request_cancelled'}})
         except AntigravityError as exc:
             status = exc.status_code or 502
             return JSONResponse(
@@ -1778,10 +1792,13 @@ def create_bridge_app(session: AntigravityBridgeSession, bridge_token: str, labe
             )
 
         async def _sse_bytes():
-            if first_bytes:
-                yield first_bytes
-            async for chunk_bytes in stream_gen:
-                yield chunk_bytes
+            try:
+                if first_bytes:
+                    yield first_bytes
+                async for chunk_bytes in stream_gen:
+                    yield chunk_bytes
+            finally:
+                await stream_gen.aclose()
 
         return StreamingResponse(
             _sse_bytes(),

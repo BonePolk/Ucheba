@@ -11,12 +11,12 @@ import unittest
 from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs, urlsplit
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 import httpx
 from pydantic import BaseModel
 from sqlalchemy import create_engine
-from sqlmodel import Session
+from sqlmodel import SQLModel, Session
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / 'backend')]
@@ -289,23 +289,27 @@ class AntigravityCatalogAndSchemaTests(unittest.TestCase):
                     asyncio.run(antigravity.test_generation_direct('gemini-2.5-flash'))
 
     def test_fetch_live_catalog_discovers_project_and_normalizes(self):
-        with patch('common.antigravity.fetch_backend_session', AsyncMock(return_value={
-            'access_token': 'tok-1',
-            'project_id': '',
-            'subscription_tier': '',
-            'cloudcode_url': antigravity.DEFAULT_CLOUDCODE_URL,
-            'include_internal': False,
-        })), patch('common.antigravity.load_code_assist', AsyncMock(return_value={
-            'project_id': 'projects/auto-proj',
-            'subscription_tier': 'PRO',
-        })), patch('common.antigravity.save_backend_project', AsyncMock()), patch(
-            'common.antigravity.fetch_available_models',
-            AsyncMock(return_value={'models': {'gemini-2.5-flash': {'displayName': 'Gemini 2.5 Flash'}}}),
-        ):
-            cat = asyncio.run(antigravity.fetch_live_catalog())
-            self.assertEqual(cat['project_id'], 'projects/auto-proj')
-            self.assertEqual(cat['subscription_tier'], 'PRO')
-            self.assertEqual(cat['models'][0]['id'], 'gemini-2.5-flash')
+        tok = current_user_id.set(1)
+        try:
+            with patch('common.antigravity.fetch_backend_session', AsyncMock(return_value={
+                'access_token': 'tok-1',
+                'project_id': '',
+                'subscription_tier': '',
+                'cloudcode_url': antigravity.DEFAULT_CLOUDCODE_URL,
+                'include_internal': False,
+            })), patch('common.antigravity.load_code_assist', AsyncMock(return_value={
+                'project_id': 'projects/auto-proj',
+                'subscription_tier': 'PRO',
+            })), patch('common.antigravity.save_backend_project', AsyncMock()), patch(
+                'common.antigravity.fetch_available_models',
+                AsyncMock(return_value={'models': {'gemini-2.5-flash': {'displayName': 'Gemini 2.5 Flash'}}}),
+            ):
+                cat = asyncio.run(antigravity.fetch_live_catalog())
+                self.assertEqual(cat['project_id'], 'projects/auto-proj')
+                self.assertEqual(cat['subscription_tier'], 'PRO')
+                self.assertEqual(cat['models'][0]['id'], 'gemini-2.5-flash')
+        finally:
+            current_user_id.reset(tok)
 
 
 class AntigravityBridgeTests(unittest.TestCase):
@@ -1099,69 +1103,73 @@ class AntigravityStrausRegressionTests(unittest.TestCase):
         self.assertIn('QUOTA_EXHAUSTED', sink.get('message', ''))
 
     def test_run_codex_turn_enriches_codex_429_with_bridge_reason_and_zero_sdk_retries(self):
-        cfg, provider_id = codex_harness.build_codex_config('antigravity', base_url='http://127.0.0.1:9999/v1')
-        self.assertEqual(provider_id, codex_harness.ANTIGRAVITY_PROVIDER_ID)
-        self.assertIn('model_providers.ucheba_antigravity.stream_max_retries=0', cfg.launch_args_override)
+        tok = current_user_id.set(1)
+        try:
+            cfg, provider_id = codex_harness.build_codex_config('antigravity', base_url='http://127.0.0.1:9999/v1')
+            self.assertEqual(provider_id, codex_harness.ANTIGRAVITY_PROVIDER_ID)
+            self.assertIn('model_providers.ucheba_antigravity.stream_max_retries=0', cfg.launch_args_override)
 
-        class _FakeProgress:
-            def __init__(self):
-                self.record = {'events': []}
-            def begin_response(self): pass
-            def update(self, **kw): self.record.update(kw)
-            def add(self, *a, **kw): pass
-            def reasoning_delta(self, *a): pass
-            def summary(self, *a): return ''
+            class _FakeProgress:
+                def __init__(self):
+                    self.record = {'events': []}
+                def begin_response(self): pass
+                def update(self, **kw): self.record.update(kw)
+                def add(self, *a, **kw): pass
+                def reasoning_delta(self, *a): pass
+                def summary(self, *a): return ''
 
-        class _FakeTurn:
-            async def stream(self):
-                yield SimpleNamespace(
-                    method='error',
-                    payload=SimpleNamespace(
-                        will_retry=False,
-                        error={
-                            'message': 'exceeded retry limit, last status: 429 Too Many Requests',
-                            'codex_error_info': {'responseTooManyFailedAttempts': {'httpStatusCode': 429}},
-                        },
-                    ),
-                )
-                yield SimpleNamespace(
-                    method='turn/completed',
-                    payload=SimpleNamespace(
-                        turn=SimpleNamespace(
-                            status='failed',
+            class _FakeTurn:
+                async def stream(self):
+                    yield SimpleNamespace(
+                        method='error',
+                        payload=SimpleNamespace(
+                            will_retry=False,
                             error={
                                 'message': 'exceeded retry limit, last status: 429 Too Many Requests',
                                 'codex_error_info': {'responseTooManyFailedAttempts': {'httpStatusCode': 429}},
                             },
                         ),
-                    ),
+                    )
+                    yield SimpleNamespace(
+                        method='turn/completed',
+                        payload=SimpleNamespace(
+                            turn=SimpleNamespace(
+                                status='failed',
+                                error={
+                                    'message': 'exceeded retry limit, last status: 429 Too Many Requests',
+                                    'codex_error_info': {'responseTooManyFailedAttempts': {'httpStatusCode': 429}},
+                                },
+                            ),
+                        ),
+                    )
+
+            fake_client = SimpleNamespace()
+            sink = {'status_code': 429, 'code': 'QUOTA_EXHAUSTED', 'message': 'Превышен лимит запросов или квота Google Antigravity (HTTP 429, QUOTA_EXHAUSTED): quota reset after 2h'}
+            codex_harness._attach_bridge_error_sink(fake_client, sink)
+
+            class _FakeThread:
+                model = 'gemini-4-neon-xhigh'
+                async def turn(self, *args, **kwargs):
+                    # Имитируем заполнение sink мостом уже во время выполнения хода (после begin_response).
+                    sink.update({'status_code': 429, 'code': 'QUOTA_EXHAUSTED', 'message': 'Превышен лимит запросов или квота Google Antigravity (HTTP 429, QUOTA_EXHAUSTED): quota reset after 2h'})
+                    return _FakeTurn()
+
+            outcome = asyncio.run(
+                codex_harness.run_codex_turn(
+                    _FakeThread(),
+                    'Проверь календарь',
+                    label='Straus',
+                    progress=_FakeProgress(),
+                    client=fake_client,
+                    effort='medium',
                 )
-
-        fake_client = SimpleNamespace()
-        sink = {'status_code': 429, 'code': 'QUOTA_EXHAUSTED', 'message': 'Превышен лимит запросов или квота Google Antigravity (HTTP 429, QUOTA_EXHAUSTED): quota reset after 2h'}
-        codex_harness._attach_bridge_error_sink(fake_client, sink)
-
-        class _FakeThread:
-            model = 'gemini-4-neon-xhigh'
-            async def turn(self, *args, **kwargs):
-                # Имитируем заполнение sink мостом уже во время выполнения хода (после begin_response).
-                sink.update({'status_code': 429, 'code': 'QUOTA_EXHAUSTED', 'message': 'Превышен лимит запросов или квота Google Antigravity (HTTP 429, QUOTA_EXHAUSTED): quota reset after 2h'})
-                return _FakeTurn()
-
-        outcome = asyncio.run(
-            codex_harness.run_codex_turn(
-                _FakeThread(),
-                'Проверь календарь',
-                label='Straus',
-                progress=_FakeProgress(),
-                client=fake_client,
-                effort='medium',
             )
-        )
-        self.assertFalse(outcome.completed)
-        self.assertIn('QUOTA_EXHAUSTED', outcome.error_detail)
-        self.assertIn('quota reset after 2h', outcome.error_detail)
-        self.assertNotIn('exceeded retry limit', outcome.error_detail)
+            self.assertFalse(outcome.completed)
+            self.assertIn('QUOTA_EXHAUSTED', outcome.error_detail)
+            self.assertIn('quota reset after 2h', outcome.error_detail)
+            self.assertNotIn('exceeded retry limit', outcome.error_detail)
+        finally:
+            current_user_id.reset(tok)
 
     def test_bridge_strips_codex_boilerplate_xml_and_unused_harness_tools(self):
         session = antigravity_bridge.AntigravityBridgeSession(owner_id=1)
@@ -1487,7 +1495,7 @@ class AntigravityAdminUserSeparationAndAgentsTests(unittest.TestCase):
         self.db1 = create_engine(f'sqlite:///{self.tmpdir.name}/u1.db')
         self.db2 = create_engine(f'sqlite:///{self.tmpdir.name}/u2.db')
         for eng in (self.db1, self.db2):
-            database.SQLModel.metadata.create_all(eng)
+            SQLModel.metadata.create_all(eng)
         with Session(self.db1) as s:
             s.add(User(id=1, username='admin', password_hash='h1', is_admin=True))
             s.add(User(id=2, username='user2', password_hash='h2', is_admin=False))
@@ -1536,7 +1544,7 @@ class AntigravityAdminUserSeparationAndAgentsTests(unittest.TestCase):
             finally:
                 current_user_id.reset(tok)
 
-        def _fake_owner(request):
+        def _fake_owner(request: Request):
             if not request.state.user.is_admin:
                 raise HTTPException(403, 'Доступ только для администратора')
             return request.state.user
@@ -1689,8 +1697,9 @@ class AntigravityAdminUserSeparationAndAgentsTests(unittest.TestCase):
         tok1 = current_user_id.set(1)
         try:
             async def run_revoked():
-                with patch(
-                    'backend.integrations.antigravity.refresh_oauth_token',
+                with patch.object(
+                    backend_ag,
+                    'refresh_oauth_token',
                     AsyncMock(side_effect=antigravity.AntigravityAuthError('revoked', status_code=400, revoked=True)),
                 ):
                     with self.assertRaises(HTTPException) as exc:
@@ -1718,11 +1727,11 @@ class AntigravityAdminUserSeparationAndAgentsTests(unittest.TestCase):
             s2 = backend_ag.start_login()
             self.assertNotEqual(s1['state'], s2['state'])
 
-            with patch('backend.integrations.antigravity.exchange_oauth_code', AsyncMock(return_value={
+            with patch.object(backend_ag, 'exchange_oauth_code', AsyncMock(return_value={
                 'access_token': 'acc-a1', 'refresh_token': 'ref-a', 'expires_in': 3600,
-            })), patch('backend.integrations.antigravity.fetch_userinfo', AsyncMock(return_value={
+            })), patch.object(backend_ag, 'fetch_userinfo', AsyncMock(return_value={
                 'sub': 'google-sub-a', 'email': 'alice@example.com', 'name': 'Alice', 'email_verified': True,
-            })), patch('backend.integrations.antigravity.call', AsyncMock(return_value={
+            })), patch.object(backend_ag, 'call', AsyncMock(return_value={
                 'project_id': 'proj-a', 'subscription_tier': 'PRO', 'models': [{'id': 'gemini-4-neon-xhigh', 'name': 'Neon'}],
             })):
                 res1 = asyncio.run(backend_ag.complete_login(
@@ -1741,11 +1750,11 @@ class AntigravityAdminUserSeparationAndAgentsTests(unittest.TestCase):
 
             # 2. Повторный вход того же Google-аккаунта и того же client_id БЕЗ refresh_token сохраняет ref-a, но меняет connection_id.
             s3 = backend_ag.start_login()
-            with patch('backend.integrations.antigravity.exchange_oauth_code', AsyncMock(return_value={
+            with patch.object(backend_ag, 'exchange_oauth_code', AsyncMock(return_value={
                 'access_token': 'acc-a2', 'expires_in': 3600,
-            })), patch('backend.integrations.antigravity.fetch_userinfo', AsyncMock(return_value={
+            })), patch.object(backend_ag, 'fetch_userinfo', AsyncMock(return_value={
                 'sub': 'google-sub-a', 'email': 'alice@example.com', 'name': 'Alice', 'email_verified': True,
-            })), patch('backend.integrations.antigravity.call', AsyncMock(return_value={
+            })), patch.object(backend_ag, 'call', AsyncMock(return_value={
                 'project_id': 'proj-a', 'subscription_tier': 'PRO', 'models': [],
             })):
                 res2 = asyncio.run(backend_ag.complete_login(
@@ -1757,7 +1766,7 @@ class AntigravityAdminUserSeparationAndAgentsTests(unittest.TestCase):
             self.assertEqual(sec_a2.get('refresh_token'), 'ref-a')
 
             # 3. Тест генерации привязан к config_version; смена cloudcode_url инвалидирует verified/catalog.
-            with patch('backend.integrations.antigravity.call', AsyncMock(return_value={
+            with patch.object(backend_ag, 'call', AsyncMock(return_value={
                 'ok': True, 'model': 'gemini-4-neon-xhigh', 'project_id': 'proj-a', 'subscription_tier': 'PRO',
             })):
                 ver = asyncio.run(backend_ag.test_generation('gemini-4-neon-xhigh'))
@@ -1773,11 +1782,11 @@ class AntigravityAdminUserSeparationAndAgentsTests(unittest.TestCase):
 
             # 4. Вход ДРУГОГО Google-аккаунта без refresh_token НЕ переносит ref-a и выставляет refresh_warning.
             s4 = backend_ag.start_login()
-            with patch('backend.integrations.antigravity.exchange_oauth_code', AsyncMock(return_value={
+            with patch.object(backend_ag, 'exchange_oauth_code', AsyncMock(return_value={
                 'access_token': 'acc-b1', 'expires_in': 3600,
-            })), patch('backend.integrations.antigravity.fetch_userinfo', AsyncMock(return_value={
+            })), patch.object(backend_ag, 'fetch_userinfo', AsyncMock(return_value={
                 'sub': 'google-sub-b', 'email': 'bob@example.com', 'name': 'Bob', 'email_verified': True,
-            })), patch('backend.integrations.antigravity.call', AsyncMock(return_value={
+            })), patch.object(backend_ag, 'call', AsyncMock(return_value={
                 'project_id': 'proj-b', 'subscription_tier': 'FREE', 'models': [],
             })):
                 res3 = asyncio.run(backend_ag.complete_login(
@@ -1795,7 +1804,7 @@ class AntigravityAdminUserSeparationAndAgentsTests(unittest.TestCase):
             self.assertFalse(mismatch_st['oauth_authorized'])
 
             # 6. Logout сбрасывает connection_id и очищает токены.
-            with patch('backend.integrations.antigravity.revoke_oauth_token', AsyncMock()):
+            with patch.object(backend_ag, 'revoke_oauth_token', AsyncMock()):
                 asyncio.run(backend_ag.logout())
             after_out = asyncio.run(backend_ag.status(live=False))
             self.assertEqual(after_out['connection_id'], '')
