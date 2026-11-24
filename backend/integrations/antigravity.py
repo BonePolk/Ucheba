@@ -391,7 +391,7 @@ def _find_pending(owner: int, callback_input: str, explicit_state: str | None) -
             q = parse_qs(urlsplit(raw).query)
             state = (q.get('state') or [''])[0].strip()
     if not state:
-        raise HTTPException(422, 'В URL обратного вызова отсутствует обязательный параметр OAuth state')
+        raise HTTPException(422, 'Отсутствует параметр OAuth state. Вставьте полный URL перенаправления или начните вход через «Войти через Google».')
     entry = _pending_logins.get((owner, state))
     if not entry:
         raise HTTPException(
@@ -411,11 +411,13 @@ async def complete_login(callback_input: str, state: str | None = None) -> dict:
             409,
             'Администратор изменил настройки Google Antigravity во время входа. Нажмите «Войти через Google» и пройдите вход заново.',
         )
+    has_explicit_state = bool((state or '').strip())
     try:
         code = parse_oauth_callback(
             callback_input,
             expected_state,
             expected_redirect_uri=entry['redirect_uri'],
+            allow_bare_code=has_explicit_state,
         )
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from None

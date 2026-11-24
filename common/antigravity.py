@@ -15,7 +15,7 @@ import re
 import secrets
 import sys
 import time
-from urllib.parse import parse_qs, urlencode, urlsplit
+from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 import uuid
 
 import httpx
@@ -187,35 +187,59 @@ def build_oauth_url(
     return f'{OAUTH_AUTH_URL}?{urlencode(params)}'
 
 
+_BARE_OAUTH_CODE_RE = re.compile(r'^[A-Za-z0-9._/~+-]{8,512}$')
+_BARE_CODE_FORBIDDEN_SUBSTRS = ('://', '?', '&', '#', '=')
+
+
 def parse_oauth_callback(
     value: str,
     expected_state: str,
     *,
     expected_redirect_uri: str = DEFAULT_REDIRECT_URI,
+    allow_bare_code: bool = False,
 ) -> str:
-    """Строго требует полный URL обратного вызова с обязательной проверкой origin, path, state и code."""
+    """Разбирает полный URL перенаправления или (при активном state) голый OAuth-код вида 4/0..."""
     raw = (value or '').strip()
-    if not raw or not raw.startswith(('http://', 'https://')):
-        raise ValueError('Вставьте полный URL перенаправления из браузера, содержащий параметры state и code')
-    parsed = urlsplit(raw)
-    expected = urlsplit(expected_redirect_uri)
-    if (
-        parsed.scheme.lower() != expected.scheme.lower()
-        or parsed.netloc.lower() != expected.netloc.lower()
-        or (parsed.path.rstrip('/') or '/') != (expected.path.rstrip('/') or '/')
-    ):
-        raise ValueError('URL перенаправления не соответствует настроенному redirect_uri')
-    q = parse_qs(parsed.query)
-    got_state = (q.get('state') or [''])[0].strip()
-    if not got_state or not expected_state or not hmac.compare_digest(got_state, expected_state):
-        raise ValueError('Несовпадение или отсутствие OAuth state. Начните вход заново.')
-    if 'error' in q:
-        err_code = re.sub(r'[^a-zA-Z0-9_.-]', '', str(q['error'][0]))[:64] or 'oauth_error'
-        raise ValueError(f'Google OAuth вернул ошибку: {err_code}')
-    code = (q.get('code') or [''])[0].strip()
-    if not code or any(ch.isspace() for ch in code):
-        raise ValueError('В URL перенаправления отсутствует корректный параметр code')
-    return code
+    if raw.startswith(('http://', 'https://')):
+        parsed = urlsplit(raw)
+        expected = urlsplit(expected_redirect_uri)
+        if (
+            parsed.scheme.lower() != expected.scheme.lower()
+            or parsed.netloc.lower() != expected.netloc.lower()
+            or (parsed.path.rstrip('/') or '/') != (expected.path.rstrip('/') or '/')
+        ):
+            raise ValueError('URL перенаправления не соответствует настроенному redirect_uri')
+        q = parse_qs(parsed.query)
+        got_state = (q.get('state') or [''])[0].strip()
+        if not got_state or not expected_state or not hmac.compare_digest(got_state, expected_state):
+            raise ValueError('Несовпадение или отсутствие OAuth state. Начните вход заново.')
+        if 'error' in q:
+            err_code = re.sub(r'[^a-zA-Z0-9_.-]', '', str(q['error'][0]))[:64] or 'oauth_error'
+            raise ValueError(f'Google OAuth вернул ошибку: {err_code}')
+        code = (q.get('code') or [''])[0].strip()
+        if not code or any(ch.isspace() for ch in code):
+            raise ValueError('В URL перенаправления отсутствует корректный параметр code')
+        return code
+
+    if allow_bare_code:
+        if not (expected_state or '').strip():
+            raise ValueError('Несовпадение или отсутствие OAuth state. Начните вход заново.')
+        if (
+            raw
+            and not any(ch.isspace() for ch in raw)
+            and not any(sep in raw for sep in _BARE_CODE_FORBIDDEN_SUBSTRS)
+        ):
+            candidate = unquote(raw) if '%' in raw else raw
+            if (
+                candidate
+                and not any(ch.isspace() for ch in candidate)
+                and not any(sep in candidate for sep in _BARE_CODE_FORBIDDEN_SUBSTRS)
+                and _BARE_OAUTH_CODE_RE.fullmatch(candidate)
+            ):
+                return candidate
+        raise ValueError('Вставьте полный URL перенаправления из браузера или код авторизации Google (вида 4/0...)')
+
+    raise ValueError('Вставьте полный URL перенаправления из браузера, содержащий параметры state и code')
 
 
 def safe_oauth_error(status_code: int, payload, *, is_refresh: bool = False) -> tuple[str, str, bool]:

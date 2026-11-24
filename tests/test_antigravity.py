@@ -118,7 +118,7 @@ class AntigravityOAuthAndUrlHardeningTests(unittest.TestCase):
         )
         self.assertEqual(code, 'auth-code-1')
 
-        # Голый код авторизации без полного URL и state строго отклоняется.
+        # По умолчанию (allow_bare_code=False) голый код и битые URL строго отклоняются.
         for bad in (
             '4/0AbUR2WN-bare-code-without-url',
             'https://antigravity.google/oauth-callback?code=missing-state',
@@ -129,6 +129,30 @@ class AntigravityOAuthAndUrlHardeningTests(unittest.TestCase):
         ):
             with self.assertRaises(ValueError):
                 antigravity.parse_oauth_callback(bad, state)
+
+        # При явной активной сессии (allow_bare_code=True) принимается голый код (включая URL-кодированный).
+        self.assertEqual(
+            antigravity.parse_oauth_callback('4/0SyntheticAuthCode_ABC-123', state, allow_bare_code=True),
+            '4/0SyntheticAuthCode_ABC-123',
+        )
+        self.assertEqual(
+            antigravity.parse_oauth_callback('4%2F0SyntheticAuthCode_ABC-123', state, allow_bare_code=True),
+            '4/0SyntheticAuthCode_ABC-123',
+        )
+        # Но и с allow_bare_code=True отклоняются битые URL, пробелы, query-строки, короткие строки и пустой state.
+        for bad_bare in (
+            'https://evil.example/oauth-callback?state=' + state + '&code=auth-code-1',
+            'https://antigravity.google/other-path?state=' + state + '&code=auth-code-1',
+            'https://antigravity.google/oauth-callback?state=wrong&code=auth-code-1',
+            f'https://antigravity.google/oauth-callback?state={state}&error=access_denied',
+            '4/0Synthetic with space',
+            'code=4/0SyntheticAuthCode_ABC-123',
+            'short',
+        ):
+            with self.assertRaises(ValueError):
+                antigravity.parse_oauth_callback(bad_bare, state, allow_bare_code=True)
+        with self.assertRaises(ValueError):
+            antigravity.parse_oauth_callback('4/0SyntheticAuthCode_ABC-123', '', allow_bare_code=True)
 
     def test_cloudcode_url_allowlist_and_redirect_rejection(self):
         self.assertEqual(
@@ -1796,6 +1820,23 @@ class AntigravityAdminUserSeparationAndAgentsTests(unittest.TestCase):
             self.assertTrue(bool(res3.get('refresh_warning')))
             _, sec_b1 = read_settings('antigravity', apply_feature=False)
             self.assertEqual(sec_b1.get('refresh_token', ''), '')
+
+            # 4a. Голый код авторизации без state отклоняется (422), а с state активной PKCE-сессии принимается.
+            s_bare = backend_ag.start_login()
+            expected_verifier = backend_ag._pending_logins[(1, s_bare['state'])]['verifier']
+            with self.assertRaises(HTTPException) as bare_ctx:
+                asyncio.run(backend_ag.complete_login('4/0SyntheticBareCode_9876543210', state=None))
+            self.assertEqual(bare_ctx.exception.status_code, 422)
+            exchange_bare = AsyncMock(return_value={'access_token': 'acc-bare', 'expires_in': 3600})
+            with patch.object(backend_ag, 'exchange_oauth_code', exchange_bare), \
+                 patch.object(backend_ag, 'fetch_userinfo', AsyncMock(return_value={
+                     'sub': 'google-sub-b', 'email': 'bob@example.com', 'name': 'Bob', 'email_verified': True,
+                 })), patch.object(backend_ag, 'call', AsyncMock(return_value={
+                     'project_id': 'proj-b', 'subscription_tier': 'FREE', 'models': [],
+                 })):
+                asyncio.run(backend_ag.complete_login('4/0SyntheticBareCode_9876543210', state=s_bare['state']))
+            self.assertEqual(exchange_bare.call_args.kwargs['code'], '4/0SyntheticBareCode_9876543210')
+            self.assertEqual(exchange_bare.call_args.kwargs['code_verifier'], expected_verifier)
 
             # 5. Смена client_id админом помечает сессию oauth_client_mismatch без удаления токенов.
             backend_ag.save_global_config({'client_id': 'cid-v2.apps.googleusercontent.com'})

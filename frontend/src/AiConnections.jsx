@@ -374,7 +374,7 @@ export default function AiConnections({ data, oauthState, antigravityData, antig
           <Notice tone="accent" title="Завершите вход через Google">
             <div className="flex flex-col gap-2 mt-1">
               <div className="text-[11px] text-[#DCDCDC]">
-                Откройте страницу авторизации Google, подтвердите доступ и вставьте <strong>полный URL перенаправления</strong> из адресной строки браузера, содержащий параметры <span className="font-mono">state</span> и <span className="font-mono">code</span>.
+                Откройте страницу авторизации Google, подтвердите доступ и вставьте <strong>полный URL перенаправления</strong> из адресной строки браузера или <strong>код авторизации</strong> (вида <span className="font-mono">4/0...</span>).
               </div>
               <a
                 href={agPending.auth_url}
@@ -384,9 +384,9 @@ export default function AiConnections({ data, oauthState, antigravityData, antig
               >
                 Открыть страницу Google OAuth <ExternalLink className="h-3 w-3" />
               </a>
-              <Field label="Полный URL перенаправления">
+              <Field label="Полный URL перенаправления или код авторизации">
                 <Input
-                  placeholder="https://antigravity.google/oauth-callback?state=...&code=..."
+                  placeholder="https://antigravity.google/oauth-callback?state=...&code=... или 4/0..."
                   value={agCallbackInput}
                   onChange={(event) => setAgCallbackInput(event.currentTarget.value)}
                 />
